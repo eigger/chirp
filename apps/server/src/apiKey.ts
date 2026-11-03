@@ -1,8 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { API_KEY_PREFIX } from "@chirp/shared";
 import type { Config } from "./config.js";
+import { writeFileAtomic } from "./secureFile.js";
 
 export function generateApiKey(): string {
   return `${API_KEY_PREFIX}${randomBytes(32).toString("base64url")}`;
@@ -16,34 +16,16 @@ export function isApiKeyPlaintext(value: string): boolean {
   return value.startsWith(API_KEY_PREFIX) && value.length > API_KEY_PREFIX.length + 16;
 }
 
-/**
- * Write atomically (temp file + rename) so a running server never observes a
- * truncated/half-written key file during `key rotate`.
- */
-function writeKeyFile(file: string, key: string): void {
-  const dir = dirname(file);
-  mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, `.${basename(file)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
-  try {
-    writeFileSync(tmp, `${key}\n`, { mode: 0o600, flag: "wx" });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, file);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
-  }
-}
-
 function readKeyFile(file: string): string | null {
   if (!existsSync(file)) return null;
   const key = readFileSync(file, "utf8").trim();
   return key || null;
 }
 
-/** Rotate: write a brand-new key to the key file and return it. */
+/** Rotate: write a brand-new key to the key file (atomic, 0600) and return it. */
 export function rotateApiKey(config: Pick<Config, "apiKeyFile">): string {
   const key = generateApiKey();
-  writeKeyFile(config.apiKeyFile, key);
+  writeFileAtomic(config.apiKeyFile, `${key}\n`);
   return key;
 }
 
@@ -56,16 +38,25 @@ export function resolveApiKey(config: Pick<Config, "apiKey" | "apiKeyFile">): {
   if (config.apiKey) return { key: config.apiKey, created: false, source: "env" };
   const existing = readKeyFile(config.apiKeyFile);
   if (existing) return { key: existing, created: false, source: "file" };
-  const key = generateApiKey();
-  writeKeyFile(config.apiKeyFile, key);
+  const key = rotateApiKey(config);
   return { key, created: true, source: "file" };
 }
 
+/** The key comes from CHIRP_API_KEY: it cannot be regenerated from the dashboard. */
+export class EnvKeyError extends Error {
+  constructor() {
+    super("The API key is set by CHIRP_API_KEY and cannot be regenerated here");
+  }
+}
+
 /**
- * Holds the SHA-256 of the current key. When the key comes from a file it is
- * reloaded whenever the file changes, so `cli.js key rotate` needs no restart.
+ * The server's single API key (what Home Assistant uses): CHIRP_API_KEY, or
+ * `<dataDir>/api-key` (0600, created on the first start). When it comes from
+ * the file it is reloaded whenever the file changes, so `cli.js key rotate`
+ * and a dashboard regeneration take effect on the very next request.
  */
 export class ApiKeyStore {
+  private key: string;
   private hash: Buffer;
   private stamp = "";
 
@@ -73,6 +64,7 @@ export class ApiKeyStore {
     key: string,
     private readonly file: string | null,
   ) {
+    this.key = key;
     this.hash = hashApiKey(key);
     this.stamp = this.statStamp();
   }
@@ -88,6 +80,10 @@ export class ApiKeyStore {
       created: resolved.created,
       key: resolved.key,
     };
+  }
+
+  get source(): "env" | "file" {
+    return this.file ? "file" : "env";
   }
 
   /** inode + size + mtime: a rename-based rotation always changes the inode. */
@@ -108,11 +104,26 @@ export class ApiKeyStore {
     try {
       const key = readKeyFile(this.file);
       if (!key) return; // missing/empty: keep the previous key and retry on the next request
+      this.key = key;
       this.hash = hashApiKey(key);
       this.stamp = stamp;
     } catch {
       /* keep the previous key; retry on the next request */
     }
+  }
+
+  /** The current key in plain text (for the signed-in admin only). */
+  current(): { key: string; source: "env" | "file" } {
+    this.refresh();
+    return { key: this.key, source: this.source };
+  }
+
+  /** Replace the file key; the old key stops working immediately. */
+  regenerate(): string {
+    if (!this.file) throw new EnvKeyError();
+    rotateApiKey({ apiKeyFile: this.file });
+    this.refresh();
+    return this.key;
   }
 
   verify(candidate: string): boolean {

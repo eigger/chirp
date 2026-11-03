@@ -39,16 +39,78 @@ describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
 
 describe("new API key log line", () => {
   const key = "chp_" + "x".repeat(43);
-  it("names the key file and the CLI but not the key", () => {
+  it("names the key file, the dashboard and the CLI but not the key", () => {
     const msg = newKeyLogMessage({ apiKeyFile: "/var/lib/chirp/api-key", printKey: false }, key);
     expect(msg).not.toContain(key);
     expect(msg).toContain("/var/lib/chirp/api-key");
+    expect(msg).toContain("Settings -> API key");
     expect(msg).toMatch(/cli\.js key show/);
     expect(msg).toContain("CHIRP_PRINT_KEY=true");
   });
   it("prints the key only with CHIRP_PRINT_KEY=true", () => {
     expect(loadConfig({ CHIRP_PRINT_KEY: "true" }).printKey).toBe(true);
     expect(newKeyLogMessage({ apiKeyFile: "/k", printKey: true }, key)).toContain(key);
+  });
+});
+
+describe("CHIRP_ADMIN_* / CHIRP_COOKIE_SECURE", () => {
+  it("seeds only when both are set and valid", () => {
+    expect(loadConfig({}).adminUser).toBeNull();
+    const c = loadConfig({ CHIRP_ADMIN_USER: " admin ", CHIRP_ADMIN_PASSWORD: " long enough pw " });
+    expect(c.adminUser).toBe("admin");
+    expect(c.adminPassword).toBe(" long enough pw ");
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin" })).toThrowError(/set together/);
+    expect(() => loadConfig({ CHIRP_ADMIN_PASSWORD: "0123456789" })).toThrowError(/set together/);
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin", CHIRP_ADMIN_PASSWORD: "short" })).toThrowError(/10-256 characters/);
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "bad user", CHIRP_ADMIN_PASSWORD: "0123456789" })).toThrowError(ConfigError);
+  });
+  it("CHIRP_TRUST_PROXY: false, true, a hop count or a proxy list", () => {
+    expect(loadConfig({}).trustProxy).toBe(false);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "false" }).trustProxy).toBe(false);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "true" }).trustProxy).toBe(true);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "1" }).trustProxy).toBe(1);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "2" }).trustProxy).toBe(2);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "10.0.0.1, 192.168.0.0/16, fd00::/8" }).trustProxy).toEqual([
+      "10.0.0.1",
+      "192.168.0.0/16",
+      "fd00::/8",
+    ]);
+    for (const bad of ["maybe", "11", "proxy.local", "10.0.0.1,nope", "::::", "10.0.0.0/99", "999.1.1.1", "fd00::/129", "10.0.0.1/", "1.2.3"]) {
+      expect(() => loadConfig({ CHIRP_TRUST_PROXY: bad }), bad).toThrowError(ConfigError);
+      expect(() => loadConfig({ CHIRP_TRUST_PROXY: bad }), bad).toThrowError(/CHIRP_TRUST_PROXY/);
+    }
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "0.0.0.0/0,::/0,10.0.0.0/32,fd00::/128" }).trustProxy).toHaveLength(4);
+  });
+  it("a valid proxy list never crashes buildApp later", async () => {
+    const { buildApp } = await import("../src/app.js");
+    const { createAuth } = await import("../src/auth.js");
+    const { ApiKeyStore } = await import("../src/apiKey.js");
+    const { Collector } = await import("../src/scheduler.js");
+    const config = { ...loadConfig({ CHIRP_TRUST_PROXY: "10.0.0.0/8, fd00::/8, 192.168.1.1" }), webDir: "/nonexistent" };
+    const collector = new Collector(
+      { readSensors: () => ({ cpu: { packageTemp: null, maxTemp: null, highTemp: null, critTemp: null, cores: [], source: null }, sensors: [] }), readCpuModel: () => null, discoverDevices: async () => [], readDisk: async () => { throw new Error("x"); }, now: () => new Date() },
+      { instanceId: "x", version: "0", displayName: "x", sensorIntervalSec: 10, smartIntervalSec: 300 },
+    );
+    const app = await buildApp({ config, collector, auth: createAuth({ dataDir: "/nonexistent-chirp" }, new ApiKeyStore("chp_x".padEnd(30, "x"), null)) });
+    expect((await app.inject("/health")).statusCode).toBe(200);
+    await app.close();
+  });
+  it("CHIRP_LOGIN_DAILY_BUDGET: default 1000, 10..1000000", () => {
+    expect(loadConfig({}).loginDailyBudget).toBe(1000);
+    expect(loadConfig({ CHIRP_LOGIN_DAILY_BUDGET: "50" }).loginDailyBudget).toBe(50);
+    for (const bad of ["5", "abc", "1.5", "-1", "2000000"]) {
+      expect(() => loadConfig({ CHIRP_LOGIN_DAILY_BUDGET: bad }), bad).toThrowError(/CHIRP_LOGIN_DAILY_BUDGET/);
+    }
+  });
+  it("CHIRP_ADMIN_PASSWORD must not be a common password", () => {
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin", CHIRP_ADMIN_PASSWORD: "password123" })).toThrowError(/too common/);
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin", CHIRP_ADMIN_PASSWORD: "admin2026!!" })).toThrowError(/too common/);
+  });
+  it("cookie Secure flag: auto by default, explicit true/false", () => {
+    expect(loadConfig({}).cookieSecure).toBe("auto");
+    expect(loadConfig({ CHIRP_COOKIE_SECURE: "true" }).cookieSecure).toBe(true);
+    expect(loadConfig({ CHIRP_COOKIE_SECURE: "off" }).cookieSecure).toBe(false);
+    expect(() => loadConfig({ CHIRP_COOKIE_SECURE: "maybe" })).toThrowError(/CHIRP_COOKIE_SECURE/);
   });
 });
 

@@ -1,16 +1,61 @@
-import { createContext, useContext } from "react";
+import { createContext, useCallback, useContext } from "react";
 
 export type Lang = "en" | "ko";
 
 /** English is the base dictionary and the fallback for missing translations. */
 const en = {
   "app.title": "chirp",
-  "gate.title": "Enter API key",
-  "gate.desc": "Enter the chirp server API key (chp_...). It is kept for this tab only.",
-  "gate.label": "API key",
-  "gate.submit": "Connect",
-  "gate.invalid": "The API key is invalid.",
-  "gate.checking": "Checking…",
+  "login.title": "Sign in",
+  "login.desc": "Sign in with the chirp admin account.",
+  "login.username": "Username",
+  "login.password": "Password",
+  "login.submit": "Sign in",
+  "login.busy": "Signing in…",
+  "login.invalid": "Wrong username or password.",
+  "login.expired": "Your session has ended. Please sign in again.",
+  "login.forgot": "Forgot the password? Reset it on the server (prints a new password):",
+  "login.forgotProxmox": "Proxmox (on the host):",
+  "login.forgotDocker": "Docker:",
+  "bootstrap.title": "Create the admin account",
+  "bootstrap.desc": "This chirp server has no admin account yet. Choose a username and password now: whoever completes this form first becomes the admin.",
+  "bootstrap.submit": "Create admin account",
+  "bootstrap.badUsername": "The username may only contain letters, digits, '.', '_', '@' and '-' (1-64 characters, no spaces).",
+  "bootstrap.taken": "An admin account already exists. Please sign in.",
+  "key.title": "API key",
+  "key.desc": "Home Assistant (hass-chirp) and other clients read chirp's data with this key.",
+  "key.show": "Show",
+  "key.hide": "Hide",
+  "key.copy": "Copy",
+  "key.copied": "Copied to the clipboard.",
+  "key.copyFailed": "Could not copy. Select the key and copy it manually.",
+  "key.haHint": "Paste this key into Home Assistant: Settings → Devices & services → Add integration → chirp, with host {host} and port {port}.",
+  "key.regenerate": "Regenerate",
+  "key.regenerateConfirm": "Create a new API key? The current key stops working immediately, so Home Assistant must be updated with the new one.",
+  "key.regenerateYes": "Regenerate key",
+  "key.cancel": "Cancel",
+  "key.regenerated": "New key created. The previous key no longer works.",
+  "key.envReadOnly": "This key is set by CHIRP_API_KEY on the server, so it cannot be regenerated here. Change or remove CHIRP_API_KEY instead.",
+  "key.loadFailed": "Failed to load the API key.",
+  "pw.new": "New password (at least {n} characters)",
+  "pw.confirm": "Repeat new password",
+  "password.new": "Password (at least {n} characters)",
+  "password.confirm": "Repeat password",
+  "password.mismatch": "The passwords do not match.",
+  "password.tooLong": "The password must be at most {n} characters long.",
+  "password.common": "This password is too common or easy to guess (a well-known password, a keyboard pattern, repeated characters or your username). Choose another one; a few unrelated words work well.",
+  "password.weak": "The password must be at least {n} characters long.",
+  "nav.dashboard": "Dashboard",
+  "nav.settings": "Settings",
+  "nav.logout": "Log out",
+  "logout.failed": "Could not log out. Your session may still be active. Click Log out to try again.",
+  "pw.title": "Change password",
+  "pw.current": "Current password",
+  "pw.submit": "Change password",
+  "pw.busy": "Saving…",
+  "pw.done": "Password changed. All other sessions were signed out.",
+  "pw.wrongCurrent": "The current password is wrong.",
+  "common.rateLimited": "Too many attempts. Try again in {n}s.",
+  "common.failed": "The request failed.",
   "summary.host": "Host",
   "summary.kernel": "Kernel",
   "summary.uptime": "Uptime",
@@ -79,7 +124,6 @@ const en = {
   "common.loading": "Loading…",
   "common.error": "Failed to load data.",
   "common.retry": "Retry",
-  "common.logout": "Change key",
   "common.lang": "한국어",
   "common.autoRefresh": "Auto-refresh every 30s",
   "scope.container": "container view",
@@ -125,12 +169,57 @@ export type MessageKey = keyof typeof en;
 /** Korean translation (user-facing resource; keep keys identical to `en`). */
 const ko: Record<MessageKey, string> = {
   "app.title": "chirp",
-  "gate.title": "API 키 입력",
-  "gate.desc": "chirp 서버의 API 키(chp_...)를 입력하세요. 이 탭에서만 저장됩니다.",
-  "gate.label": "API 키",
-  "gate.submit": "연결",
-  "gate.invalid": "API 키가 올바르지 않습니다.",
-  "gate.checking": "확인 중…",
+  "login.title": "로그인",
+  "login.desc": "chirp 관리자 계정으로 로그인하세요.",
+  "login.username": "사용자명",
+  "login.password": "비밀번호",
+  "login.submit": "로그인",
+  "login.busy": "로그인 중…",
+  "login.invalid": "사용자명 또는 비밀번호가 올바르지 않습니다.",
+  "login.expired": "세션이 만료되었습니다. 다시 로그인하세요.",
+  "login.forgot": "비밀번호를 잊었나요? 서버에서 재설정하세요(새 비밀번호가 출력됩니다):",
+  "login.forgotProxmox": "Proxmox (호스트에서):",
+  "login.forgotDocker": "Docker:",
+  "bootstrap.title": "관리자 계정 만들기",
+  "bootstrap.desc": "이 chirp 서버에는 아직 관리자 계정이 없습니다. 지금 사용자명과 비밀번호를 정하세요. 이 양식을 먼저 완료한 사람이 관리자가 됩니다.",
+  "bootstrap.submit": "관리자 계정 만들기",
+  "bootstrap.badUsername": "사용자명에는 영문자, 숫자, '.', '_', '@', '-'만 쓸 수 있습니다(1~64자, 공백 없음).",
+  "bootstrap.taken": "이미 관리자 계정이 있습니다. 로그인하세요.",
+  "key.title": "API 키",
+  "key.desc": "Home Assistant(hass-chirp) 등 클라이언트는 이 키로 chirp 데이터를 읽습니다.",
+  "key.show": "보기",
+  "key.hide": "숨기기",
+  "key.copy": "복사",
+  "key.copied": "클립보드에 복사했습니다.",
+  "key.copyFailed": "복사하지 못했습니다. 키를 선택해 직접 복사하세요.",
+  "key.haHint": "이 키를 Home Assistant에 붙여 넣으세요: 설정 → 기기 및 서비스 → 통합 추가 → chirp, 호스트 {host}, 포트 {port}.",
+  "key.regenerate": "재발급",
+  "key.regenerateConfirm": "새 API 키를 만들까요? 현재 키는 즉시 쓸 수 없게 되므로 Home Assistant에도 새 키를 넣어야 합니다.",
+  "key.regenerateYes": "키 재발급",
+  "key.cancel": "취소",
+  "key.regenerated": "새 키를 만들었습니다. 이전 키는 더 이상 동작하지 않습니다.",
+  "key.envReadOnly": "이 키는 서버의 CHIRP_API_KEY로 설정되어 여기서 재발급할 수 없습니다. CHIRP_API_KEY를 바꾸거나 제거하세요.",
+  "key.loadFailed": "API 키를 불러오지 못했습니다.",
+  "pw.new": "새 비밀번호 ({n}자 이상)",
+  "pw.confirm": "새 비밀번호 확인",
+  "password.new": "비밀번호 ({n}자 이상)",
+  "password.confirm": "비밀번호 확인",
+  "password.mismatch": "비밀번호가 일치하지 않습니다.",
+  "password.tooLong": "비밀번호는 {n}자 이하여야 합니다.",
+  "password.common": "너무 흔하거나 추측하기 쉬운 비밀번호입니다(잘 알려진 비밀번호, 키보드 패턴, 반복 문자, 사용자명 등). 다른 비밀번호를 정하세요. 서로 관계없는 단어 몇 개를 이어 쓰면 좋습니다.",
+  "password.weak": "비밀번호는 {n}자 이상이어야 합니다.",
+  "nav.dashboard": "대시보드",
+  "nav.settings": "설정",
+  "nav.logout": "로그아웃",
+  "logout.failed": "로그아웃하지 못했습니다. 세션이 아직 활성 상태일 수 있습니다. 로그아웃을 눌러 다시 시도하세요.",
+  "pw.title": "비밀번호 변경",
+  "pw.current": "현재 비밀번호",
+  "pw.submit": "비밀번호 변경",
+  "pw.busy": "저장 중…",
+  "pw.done": "비밀번호를 변경했습니다. 다른 세션은 모두 로그아웃되었습니다.",
+  "pw.wrongCurrent": "현재 비밀번호가 올바르지 않습니다.",
+  "common.rateLimited": "시도가 너무 많습니다. {n}초 후 다시 시도하세요.",
+  "common.failed": "요청에 실패했습니다.",
   "summary.host": "호스트",
   "summary.kernel": "커널",
   "summary.uptime": "업타임",
@@ -199,7 +288,6 @@ const ko: Record<MessageKey, string> = {
   "common.loading": "불러오는 중…",
   "common.error": "데이터를 불러오지 못했습니다.",
   "common.retry": "다시 시도",
-  "common.logout": "키 변경",
   "common.lang": "English",
   "common.autoRefresh": "30초마다 자동 갱신",
   "scope.container": "컨테이너 관점",
@@ -242,7 +330,6 @@ const ko: Record<MessageKey, string> = {
 
 export const messages: Record<Lang, Record<MessageKey, string>> = { en, ko };
 
-
 export function detectLang(): Lang {
   try {
     const saved = localStorage.getItem("chirp.lang");
@@ -257,13 +344,14 @@ export function detectLang(): Lang {
 
 export function translate(lang: Lang, key: MessageKey, vars?: Record<string, string | number>): string {
   let s: string = messages[lang][key] ?? messages.en[key] ?? key;
-  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, String(v));
+  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v));
   return s;
 }
 
 export const LangContext = createContext<Lang>("en");
 
+/** Stable per language, so it is safe in hook dependency lists. */
 export function useT() {
   const lang = useContext(LangContext);
-  return (key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars);
+  return useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
 }

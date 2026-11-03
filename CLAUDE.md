@@ -33,6 +33,7 @@ scripts/          release packaging; scripts/ci = CI checks
 - History points are `[epochMs, value]`.
 - Pure JavaScript dependencies only (the release tarball must run without native builds).
 - Every response must pass the `@chirp/shared` schema; tests check this with `parse`. Error bodies are `{"error": <code>}` (`ErrorResponse`).
+- **Auth rules.** Data routes (`/status`, `/disks`, `/history`, `/refresh`) take the Bearer API key *or* the session cookie; everything under `/auth/me`, `/auth/password`, `/admin/*` is session-only and answers `403` to any `Authorization` header. Every non-GET request that is not Bearer-authenticated needs `X-Chirp-Csrf: 1`. Mark routes with `config: { auth: "public" | "data" | "session" }` (`auth.ts`); the default is `data`. Never log a password, session token or API key (the key only with `CHIRP_PRINT_KEY=true`). Credential files (`admin.json`, `api-key`) are 0600 and written atomically (`secureFile.ts`); the admin is created exclusively and only while none exists. Password + confirmation are checked by the shared zod schemas (`password_mismatch`) and again in the dashboard.
 - English everywhere (code, comments, logs, scripts, docs). Korean lives only in `README.ko.md`, `docs/ko/` and the dashboard's `ko` dictionary in `apps/web/src/i18n.ts`.
 
 ## Commands
@@ -45,6 +46,8 @@ npm test -w @chirp/server
 npm run lint -w @chirp/server
 bash scripts/ci/check-proxmox.sh          # shell scripts: syntax, shellcheck, passthrough + update.sh tests
 node apps/server/dist/cli.js key show|rotate
+node apps/server/dist/cli.js admin reset-password|show-user
+SMOKE_PORT=18090 bash scripts/ci/smoke-release.sh .   # after npm run build: real server, bootstrap/login/key flow
 ```
 
 ## Commits

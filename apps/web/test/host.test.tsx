@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { vi } from "vitest";
@@ -19,13 +19,13 @@ const fixture = (name: string) =>
 
 function serve(status: unknown) {
   const fn = vi.fn(async (url: string) => {
+    if (url === "/api/v1/auth/me") return new Response(JSON.stringify({ username: "admin" }), { status: 200 });
     if (url.startsWith("/api/v1/status")) return new Response(JSON.stringify(status), { status: 200 });
     if (url.startsWith("/api/v1/history"))
       return new Response(JSON.stringify({ metric: "x", points: [[1, 10], [2, 20], [3, 15]] }), { status: 200 });
     return new Response("{}", { status: 404 });
   });
   vi.stubGlobal("fetch", fn);
-  sessionStorage.setItem("chirp.apiKey", "chp_good");
   return fn;
 }
 
@@ -118,25 +118,26 @@ describe("review fixes", () => {
     const full = fixture("status.sample.json");
     let status: Record<string, unknown> = full;
     const fn = vi.fn(async (url: string) => {
+      if (url === "/api/v1/auth/me") return new Response(JSON.stringify({ username: "admin" }), { status: 200 });
       if (url.startsWith("/api/v1/status")) return new Response(JSON.stringify(status), { status: 200 });
       return new Response(JSON.stringify({ metric: "x", points: [[1, 10], [2, 20], [3, 15]] }), { status: 200 });
     });
     vi.stubGlobal("fetch", fn);
-    sessionStorage.setItem("chirp.apiKey", "chp_good");
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       render(<App />);
       await screen.findByRole("region", { name: "load" });
       expect(await screen.findByText("CPU usage, last 24 hours")).toBeInTheDocument();
       status = { ...full, load: null };
-      await vi.advanceTimersByTimeAsync(30_000);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
       await waitFor(() => expect(screen.queryByRole("region", { name: "load" })).toBeNull());
       // load returns: no stale sparkline from before until a fresh history arrives
       fn.mockImplementation(async (url: string) => {
+        if (url === "/api/v1/auth/me") return new Response(JSON.stringify({ username: "admin" }), { status: 200 });
         if (url.startsWith("/api/v1/status")) return new Response(JSON.stringify(full), { status: 200 });
         return new Promise<Response>(() => {}); // history still loading
       });
-      await vi.advanceTimersByTimeAsync(30_000);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
       await screen.findByRole("region", { name: "load" });
       expect(screen.queryByText("CPU usage, last 24 hours")).toBeNull();
     } finally {

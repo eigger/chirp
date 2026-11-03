@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type { StatusSnapshot } from "@chirp/shared";
-import { ApiError, clearKey, fetchHistory, fetchStatus, getKey, setKey } from "./api";
+import { ApiError, fetchBootstrapStatus, fetchHistory, fetchMe, fetchStatus, logout } from "./api";
 import { detectLang, LangContext, translate, type Lang } from "./i18n";
-import { KeyGate } from "./components/KeyGate";
+import { BootstrapForm, LoginForm } from "./components/AuthForms";
+import { Settings } from "./components/Settings";
 import { Summary } from "./components/Summary";
 import { CpuCard } from "./components/CpuCard";
 import { DiskTable } from "./components/DiskTable";
@@ -10,52 +11,111 @@ import { LoadCard, MemoryCard, NetworkTable, PowerCard } from "./components/Host
 
 const POLL_MS = 30_000;
 
-export function App() {
-  const [lang, setLang] = useState<Lang>(detectLang);
-  const [apiKey, setApiKey] = useState<string | null>(getKey);
-  const [invalid, setInvalid] = useState(false);
+/** checking -> bootstrap (no admin yet) | login | signed in. */
+type AuthState =
+  | { kind: "checking" }
+  | { kind: "bootstrap" }
+  | { kind: "login"; notice?: "expired" | "taken" }
+  | { kind: "in"; username: string };
+
+type View = "dashboard" | "settings";
+
+function Dashboard({ lang, onUnauthorized }: { lang: Lang; onUnauthorized: () => void }) {
+  const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
   const [data, setData] = useState<StatusSnapshot | null>(null);
   const [history, setHistory] = useState<[number, number][]>([]);
   const [cpuUsageHistory, setCpuUsageHistory] = useState<[number, number][]>([]);
   const [failed, setFailed] = useState(false);
 
-  const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
-
   const load = useCallback(async () => {
-    if (!apiKey) return;
     try {
-      const s = await fetchStatus(apiKey);
+      const s = await fetchStatus();
       setData(s);
       setFailed(false);
-      setInvalid(false);
-      fetchHistory(apiKey, "cpu.packageTemp")
+      fetchHistory("cpu.packageTemp")
         .then((h) => setHistory(h.points))
         .catch(() => setHistory([]));
       if (s.load) {
-        fetchHistory(apiKey, "load.cpuUsagePercent")
+        fetchHistory("load.cpuUsagePercent")
           .then((h) => setCpuUsageHistory(h.points))
           .catch(() => setCpuUsageHistory([]));
       } else {
         setCpuUsageHistory([]);
       }
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) {
-        clearKey();
-        setApiKey(null);
-        setData(null);
-        setInvalid(true);
-      } else {
-        setFailed(true);
-      }
+      if (e instanceof ApiError && e.status === 401) onUnauthorized();
+      else setFailed(true);
     }
-  }, [apiKey]);
+  }, [onUnauthorized]);
 
   useEffect(() => {
-    if (!apiKey) return;
     void load();
     const id = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(id);
-  }, [apiKey, load]);
+  }, [load]);
+
+  if (!data) {
+    return failed ? (
+      <div className="card">
+        <p className="error">{t("common.error")}</p>
+        <button type="button" onClick={() => void load()}>
+          {t("common.retry")}
+        </button>
+      </div>
+    ) : (
+      <p className="muted">{t("common.loading")}</p>
+    );
+  }
+  return (
+    <>
+      {failed && <p className="error">{t("common.error")}</p>}
+      <Summary data={data} lang={lang} onRefreshed={() => void load()} onUnauthorized={onUnauthorized} />
+      <CpuCard cpu={data.cpu} history={history} />
+      {(data.memory || data.load) && (
+        <div className="host-grid">
+          {data.memory && <MemoryCard memory={data.memory} />}
+          {data.load && <LoadCard load={data.load} history={cpuUsageHistory} />}
+        </div>
+      )}
+      {data.network && <NetworkTable network={data.network} />}
+      {(data.power || (data.fans?.length ?? 0) > 0 || (data.voltages?.length ?? 0) > 0) && (
+        <PowerCard power={data.power ?? null} fans={data.fans ?? []} voltages={data.voltages ?? []} />
+      )}
+      <DiskTable disks={data.disks} lang={lang} />
+      <p className="muted small">{t("common.autoRefresh")}</p>
+    </>
+  );
+}
+
+export function App() {
+  const [lang, setLang] = useState<Lang>(detectLang);
+  const [auth, setAuth] = useState<AuthState>({ kind: "checking" });
+  const [view, setView] = useState<View>("dashboard");
+  const [signingOut, setSigningOut] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
+
+  const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
+
+  /** Ask the server who we are; without a session decide between first-run registration and login. */
+  const check = useCallback(async (expired = false) => {
+    try {
+      const me = await fetchMe();
+      setAuth({ kind: "in", username: me.username });
+      return;
+    } catch {
+      /* not signed in */
+    }
+    try {
+      const s = await fetchBootstrapStatus();
+      setAuth(s.needsBootstrap ? { kind: "bootstrap" } : { kind: "login", notice: expired ? "expired" : undefined });
+    } catch {
+      setAuth({ kind: "login", notice: expired ? "expired" : undefined });
+    }
+  }, []);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
 
   useEffect(() => {
     document.documentElement.lang = lang;
@@ -66,68 +126,75 @@ export function App() {
     }
   }, [lang]);
 
-  const unauthorized = () => {
-    clearKey();
-    setApiKey(null);
-    setData(null);
-    setInvalid(true);
+  const signedIn = (username: string) => {
+    setLogoutFailed(false);
+    setView("dashboard");
+    setAuth({ kind: "in", username });
+  };
+
+  // A 401 anywhere means the session ended (expired, password changed elsewhere, server restarted).
+  const unauthorized = useCallback(() => void check(true), [check]);
+
+  const signOut = async () => {
+    setSigningOut(true);
+    setLogoutFailed(false);
+    try {
+      await logout();
+      setAuth({ kind: "login" });
+    } catch {
+      setLogoutFailed(true);
+    } finally {
+      setSigningOut(false);
+    }
   };
 
   return (
     <LangContext.Provider value={lang}>
       <header className="topbar">
         <strong className="brand">🐤 {t("app.title")}</strong>
-        <div className="topbar-right">
-          {apiKey && (
-            <button type="button" className="link" onClick={unauthorized}>
-              {t("common.logout")}
-            </button>
+        <nav className="topbar-right">
+          {auth.kind === "in" && (
+            <>
+              <button
+                type="button"
+                className="link"
+                aria-current={view === "dashboard" ? "page" : undefined}
+                onClick={() => setView("dashboard")}
+              >
+                {t("nav.dashboard")}
+              </button>
+              <button
+                type="button"
+                className="link"
+                aria-current={view === "settings" ? "page" : undefined}
+                onClick={() => setView("settings")}
+              >
+                {t("nav.settings")}
+              </button>
+              <span className="muted user">{auth.username}</span>
+              <button type="button" className="link" disabled={signingOut} onClick={() => void signOut()}>
+                {t("nav.logout")}
+              </button>
+            </>
           )}
           <button type="button" className="link" onClick={() => setLang(lang === "ko" ? "en" : "ko")}>
             {t("common.lang")}
           </button>
-        </div>
+        </nav>
       </header>
       <main className="container">
-        {!apiKey ? (
-          <KeyGate
-            invalid={invalid}
-            onSubmit={(k) => {
-              setKey(k);
-              setInvalid(false);
-              setApiKey(k);
-            }}
-          />
-        ) : !data ? (
-          failed ? (
-            <div className="card">
-              <p className="error">{t("common.error")}</p>
-              <button type="button" onClick={() => void load()}>
-                {t("common.retry")}
-              </button>
-            </div>
-          ) : (
-            <p className="muted">{t("common.loading")}</p>
-          )
-        ) : (
-          <>
-            {failed && <p className="error">{t("common.error")}</p>}
-            <Summary data={data} apiKey={apiKey} lang={lang} onRefreshed={() => void load()} onUnauthorized={unauthorized} />
-            <CpuCard cpu={data.cpu} history={history} />
-            {(data.memory || data.load) && (
-              <div className="host-grid">
-                {data.memory && <MemoryCard memory={data.memory} />}
-                {data.load && <LoadCard load={data.load} history={cpuUsageHistory} />}
-              </div>
-            )}
-            {data.network && <NetworkTable network={data.network} />}
-            {(data.power || (data.fans?.length ?? 0) > 0 || (data.voltages?.length ?? 0) > 0) && (
-              <PowerCard power={data.power ?? null} fans={data.fans ?? []} voltages={data.voltages ?? []} />
-            )}
-            <DiskTable disks={data.disks} lang={lang} />
-            <p className="muted small">{t("common.autoRefresh")}</p>
-          </>
+        {auth.kind === "in" && logoutFailed && <p role="alert" className="error">{t("logout.failed")}</p>}
+        {auth.kind === "checking" && <p className="muted">{t("common.loading")}</p>}
+        {auth.kind === "bootstrap" && (
+          <BootstrapForm onDone={signedIn} onTaken={() => setAuth({ kind: "login", notice: "taken" })} />
         )}
+        {auth.kind === "login" && <LoginForm notice={auth.notice} onLoggedIn={signedIn} />}
+        {auth.kind === "in" &&
+          (view === "settings" ? (
+            <Settings onUnauthorized={unauthorized} />
+          ) : (
+            <Dashboard lang={lang} onUnauthorized={unauthorized} />
+          ))}
       </main>
     </LangContext.Provider>
   );

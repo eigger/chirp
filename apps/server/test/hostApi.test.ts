@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { HistoryResponse, NotFoundResponse, StatusSnapshot } from "@chirp/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { ApiKeyStore, generateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
+import { createAuth } from "../src/auth.js";
 import { loadConfig } from "../src/config.js";
 import type { HostSample } from "../src/hostMetrics.js";
 import { Collector, type CollectorDeps } from "../src/scheduler.js";
@@ -81,8 +84,13 @@ afterEach(async () => {
 });
 
 async function appFor(c: Collector) {
-  const app = await buildApp({ config: { ...loadConfig({}), webDir: "/nonexistent" }, collector: c, keys: new ApiKeyStore(KEY, null) });
-  close = () => app.close();
+  const dataDir = mkdtempSync(join(tmpdir(), "chirp-host-api-"));
+  const config = { ...loadConfig({}), webDir: "/nonexistent", dataDir };
+  const app = await buildApp({ config, collector: c, auth: createAuth(config, new ApiKeyStore(KEY, null)) });
+  close = async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  };
   return app;
 }
 

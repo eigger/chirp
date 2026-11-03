@@ -440,6 +440,44 @@ chirp_wait_network() {
   return 1
 }
 
+# Whether the server still needs its first admin account: true | false | unknown.
+# $1 IP. Asks the public GET /api/v1/bootstrap/status (older releases: unknown).
+chirp_bootstrap_state() {
+  local body
+  body="$(curl -fsS --max-time 5 "http://${1}/api/v1/bootstrap/status" 2>/dev/null)" || { echo unknown; return 0; }
+  if [[ "$body" == *'"needsBootstrap":true'* ]]; then echo true
+  elif [[ "$body" == *'"needsBootstrap":false'* ]]; then echo false
+  else echo unknown
+  fi
+}
+
+# Final instructions: create the admin account, then copy the API key into Home Assistant.
+# $1 CTID, $2 IP. No credential is printed: the key lives in the dashboard (Settings -> API key).
+chirp_account_report() {
+  local ctid="$1" ip="$2" cli=/opt/chirp/current/apps/server/dist/cli.js
+  echo "=============================================="
+  echo " Dashboard : http://${ip}/"
+  echo
+  case "$(chirp_bootstrap_state "$ip")" in
+    true)
+      echo " >>> Open http://${ip}/ now and create the admin account."
+      echo "     Until an admin exists, anyone who can reach this address can create it."
+      ;;
+    false)
+      echo " Sign in with your admin account."
+      echo " Forgot the password? pct exec ${ctid} -- node ${cli} admin reset-password"
+      ;;
+    *)
+      echo " Open http://${ip}/ and create the admin account (or sign in if it exists)."
+      ;;
+  esac
+  echo
+  echo " Home Assistant:"
+  echo "   1. In the dashboard: Settings -> API key -> Copy"
+  echo "   2. HACS custom repository eigger/hass-chirp, integration domain chirp"
+  echo "   3. Host ${ip} / port 80 / the API key you copied"
+}
+
 # Smoke test + final summary. $1 CTID, $2 IP, $3 selected TSV (not stdin).
 chirp_smoke_and_report() {
   local ctid="$1" ip="$2" tsv="$3" byid out rc status ok=0 total=0
@@ -471,19 +509,9 @@ chirp_smoke_and_report() {
     sleep 2
   done
   echo "GET http://${ip}/health : ${health}"
+  echo
 
-  local key
-  key="$(pct exec "$ctid" -- node /opt/chirp/current/apps/server/dist/cli.js key show 2>/dev/null \
-    || pct exec "$ctid" -- cat /var/lib/chirp/api-key 2>/dev/null || echo '(lookup failed; run: pct exec '"$ctid"' -- node /opt/chirp/current/apps/server/dist/cli.js key show)')"
-  echo
-  echo "=============================================="
-  echo " Dashboard : http://${ip}/"
-  echo " API key   : ${key}"
-  echo
-  echo " Home Assistant:"
-  echo "   HACS custom repository : eigger/hass-chirp"
-  echo "   Integration domain     : chirp"
-  echo "   Host ${ip} / port 80 / API key (above)"
+  chirp_account_report "$ctid" "$ip"
   echo
   echo " After adding/replacing disks (or to add the host metric mounts to an"
   echo " older install), re-run on the host:"

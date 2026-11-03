@@ -301,6 +301,23 @@ printf 'corrupt\n' >"$TMP/adopt.conf.chirp-majors"
 cp "$TMP/adopt.conf" "$TMP/adopt.orig"
 chirp_apply_conf "$TMP/adopt.conf" "$TMP/gone.block" 2>/dev/null; eq "invalid ownership state -> rc 1" "1" "$?"
 eq "invalid state: config untouched" "$(cat "$TMP/adopt.orig")" "$(cat "$TMP/adopt.conf")"
+echo "[10] final report: create the admin first, no credential printed"
+FAKE_BOOTSTRAP=""
+curl() { [[ -n "$FAKE_BOOTSTRAP" ]] || return 22; printf '%s' "$FAKE_BOOTSTRAP"; }
+FAKE_BOOTSTRAP='{"needsBootstrap":true}'
+eq "state: needs bootstrap" "true" "$(chirp_bootstrap_state 10.0.0.5)"
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "tells to create the admin now" "1" "$(grep -c 'Open http://10.0.0.5/ now and create the admin account' <<<"$REPORT")"
+eq "warns about the open window" "1" "$(grep -c 'anyone who can reach this address' <<<"$REPORT")"
+eq "points HA at Settings -> API key" "1" "$(grep -c 'Settings -> API key -> Copy' <<<"$REPORT")"
+eq "prints no key" "0" "$(grep -c 'chp_' <<<"$REPORT")"
+FAKE_BOOTSTRAP='{"needsBootstrap":false}'
+eq "state: admin exists" "false" "$(chirp_bootstrap_state 10.0.0.5)"
+eq "admin exists -> sign in + reset hint" "1" "$(chirp_account_report 100 10.0.0.5 | grep -c 'pct exec 100 -- node .*admin reset-password')"
+FAKE_BOOTSTRAP=""
+eq "old release / unreachable -> unknown" "unknown" "$(chirp_bootstrap_state 10.0.0.5)"
+eq "unknown -> generic instruction" "1" "$(chirp_account_report 100 10.0.0.5 | grep -c 'create the admin account (or sign in')"
+unset -f curl
 
 echo
 echo "passed=${PASS} failed=${FAILS}"

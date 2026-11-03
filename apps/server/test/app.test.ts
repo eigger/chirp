@@ -16,10 +16,11 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ApiKeyStore, generateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
+import { createAuth } from "../src/auth.js";
 import { loadConfig } from "../src/config.js";
 import { Collector, type CollectorDeps } from "../src/scheduler.js";
 import { parseSmartctl } from "../src/smartctl.js";
-import { fixture } from "./helpers.js";
+import { FAST_SCRYPT, fixture } from "./helpers.js";
 
 const KEY = generateApiKey();
 const auth = { authorization: `Bearer ${KEY}` };
@@ -54,7 +55,7 @@ beforeEach(async () => {
   app = await buildApp({
     config: { ...loadConfig({}), webDir: tmp },
     collector,
-    keys: new ApiKeyStore(KEY, null),
+    auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
     now: () => clock,
   });
 });
@@ -179,7 +180,7 @@ describe("static dashboard", () => {
     const bare = await buildApp({
       config: { ...loadConfig({}), webDir: join(tmp, "missing") },
       collector,
-      keys: new ApiKeyStore(KEY, null),
+      auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
     });
     const root = await bare.inject("/");
     expect(root.statusCode).toBe(404);

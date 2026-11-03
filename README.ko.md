@@ -24,7 +24,7 @@
 - **단일 건강 판정**(`ok` / `warning` / `failing` / `unknown`) + 기계가 읽을 수 있는 사유. 판정은 서버 한 곳에서만 수행
 - **안정적인 디스크 ID**(WWN, 없으면 모델+시리얼) — `/dev/sdX`는 쓰지 않음. 디스크를 깨우지 않고 도출하며 재시작 후에도 고정
 - **24시간 히스토리** — 온도, 메모리, CPU 사용률, 부하, 네트워크 처리량, 패키지 전력(1분 해상도, 메모리)와 같은 프로세스가 서빙하는 웹 대시보드
-- **Bearer API 키 인증 REST API**, DB 없음, 순수 JavaScript(네이티브 의존성 없음)
+- 대시보드 **관리자 로그인**(첫 접속 시 생성)과 Home Assistant용 **API 키 1개**(설정 화면에서 확인·재발급), DB 없음, 순수 JavaScript(네이티브 의존성 없음)
 - **Home Assistant 연동** — [`hass-chirp`](https://github.com/eigger/hass-chirp) (통합 도메인 `chirp`)
 
 ## 설치
@@ -37,7 +37,7 @@ Proxmox 호스트 셸에서 실행:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-LXC 컨테이너를 만들고 최신 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL과 API 키를 출력합니다.
+LXC 컨테이너를 만들고 최신 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL을 출력합니다. **그 주소를 바로 열어 관리자 계정을 만드세요**([처음 실행](#처음-실행) 참고).
 
 **LXC 안에서 호스트 값 읽기.** 컨테이너 안의 `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`는 lxcfs 때문에 컨테이너 한도가 보일 수 있고, 네트워크도 컨테이너의 `eth0`만 보입니다. 그래서 passthrough 단계가 호스트의 `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`, `/sys`를 컨테이너의 `/host/...`에 읽기 전용으로 bind mount합니다(기존 설치는 `chirp-passthrough.sh`를 다시 실행하면 추가됨. 재실행 시 디스크 선택은 기존 선택을 대체하므로 유지할 디스크를 모두 고르거나 같은 `CHIRP_DISKS`를 주세요). `CHIRP_HOST_MOUNTS=proc`이면 `/proc` 파일만 마운트하고(컨테이너에 호스트 sysfs 없음, 네트워크는 컨테이너 관점), `CHIRP_HOST_MOUNTS=0`이면 아무것도 마운트하지 않습니다. 노출 범위는 [`docs/ko/deploy.md`](docs/ko/deploy.md#호스트-메트릭메모리부하네트워크) 참고. chirp은 이 경로를 먼저 읽고 `scope: "host"`로 보고하며, 없으면 대시보드에 "컨테이너 관점"(툴팁: 호스트가 아닌 컨테이너 값)을 표시합니다. 이 마운트는 새로 추가된 것으로 모든 Proxmox 환경에서 검증되지 않았습니다. 설치 스크립트가 호스트 값과 비교하며, 직접 확인하는 방법(호스트의 `free`·`/proc/meminfo`와 컨테이너의 `/host/proc/meminfo` 비교)은 [`docs/ko/deploy.md`](docs/ko/deploy.md#호스트-메트릭메모리부하네트워크)에 있습니다.
 
@@ -56,7 +56,7 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 읽기 전용 호스트 sysfs(`/host/sys`, `CHIRP_SYSFS_ROOT=/host/sys`)는 **호스트의** CPU 센서·전력·디스크 ID·네트워크 인터페이스(`scope: "host"`)를, `/host/proc/*` 파일은 호스트의 메모리·부하를 제공합니다. 대신 `-v /sys:/sys:ro`나 `--network host`를 쓰면 네트워크 값은 호스트 것이지만 `scope: "container"`로 표시됩니다. ZFS 호스트에서는 ARC가 사용 메모리로 잡힙니다(Proxmox GUI와 같은 기준). API 키는 `docker exec chirp node apps/server/dist/cli.js key show`로 확인합니다. 자세한 내용은 [`docs/ko/deploy.md`](docs/ko/deploy.md).
+`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 읽기 전용 호스트 sysfs(`/host/sys`, `CHIRP_SYSFS_ROOT=/host/sys`)는 **호스트의** CPU 센서·전력·디스크 ID·네트워크 인터페이스(`scope: "host"`)를, `/host/proc/*` 파일은 호스트의 메모리·부하를 제공합니다. 대신 `-v /sys:/sys:ro`나 `--network host`를 쓰면 네트워크 값은 호스트 것이지만 `scope: "container"`로 표시됩니다. ZFS 호스트에서는 ARC가 사용 메모리로 잡힙니다(Proxmox GUI와 같은 기준). 브라우저 없이 관리자 계정을 만들려면 `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10자 이상>`을 추가합니다(관리자가 없을 때만 사용. 비밀번호가 `docker inspect`에 계속 보이므로 첫 기동 후 두 변수를 지우고 대시보드에서 비밀번호를 바꾸세요). 자세한 내용은 [`docs/ko/deploy.md`](docs/ko/deploy.md).
 
 ### 릴리스 tarball
 
@@ -67,16 +67,23 @@ cd /opt/chirp && CHIRP_PORT=8080 node apps/server/dist/index.js
 
 Node.js 24와 `smartmontools`가 필요합니다. `.sha256` 자산은 다운로드 무결성만 확인합니다(진위 확인 아님, 릴리스 서명 없음).
 
+## 처음 실행
+
+1. `http://<chirp 주소>/`를 엽니다. 관리자 계정이 없으면 대시보드가 **관리자 계정 만들기** 화면을 보여 줍니다. 사용자명을 정하고 비밀번호를 두 번(10자 이상) 입력하면 바로 로그인됩니다.
+   **설치 직후 바로 하세요:** 관리자가 생기기 전까지는 *대시보드를 먼저 연 사람*이 관리자가 됩니다. (Docker/자동화: 대신 `CHIRP_ADMIN_USER`와 `CHIRP_ADMIN_PASSWORD`를 설정)
+2. **설정 -> API 키**에서 **복사**를 눌러 Home Assistant에 붙여 넣습니다(아래 참고).
+3. 비밀번호를 잊었다면 Proxmox(호스트에서): `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`, Docker: `docker exec chirp node apps/server/dist/cli.js admin reset-password`. 새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃합니다. (CLI는 `/etc/chirp/chirp.env`가 있으면 읽습니다. 설정이 다른 파일에 있으면 `--env-file <경로>`를 붙이세요.)
+
 ## API 키
 
-첫 기동에 키(`chp_...`)를 생성해 `/var/lib/chirp/api-key`(권한 0600)에 저장합니다. 로그에는 파일 경로와 아래 명령만 남고, 키 자체는 `CHIRP_PRINT_KEY=true`일 때만 출력합니다. 모든 `/api/v1/*` 요청에는 `Authorization: Bearer <키>`가 필요합니다.
+첫 기동에 키(`chp_...`)를 생성해 `/var/lib/chirp/api-key`(권한 0600)에 저장합니다. `CHIRP_PRINT_KEY=true`가 아니면 로그에 남지 않습니다. 로그인 후 **설정 -> API 키**에서 보기/숨기기·복사가 되고, **재발급**하면 이전 키는 즉시 동작하지 않으므로 Home Assistant에도 새 키를 넣어야 합니다. 클라이언트는 `Authorization: Bearer <키>`를 보내고, 대시보드는 로그인 세션을 씁니다.
 
 ```bash
 node apps/server/dist/cli.js key show     # 키 출력
 node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 ```
 
-`CHIRP_API_KEY`가 있으면 키 파일보다 우선합니다(16자 이상). 대시보드 HTML/JS는 공개지만 데이터는 모두 키가 필요합니다.
+`CHIRP_API_KEY`가 있으면 키 파일보다 우선합니다(16자 이상). 이 경우 대시보드에서는 읽기 전용으로 보이고 재발급할 수 없습니다. 이전 릴리스에서 업그레이드해도 기존 키가 그대로 유지되어 Home Assistant가 계속 동작하며, 첫 접속 때 관리자 계정만 만들면 됩니다. 대시보드 HTML/JS는 공개지만 데이터는 모두 로그인이나 키가 필요합니다.
 
 ## 설정
 
@@ -84,12 +91,16 @@ node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 
 ## Home Assistant
 
-[`hass-chirp`](https://github.com/eigger/hass-chirp)를 설치하고 통합(도메인 `chirp`)을 추가한 뒤 chirp URL과 API 키를 입력합니다. 엔티티는 인스턴스 UUID, 디스크 WWN, 인터페이스·센서 ID를 기준으로 만들어져 재부팅이나 장치 이름 변경에도 유지됩니다.
+[`hass-chirp`](https://github.com/eigger/hass-chirp)를 설치하고 통합(도메인 `chirp`)을 추가한 뒤 chirp 호스트, 포트, 그리고 chirp 대시보드 **설정 -> API 키**에서 복사한 키를 입력합니다. 엔티티는 인스턴스 UUID, 디스크 WWN, 인터페이스·센서 ID을 기준으로 만들어져 재부팅이나 장치 이름 변경에도 유지됩니다.
 
 ## 보안 주의
 
 - Proxmox 스크립트는 `smartctl`이 호스트 블록 장치에 접근하도록 **privileged LXC** 컨테이너를 만듭니다. privileged 컨테이너가 뚫리면 호스트도 위험하므로 신뢰하는 네트워크에서만 쓰세요. 장치 규칙은 선택한 디스크의 major에 `rw`만 허용합니다(정확한 minor를 쓰지 않는 이유는 [`docs/ko/deploy.md`](docs/ko/deploy.md#디스크-passthrough와-권한) 참고).
-- 통신은 **HTTP 평문**입니다. API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두고, `CHIRP_TRUST_PROXY=true`는 직접 관리하는 프록시 뒤에서만 켜세요.
+- **설치 직후 관리자 계정을 만드세요.** 계정이 생기기 전까지는 대시보드에 접근할 수 있는 누구나 관리자를 만들 수 있습니다(최초 등록). 서버는 시작할 때마다 로그로 경고합니다.
+- 통신은 **HTTP 평문**입니다. 로그인할 때의 관리자 비밀번호, 세션 쿠키, API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두세요.
+- 프록시 뒤라면 `CHIRP_TRUST_PROXY`를 **프록시의 IP/CIDR**(예: `10.0.0.5`)로 설정하세요. 설정하지 않으면 로그인 제한에서 모든 클라이언트가 프록시 주소 하나를 공유합니다. 프록시 개수(`1`)나 `true`는 chirp에 프록시를 통해서*만* 접근할 수 있을 때(`CHIRP_HOST=127.0.0.1` 또는 방화벽)만 안전합니다. 아니면 직접 접속한 클라이언트가 `X-Forwarded-For`를 위조할 수 있습니다([`docs/ko/deploy.md`](docs/ko/deploy.md#보안) 참고).
+- `CHIRP_ADMIN_PASSWORD`는 계정이 생긴 뒤에도 환경 변수에 평문으로 남습니다. 첫 기동 후 지우고 대시보드에서 비밀번호를 바꾸세요.
+- 로그인 세션은 HttpOnly, SameSite=Strict 쿠키(12시간 무활동, 최대 7일)입니다. 비밀번호는 10자 이상이고 흔한 비밀번호는 거부됩니다. 로그인 실패는 주소별(최대 15분)·사용자명별(최대 5초)로 지연되고, 사용자명마다 하루 실패 1000회 예산이 있습니다. 지속적인 공격은 *새* 주소의 로그인을 늦추거나 예산 소진 후 막을 수 있지만, 이전에 로그인한 주소, 열린 세션, Home Assistant에는 영향이 없습니다. `admin reset-password`나 재시작으로 풀립니다([상세](docs/api.md#login-rate-limiting)). API 키로는 키나 계정을 조회·변경할 수 없습니다.
 - `POST /api/v1/refresh`는 30초 쿨다운이 있으며 서버는 잠든 디스크를 깨우지 않습니다.
 
 ## 개발

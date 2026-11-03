@@ -1,7 +1,11 @@
+import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultHostRoot } from "./hostPaths.js";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, Username } from "@chirp/shared";
+import { isCommonPassword } from "./commonPassword.js";
+import { DEFAULT_DAILY_BUDGET } from "./rateLimit.js";
 
 export interface TempWarn {
   hdd: number;
@@ -14,8 +18,15 @@ export interface Config {
   /** Print a newly generated API key to the log (CHIRP_PRINT_KEY, opt-in). */
   printKey: boolean;
   host: string;
+  /** API key set by the operator (CHIRP_API_KEY); wins over the key file and cannot be regenerated. */
   apiKey: string | null;
+  /** Key file (default <dataDir>/api-key); created on the first start when CHIRP_API_KEY is unset. */
   apiKeyFile: string;
+  /** Admin account seeded on start when none exists (CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD). */
+  adminUser: string | null;
+  adminPassword: string | null;
+  /** Session cookie `Secure` flag: auto = when the request arrived over HTTPS (honours CHIRP_TRUST_PROXY). */
+  cookieSecure: "auto" | boolean;
   dataDir: string;
   devices: string[];
   deviceTypes: Record<string, string>;
@@ -38,7 +49,14 @@ export interface Config {
   tempWarn: TempWarn;
   webDir: string;
   displayName: string;
-  trustProxy: boolean;
+  /**
+   * Fastify `trustProxy`: false (default), true (trust every X-Forwarded-For
+   * hop: only safe when the proxy overwrites the header), a hop count, or a
+   * list of proxy addresses/CIDRs.
+   */
+  trustProxy: boolean | number | string[];
+  /** Failed logins per username per rolling 24 h before only known sources may try (CHIRP_LOGIN_DAILY_BUDGET). */
+  loginDailyBudget: number;
   corsOrigins: string[];
   /** CHIRP_DEVICES / CHIRP_DEVICE_TYPES entries that were dropped as unsafe. */
   rejected: string[];
@@ -78,6 +96,75 @@ function apiKey(value: string | undefined): string | null {
     );
   }
   return v;
+}
+
+function adminSeed(env: Env): { adminUser: string | null; adminPassword: string | null } {
+  const user = env.CHIRP_ADMIN_USER?.trim() || null;
+  // Passwords are taken verbatim (no trim): spaces may be intended.
+  const password = env.CHIRP_ADMIN_PASSWORD ? env.CHIRP_ADMIN_PASSWORD : null;
+  if (!user && !password) return { adminUser: null, adminPassword: null };
+  if (!user || !password) {
+    throw new ConfigError("CHIRP_ADMIN_USER and CHIRP_ADMIN_PASSWORD must be set together");
+  }
+  if (!Username.safeParse(user).success) {
+    throw new ConfigError("CHIRP_ADMIN_USER must be 1-64 letters, digits, '.', '_', '@' or '-'");
+  }
+  const len = [...password].length;
+  if (len < MIN_PASSWORD_LENGTH || len > MAX_PASSWORD_LENGTH) {
+    throw new ConfigError(
+      `CHIRP_ADMIN_PASSWORD must be ${MIN_PASSWORD_LENGTH}-${MAX_PASSWORD_LENGTH} characters (got ${len})`,
+    );
+  }
+  if (isCommonPassword(password, user)) {
+    throw new ConfigError("CHIRP_ADMIN_PASSWORD is too common or easy to guess; choose another one");
+  }
+  return { adminUser: user, adminPassword: password };
+}
+
+function cookieSecure(value: string | undefined): Config["cookieSecure"] {
+  const v = (value ?? "").trim().toLowerCase();
+  if (v === "" || v === "auto") return "auto";
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  throw new ConfigError(`CHIRP_COOKIE_SECURE must be auto, true or false (got "${value}")`);
+}
+
+/** An IP address, or an IP/CIDR with a valid prefix length (IPv4 0-32, IPv6 0-128). */
+export function isProxyAddress(item: string): boolean {
+  const m = /^([^/]+)(?:\/(\d{1,3}))?$/.exec(item);
+  if (!m) return false;
+  const family = isIP(m[1]);
+  if (family === 0) return false;
+  if (m[2] === undefined) return true;
+  const prefix = Number(m[2]);
+  return prefix >= 0 && prefix <= (family === 4 ? 32 : 128);
+}
+
+function trustProxy(value: string | undefined): Config["trustProxy"] {
+  const v = (value ?? "").trim();
+  const lower = v.toLowerCase();
+  if (v === "" || ["0", "false", "no", "off"].includes(lower)) return false;
+  if (["true", "yes", "on"].includes(lower)) return true;
+  if (/^\d+$/.test(v)) {
+    const hops = Number(v);
+    if (hops >= 1 && hops <= 10) return hops;
+  }
+  const items = list(v);
+  if (items.length && items.every(isProxyAddress)) return items;
+  throw new ConfigError(
+    "CHIRP_TRUST_PROXY must be false, a comma-separated list of proxy IPs/CIDRs (e.g. 10.0.0.5,fd00::/64), " +
+      `a hop count (1-10) or true (got "${value}")`,
+  );
+}
+
+function dailyBudget(value: string | undefined): number {
+  const v = (value ?? "").trim();
+  if (v === "") return DEFAULT_DAILY_BUDGET;
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || n < 10 || n > 1_000_000) {
+    throw new ConfigError(`CHIRP_LOGIN_DAILY_BUDGET must be an integer between 10 and 1000000 (got "${value}")`);
+  }
+  return n;
 }
 
 function scanMode(value: string | undefined): Config["scanMode"] {
@@ -164,6 +251,8 @@ export function loadConfig(env: Env = process.env): Config {
     host: env.CHIRP_HOST?.trim() || "0.0.0.0",
     apiKey: apiKey(env.CHIRP_API_KEY),
     apiKeyFile: env.CHIRP_API_KEY_FILE?.trim() || resolve(dataDir, "api-key"),
+    ...adminSeed(env),
+    cookieSecure: cookieSecure(env.CHIRP_COOKIE_SECURE),
     dataDir,
     devices,
     deviceTypes,
@@ -184,7 +273,8 @@ export function loadConfig(env: Env = process.env): Config {
     },
     webDir: env.CHIRP_WEB_DIR?.trim() ? resolve(env.CHIRP_WEB_DIR.trim()) : defaultWebDir(),
     displayName: env.CHIRP_DISPLAY_NAME?.trim() || hostname(),
-    trustProxy: bool(env.CHIRP_TRUST_PROXY),
+    trustProxy: trustProxy(env.CHIRP_TRUST_PROXY),
+    loginDailyBudget: dailyBudget(env.CHIRP_LOGIN_DAILY_BUDGET),
     corsOrigins: list(env.CHIRP_CORS_ORIGINS),
     rejected,
   };
