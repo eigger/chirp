@@ -6,7 +6,7 @@
 
 - Linux host (Proxmox VE recommended), Node.js 24, `smartmontools`
 - Port 80 (change with `CHIRP_PORT`, an integer 1-65535)
-- Access to the host's block devices and `/sys`
+- Access to the host's block devices and `/sys` (plus the host's `/proc` files for memory/load; see below)
 
 ## 1. Proxmox one-liner
 
@@ -29,12 +29,40 @@ lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x500
 - **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a rule for an exact minor would point at the wrong disk, or none, after a host reboot or hotplug. The by-id bind mounts are re-resolved on every container start; static cgroup rules are not, and Proxmox offers no hook that can rewrite them before the container starts.
 - **Risk:** root in the container can reach other block devices with the same major, including the host's boot disk if it is also `sd*`/NVMe. That is no worse than a privileged container already is (its root is effectively host root), but keep the container on a trusted network and do not run anything else in it.
 
+### Host metrics (memory, load, network)
+
+Inside the container `/proc/meminfo`, `/proc/stat` and `/proc/loadavg` can be lxcfs views of the container (e.g. 512 MB of RAM instead of the host's 64 GB), and the network namespace only has the container's `eth0`. The same script therefore also adds read-only mounts of the host's files to the marker block (re-run it on an existing install to add them; `CHIRP_HOST_MOUNTS=0` leaves them out):
+
+```
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+```
+
+chirp reads `/host/proc` and `/host/sys` first and reports `scope: "host"`; without them it falls back to the container's own files and reports `scope: "container"`, and the dashboard shows "container view — host mounts missing". `optional` means a mount that fails never stops the container from starting. The host's `/sys` is mounted (not just `/sys/class/net`) because the interface entries are symlinks into `/sys/devices`; it is non-recursive (no cgroup or debugfs submounts) and read-only. `/proc/net/dev` is deliberately not mounted: `/proc/net` follows the reader's network namespace.
+
+**These mounts have not been verified on every Proxmox/LXC/AppArmor combination.** The installer's smoke test compares them with the host, and you can check by hand:
+
+```bash
+# on the Proxmox host
+grep -E 'MemTotal|MemAvailable' /proc/meminfo; free -b; ls /sys/class/net
+# inside the container
+pct exec <CTID> -- grep -E 'MemTotal|MemAvailable' /proc/meminfo /host/proc/meminfo
+pct exec <CTID> -- ls /host/sys/class/net
+# what chirp reports (scope must be "host")
+curl -s -H "Authorization: Bearer $KEY" http://<ip>/api/v1/status | jq '{m: .memory.scope, l: .load.scope, n: .network.scope, total: .memory.totalBytes}'
+```
+
+`/host/proc/meminfo` must show the host's `MemTotal` (`free -b` "total" on the host), and `/host/sys/class/net` must list the host's interfaces (`vmbr0`, `eno1`, ...). If they show the container's values, the API reports `scope: "container"`; please open an issue with your Proxmox version.
+
 ## 2. Docker
 
 ```bash
 docker run -d --name chirp \
   --privileged -p 80:80 \
   -v /sys:/sys:ro -v chirp-data:/var/lib/chirp \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro \
   --device /dev/sda --device /dev/nvme0 \
   -e CHIRP_DEVICES=/dev/sda,/dev/nvme0 \
   ghcr.io/eigger/chirp:latest
@@ -42,6 +70,7 @@ docker run -d --name chirp \
 
 - Instead of `--privileged` you can combine `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` with `--device`.
 - Mount `/sys` read-only so the host's CPU sensors (hwmon) are visible; it also lets chirp derive stable disk IDs from sysfs without waking disks.
+- `-v /proc:/host/proc:ro -v /sys:/host/sys:ro` give the host's memory/load (`/host/proc`) and network interfaces (`/host/sys/class/net`; a container's own `/sys` only shows its network namespace) with `scope: "host"`. Without them memory/load are reported as `scope: "container"` (Docker does not virtualise `/proc/meminfo`, so the values are usually the host's anyway) and only the container's interfaces are visible. `--network host` is not needed.
 - The `chirp-data` volume stores the API key (`api-key`), `instance-id` and `disk-ids.json` (pinned disk IDs). Losing the volume changes the key and instance ID, so Home Assistant creates new entities.
 - **API key:** it is not printed to the container log. Read it with
   `docker exec chirp node apps/server/dist/cli.js key show`
@@ -82,7 +111,7 @@ Run `update` inside the container (`pct exec <CTID> -- update`). It downloads th
 
 ## Environment variables
 
-See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least 16 characters) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. Invalid values stop the server with a message such as `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")`.
+See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least 16 characters) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. Invalid values stop the server with a message such as `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")`.
 
 ## Release procedure
 

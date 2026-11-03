@@ -57,3 +57,55 @@ export function formatTime(iso: string | null, lang: string): string {
 export function wearPercent(d: Disk): number | null {
   return d.nvme?.percentageUsed ?? d.ata?.wearLevelPercentUsed ?? null;
 }
+
+/** Binary units for memory sizes (GiB etc.). */
+export function formatBytesIEC(n: number | null | undefined): string {
+  if (n == null) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** Bytes per second, decimal units ("152 KB/s"). */
+export function formatRate(n: number | null | undefined): string {
+  return n == null ? "—" : `${formatBytes(n)}/s`;
+}
+
+/** Link speed in Mbit/s -> "1 Gbit/s", "2.5 Gbit/s", "100 Mbit/s". */
+export function formatLinkSpeed(mbps: number | null | undefined): string {
+  if (mbps == null || mbps <= 0) return "—";
+  if (mbps >= 1000) {
+    const g = mbps / 1000;
+    return `${Number.isInteger(g) ? g.toFixed(0) : g.toFixed(1)} Gbit/s`;
+  }
+  return `${mbps} Mbit/s`;
+}
+
+export function formatPercent(p: number | null | undefined): string {
+  return p == null ? "—" : `${p.toFixed(1)}%`;
+}
+
+export function formatWatts(w: number | null | undefined): string {
+  return w == null ? "—" : `${w.toFixed(1)} W`;
+}
+
+export function formatVolts(v: number | null | undefined): string {
+  return v == null ? "—" : `${v.toFixed(3)} V`;
+}
+
+export function formatLoad(l: number | null | undefined): string {
+  return l == null ? "—" : l.toFixed(2);
+}
+
+/** Bar level for a usage percentage. */
+export function usageLevel(p: number | null | undefined): "ok" | "warning" | "failing" | "unknown" {
+  if (p == null) return "unknown";
+  if (p >= 95) return "failing";
+  if (p >= 85) return "warning";
+  return "ok";
+}

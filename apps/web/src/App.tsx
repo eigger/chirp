@@ -6,6 +6,7 @@ import { KeyGate } from "./components/KeyGate";
 import { Summary } from "./components/Summary";
 import { CpuCard } from "./components/CpuCard";
 import { DiskTable } from "./components/DiskTable";
+import { LoadCard, MemoryCard, NetworkTable, PowerCard } from "./components/HostCards";
 
 const POLL_MS = 30_000;
 
@@ -15,6 +16,7 @@ export function App() {
   const [invalid, setInvalid] = useState(false);
   const [data, setData] = useState<StatusSnapshot | null>(null);
   const [history, setHistory] = useState<[number, number][]>([]);
+  const [cpuUsageHistory, setCpuUsageHistory] = useState<[number, number][]>([]);
   const [failed, setFailed] = useState(false);
 
   const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
@@ -29,6 +31,11 @@ export function App() {
       fetchHistory(apiKey, "cpu.packageTemp")
         .then((h) => setHistory(h.points))
         .catch(() => setHistory([]));
+      if (s.load) {
+        fetchHistory(apiKey, "load.cpuUsagePercent")
+          .then((h) => setCpuUsageHistory(h.points))
+          .catch(() => setCpuUsageHistory([]));
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         clearKey();
@@ -105,6 +112,16 @@ export function App() {
             {failed && <p className="error">{t("common.error")}</p>}
             <Summary data={data} apiKey={apiKey} lang={lang} onRefreshed={() => void load()} onUnauthorized={unauthorized} />
             <CpuCard cpu={data.cpu} history={history} />
+            {(data.memory || data.load) && (
+              <div className="host-grid">
+                {data.memory && <MemoryCard memory={data.memory} />}
+                {data.load && <LoadCard load={data.load} history={cpuUsageHistory} />}
+              </div>
+            )}
+            {data.network && <NetworkTable network={data.network} />}
+            {(data.power || (data.fans?.length ?? 0) > 0 || (data.voltages?.length ?? 0) > 0) && (
+              <PowerCard power={data.power ?? null} fans={data.fans ?? []} voltages={data.voltages ?? []} />
+            )}
             <DiskTable disks={data.disks} lang={lang} />
             <p className="muted small">{t("common.autoRefresh")}</p>
           </>

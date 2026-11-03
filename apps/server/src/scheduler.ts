@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { Config } from "./config.js";
 import { DiskIdentity, provisionalId } from "./diskIdentity.js";
 import { History } from "./history.js";
+import { detectContainer } from "./hostPaths.js";
+import { HostMetrics, type HostSample } from "./hostMetrics.js";
 import { readCpuModel, readSensors, type SensorReadout } from "./hwmon.js";
 import {
   discoverDevices,
@@ -22,6 +24,11 @@ export interface CollectorDeps {
   now: () => Date;
   /** Stable IDs for disks that have not been read yet. Defaults to `DiskIdentity.none()`. */
   identity?: DiskIdentity;
+  /**
+   * Memory/load/network/power/fans/voltages, sampled on the sensor interval.
+   * Without it the snapshot carries none of these (optional) sections.
+   */
+  sampleHost?: (nowMs: number) => HostSample;
 }
 
 export interface CollectorOptions {
@@ -39,7 +46,14 @@ export interface CollectorOptions {
 }
 
 export function defaultDeps(config: Config, warn: (msg: string) => void = () => {}): CollectorDeps {
+  const host = new HostMetrics({
+    roots: { hostProc: config.hostProc, hostSys: config.hostSys, proc: "/proc", sys: "/sys", inContainer: detectContainer() },
+    sysfsRoot: config.sysfsRoot,
+    netFilter: { include: config.netInclude, exclude: config.netExclude },
+    warn,
+  });
   return {
+    sampleHost: (nowMs) => host.sample(nowMs),
     readSensors: () => readSensors(config.sysfsRoot),
     readCpuModel: () => readCpuModel(),
     discoverDevices: () => discoverDevices(config),
@@ -80,6 +94,7 @@ export class Collector {
     sensors: [],
   };
   private sensorsAt: string | null = null;
+  private host: HostSample | null = null;
   private timers: NodeJS.Timeout[] = [];
   private smartRunning: Promise<void> | null = null;
   private devices: DiscoveredDevice[] | null = null;
@@ -124,6 +139,36 @@ export class Collector {
     } catch {
       /* keep the previous readings */
     }
+    this.collectHost();
+  }
+
+  /** Host metrics; isolated from the CPU sensors and SMART (HostMetrics already isolates each section). */
+  private collectHost(): void {
+    if (!this.deps.sampleHost) return;
+    try {
+      const at = this.deps.now().getTime();
+      const next = this.deps.sampleHost(at);
+      const ids = new Set(next.network?.interfaces.map((i) => i.id) ?? []);
+      for (const old of this.host?.network?.interfaces ?? []) {
+        if (!ids.has(old.id)) this.history.forget(`network.${old.id}.`);
+      }
+      this.host = next;
+      this.history.record("memory.usedPercent", next.memory?.usedPercent ?? null, at);
+      this.history.record("load.cpuUsagePercent", next.load?.cpuUsagePercent ?? null, at);
+      this.history.record("load.load1", next.load?.load1 ?? null, at);
+      this.history.record("power.packageWatts", next.power?.packageWatts ?? null, at);
+      for (const i of next.network?.interfaces ?? []) {
+        this.history.record(`network.${i.id}.rx`, i.rxBytesPerSec, at);
+        this.history.record(`network.${i.id}.tx`, i.txBytesPerSec, at);
+      }
+    } catch {
+      /* keep the previous host sample */
+    }
+  }
+
+  /** Whether `network.<id>` is a currently listed interface. */
+  hasInterface(id: string): boolean {
+    return this.host?.network?.interfaces.some((i) => i.id === id) ?? false;
   }
 
   collectSmart(): Promise<void> {
@@ -217,6 +262,7 @@ export class Collector {
       cpu: { model: this.cpuModel, ...this.sensors.cpu, updatedAt: this.sensorsAt },
       sensors: this.sensors.sensors,
       disks: [...this.disks.values()].map((r) => r.disk).sort((a, b) => a.name.localeCompare(b.name)),
+      ...(this.host ?? {}),
     };
   }
 

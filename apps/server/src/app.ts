@@ -15,6 +15,15 @@ const RANGES: Record<string, number> = {
   "24h": 86_400_000,
 };
 
+/** History metrics that always exist (empty `points` until there is data). */
+const FIXED_METRICS = new Set([
+  "cpu.packageTemp",
+  "memory.usedPercent",
+  "load.cpuUsagePercent",
+  "load.load1",
+  "power.packageWatts",
+]);
+
 export interface AppOptions {
   config: Config;
   collector: Collector;
@@ -79,8 +88,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         const rangeMs = RANGES[range];
         if (!metric || rangeMs === undefined) return reply.code(400).send({ error: "bad_request" });
         const diskMatch = /^disk\.([a-z0-9_]+)\.temperature$/.exec(metric);
+        const netMatch = /^network\.([a-z0-9_]+)\.(rx|tx)$/.exec(metric);
         const known =
-          metric === "cpu.packageTemp" || (diskMatch !== null && collector.getDiskDetail(diskMatch[1]) !== null);
+          FIXED_METRICS.has(metric) ||
+          (diskMatch !== null && collector.getDiskDetail(diskMatch[1]) !== null) ||
+          (netMatch !== null && collector.hasInterface(netMatch[1]));
         if (!known) return reply.code(404).send({ error: "not_found" });
         reply.header("cache-control", "no-store");
         return { metric, points: collector.history.query(metric, rangeMs, now()) };

@@ -84,6 +84,14 @@ step "chirp-passthrough.sh: least-privilege device rules"
 PT="$REPO_ROOT/proxmox/install/chirp-passthrough.sh"
 grep -q 'CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"' "$PT" || fail "chirp-passthrough.sh default device permission is not rw"
 
+step "chirp-passthrough.sh: host metric mounts"
+grep -q 'CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-1}"' "$PT" || fail "host metric mounts are not on by default"
+grep -q 'none bind,ro,optional,create=file' "$PT" || fail "host /proc mounts are not read-only + optional"
+grep -q 'host/sys none bind,ro,optional,create=dir' "$PT" || fail "the host /sys mount is not read-only + optional"
+grep -q 'chirp_check_host_mounts' "$PT" || fail "the smoke test does not verify the host metric mounts"
+grep -q '"/host/proc"' "$CFG" || fail "config.ts does not default to /host/proc"
+grep -q '"/host/sys"' "$CFG" || fail "config.ts does not default to /host/sys"
+
 step "proxmox/ paths referenced by the scripts exist in the repository"
 for src in proxmox/install/chirp-install.sh proxmox/ct/chirp.sh proxmox/install/update.sh; do
   while IFS= read -r rel; do

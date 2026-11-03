@@ -6,7 +6,7 @@
 
 - Linux 호스트(Proxmox VE 권장), Node.js 24, `smartmontools`
 - 포트 80 (변경: `CHIRP_PORT`, 1~65535 정수)
-- 호스트의 블록 장치·`/sys` 접근 권한
+- 호스트의 블록 장치·`/sys` 접근 권한(메모리·부하용으로 호스트의 `/proc` 파일도; 아래 참고)
 
 ## 1. Proxmox 원클릭
 
@@ -29,12 +29,40 @@ lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x500
 - **정확한 `major:minor`가 아니라 major 와일드카드(`8:*`).** `sd`의 minor는 장치 인식 순서를 따르고 NVMe 네임스페이스(major 259)의 minor는 동적으로 배정되므로, 정확한 minor 규칙은 호스트 재부팅이나 핫플러그 후 엉뚱한 디스크를 가리키거나 아무것도 가리키지 않게 된다. by-id bind mount는 컨테이너가 시작할 때마다 다시 해석되지만 정적 cgroup 규칙은 그렇지 않고, Proxmox에는 컨테이너 시작 전에 이 규칙을 다시 쓸 수 있는 훅이 없다.
 - **위험:** 컨테이너 root는 같은 major의 다른 블록 장치(호스트 부트 디스크도 `sd*`/NVMe라면 포함)에 접근할 수 있다. privileged 컨테이너의 root는 이미 사실상 호스트 root이므로 위험이 더 커지지는 않지만, 신뢰하는 네트워크에 두고 다른 서비스를 함께 돌리지 말 것.
 
+### 호스트 메트릭(메모리·부하·네트워크)
+
+컨테이너 안의 `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`는 lxcfs가 보여 주는 컨테이너 관점 값일 수 있고(예: 호스트 64GB 대신 512MB), 네트워크 네임스페이스에는 컨테이너의 `eth0`만 있다. 그래서 같은 스크립트가 마커 블록에 호스트 파일의 읽기 전용 마운트도 추가한다(기존 설치는 스크립트를 다시 실행하면 추가된다. `CHIRP_HOST_MOUNTS=0`이면 넣지 않는다).
+
+```
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+```
+
+chirp은 `/host/proc`, `/host/sys`를 먼저 읽고 `scope: "host"`로 보고한다. 없으면 컨테이너 자신의 파일로 대체하고 `scope: "container"`로 보고하며, 대시보드에는 "컨테이너 관점 — 호스트 마운트 없음"이 표시된다. `optional`이므로 마운트가 실패해도 컨테이너는 정상 시작한다. 인터페이스 항목이 `/sys/devices`를 가리키는 심볼릭 링크라서 `/sys/class/net`만이 아니라 호스트 `/sys` 전체를 마운트한다(비재귀: cgroup·debugfs 하위 마운트 제외, 읽기 전용). `/proc/net`은 읽는 프로세스의 네트워크 네임스페이스를 따르므로 `/proc/net/dev`는 일부러 마운트하지 않는다.
+
+**이 마운트는 모든 Proxmox/LXC/AppArmor 조합에서 검증되지 않았다.** 설치 스크립트의 스모크 테스트가 호스트 값과 비교하며, 직접 확인하려면:
+
+```bash
+# Proxmox 호스트에서
+grep -E 'MemTotal|MemAvailable' /proc/meminfo; free -b; ls /sys/class/net
+# 컨테이너 안에서
+pct exec <CTID> -- grep -E 'MemTotal|MemAvailable' /proc/meminfo /host/proc/meminfo
+pct exec <CTID> -- ls /host/sys/class/net
+# chirp 보고값 (scope가 "host"여야 한다)
+curl -s -H "Authorization: Bearer $KEY" http://<ip>/api/v1/status | jq '{m: .memory.scope, l: .load.scope, n: .network.scope, total: .memory.totalBytes}'
+```
+
+`/host/proc/meminfo`의 `MemTotal`이 호스트 값(호스트 `free -b`의 total)과 같아야 하고, `/host/sys/class/net`에 호스트 인터페이스(`vmbr0`, `eno1` 등)가 보여야 한다. 컨테이너 값이 보인다면 API가 `scope: "container"`로 보고한다. Proxmox 버전과 함께 이슈를 남겨 주세요.
+
 ## 2. Docker
 
 ```bash
 docker run -d --name chirp \
   --privileged -p 80:80 \
   -v /sys:/sys:ro -v chirp-data:/var/lib/chirp \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro \
   --device /dev/sda --device /dev/nvme0 \
   -e CHIRP_DEVICES=/dev/sda,/dev/nvme0 \
   ghcr.io/eigger/chirp:latest
@@ -42,6 +70,7 @@ docker run -d --name chirp \
 
 - `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
 - `/sys`를 읽기 전용으로 마운트해야 호스트 CPU 센서(hwmon)가 보인다. 디스크를 깨우지 않고 sysfs에서 안정적인 디스크 ID를 도출하는 데도 쓰인다.
+- `-v /proc:/host/proc:ro -v /sys:/host/sys:ro`를 주면 호스트의 메모리·부하(`/host/proc`)와 네트워크 인터페이스(`/host/sys/class/net`; 컨테이너 자신의 `/sys`는 자기 네트워크 네임스페이스만 보인다)를 `scope: "host"`로 보고한다. 없으면 메모리·부하는 `scope: "container"`(Docker는 `/proc/meminfo`를 가상화하지 않으므로 값 자체는 대개 호스트와 같다), 네트워크는 컨테이너 인터페이스만 보인다. `--network host`는 필요 없다.
 - `chirp-data` 볼륨에 API 키(`api-key`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생긴다.
 - **API 키:** 컨테이너 로그에는 출력되지 않는다. 다음으로 확인한다.
   `docker exec chirp node apps/server/dist/cli.js key show`
@@ -82,7 +111,7 @@ Restart=on-failure
 
 ## 환경 변수
 
-[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
 
 ## 릴리스 절차
 

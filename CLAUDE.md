@@ -1,6 +1,6 @@
 # chirp — agent guide
 
-Monitoring server that collects the CPU temperature and disk SMART data of a Proxmox host and serves them as a REST API and a dashboard.
+Monitoring server that collects the CPU temperature, disk SMART data and host metrics (memory, load, network, power, fans, voltages) of a Proxmox host and serves them as a REST API and a dashboard.
 
 ## Read first
 
@@ -28,7 +28,8 @@ scripts/          release packaging; scripts/ci = CI checks
 - **Disk health is decided only in `apps/server/src/health.ts`.** Clients (web, Home Assistant) never re-derive it.
 - **Never wake a disk.** `smartctl -n standby` always; a disk in standby keeps its last values. Device discovery uses `smartctl --scan` (does not open devices) and is cached.
 - `disk.id` is WWN first (`wwn_<hex>`), else a model+serial slug, and never changes once assigned (`diskIdentity.ts` derives it without waking the disk and pins it in `<dataDir>/disk-ids.json`). `/dev/sdX` is never an ID; `dev_<name>` is only a provisional placeholder.
-- GET never triggers collection; it returns the cache. Collection runs only from the scheduler (sensors 10 s, SMART 300 s) and `POST /refresh` (30 s cooldown).
+- GET never triggers collection; it returns the cache. Collection runs only from the scheduler (sensors + host metrics 10 s, SMART 300 s) and `POST /refresh` (30 s cooldown).
+- **Host metrics are optional fields** (`memory`, `load`, `network`, `power`, `fans`, `voltages`): absent on older servers, a section that cannot be read is `null`. `/proc` reads go through `hostPaths.ts` (`CHIRP_HOST_PROC`/`CHIRP_HOST_SYS`, host root first) and carry `scope: "host" | "container"`; never read `/proc` or `/sys/class/net` directly for host values. Parsers take a root path so tests use fake trees. Each section fails in isolation (logged once).
 - History points are `[epochMs, value]`.
 - Pure JavaScript dependencies only (the release tarball must run without native builds).
 - Every response must pass the `@chirp/shared` schema; tests check this with `parse`. Error bodies are `{"error": <code>}` (`ErrorResponse`).

@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultHostRoot } from "./hostPaths.js";
 
 export interface TempWarn {
   hdd: number;
@@ -26,6 +27,14 @@ export interface Config {
   rescanIntervalSec: number;
   smartctl: string;
   sysfsRoot: string;
+  /** Host /proc for memory/load (CHIRP_HOST_PROC; default /host/proc if it exists, else /proc). */
+  hostProc: string;
+  /** Host /sys for network interfaces (CHIRP_HOST_SYS; default /host/sys if it exists, else /sys). */
+  hostSys: string;
+  /** Network interface globs always shown (CHIRP_NET_INCLUDE). */
+  netInclude: string[];
+  /** Network interface globs always hidden, on top of the defaults (CHIRP_NET_EXCLUDE). */
+  netExclude: string[];
   tempWarn: TempWarn;
   webDir: string;
   displayName: string;
@@ -164,6 +173,10 @@ export function loadConfig(env: Env = process.env): Config {
     rescanIntervalSec: num(env.CHIRP_RESCAN_INTERVAL, 3600, 60),
     smartctl: env.CHIRP_SMARTCTL?.trim() || "smartctl",
     sysfsRoot: env.CHIRP_SYSFS_ROOT?.trim() || "/sys",
+    hostProc: defaultHostRoot(env.CHIRP_HOST_PROC, "/host/proc", "/proc"),
+    hostSys: defaultHostRoot(env.CHIRP_HOST_SYS, "/host/sys", "/sys"),
+    netInclude: list(env.CHIRP_NET_INCLUDE),
+    netExclude: list(env.CHIRP_NET_EXCLUDE),
     tempWarn: {
       hdd: num(env.CHIRP_TEMP_WARN_HDD, 55),
       ssd: num(env.CHIRP_TEMP_WARN_SSD, 70),

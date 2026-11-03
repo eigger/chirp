@@ -75,9 +75,23 @@ lxc.cgroup2.devices.allow: b 259:* rw
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
 lxc.mount.entry: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 none bind,optional,create=file
 lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-eui.0025385b21400001 none bind,optional,create=file
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
 # chirp-passthrough:end'
 eq "block content" "$EXPECTED_BLOCK" "$BLOCK"
-eq "empty selection -> no block" "" "$(chirp_render_block <<<"")"
+EXPECTED_HOST_ONLY='# chirp-passthrough:start
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+# chirp-passthrough:end'
+eq "empty selection -> host metric mounts only" "$EXPECTED_HOST_ONLY" "$(chirp_render_block <<<"")"
+eq "empty selection + CHIRP_HOST_MOUNTS=0 -> no block" "" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"")"
+eq "CHIRP_HOST_MOUNTS=0 -> no host mounts" "0" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"$SEL_ALL" | grep -c ' host/')"
+eq "host mounts are read-only" "4" "$(chirp_render_host_mounts | grep -c 'bind,ro,optional')"
+eq "no /proc/net mount (per network namespace)" "0" "$(chirp_render_host_mounts | grep -c '/proc/net')"
 eq "CHIRP_DEVICES value" "/dev/disk/by-id/wwn-0x5002538e40000001,/dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234,/dev/disk/by-id/nvme-eui.0025385b21400001" \
   "$(chirp_devices_value <<<"$SEL_ALL")"
 
@@ -94,7 +108,16 @@ eq "single start marker" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
 eq "block precedes snapshot section" "1" "$(awk '/chirp-passthrough:end/{e=NR} /^\[snap1\]/{s=NR} END{print (e<s)}' "$CONF")"
 chirp_render_block <<<"$SEL_SDB" >"$TMP/b2"
 chirp_apply_conf "$CONF" "$TMP/b2"
-eq "replaced: only sdb mount" "1" "$(grep -c '^lxc.mount.entry' "$CONF")"
+eq "replaced: only sdb disk mount" "1" "$(grep -c '^lxc.mount.entry: /dev/disk' "$CONF")"
+eq "replaced: host mounts kept once" "4" "$(grep -c '^lxc.mount.entry: /[ps][ry][os]' "$CONF")"
+# Upgrade path: an old block (disks only, from a release without host mounts) gains them on re-run.
+OLD_BLOCK="$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"$SEL_SDB")"
+printf '%s\n' "$OLD_BLOCK" >"$TMP/old"
+chirp_apply_conf "$CONF" "$TMP/old"
+eq "old block: no host mounts" "0" "$(grep -c ' host/' "$CONF")"
+chirp_apply_conf "$CONF" "$TMP/b2"
+eq "re-run adds host mounts" "4" "$(grep -c ' host/' "$CONF")"
+eq "re-run keeps a single block" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
 eq "replaced: no 259 rule" "0" "$(grep -c '259:' "$CONF")"
 : >"$TMP/b3"
 chirp_apply_conf "$CONF" "$TMP/b3"
@@ -117,7 +140,12 @@ eq "glob item is not expanded" "1" \
 eq "spaces around items trimmed" "ata-WDC_WD40EFRX_WD-1234" \
   "$(chirp_resolve_selection " ata-WDC_WD40EFRX_WD-1234 " "$DETECTED" | cut -f1)"
 
-echo "[9] CHIRP_DEV_PERM overrides the default rw"
+echo "[9] MemTotal comparison (smoke test)"
+chirp_memtotal_matches $'MemTotal:       65536000 kB\nMemFree: 1 kB' $'MemTotal:       65536000 kB'; eq "same MemTotal" "0" "$?"
+chirp_memtotal_matches $'MemTotal:       65536000 kB' $'MemTotal:         524288 kB'; eq "lxcfs MemTotal differs" "1" "$?"
+chirp_memtotal_matches $'MemTotal:       65536000 kB' ""; eq "missing mount" "1" "$?"
+
+echo "[10] CHIRP_DEV_PERM overrides the default rw"
 eq "rwm override" "lxc.cgroup2.devices.allow: b 8:* rwm" \
   "$(CHIRP_DEV_PERM=rwm; chirp_render_block <<<"$SEL_SDB" | grep cgroup2)"
 
