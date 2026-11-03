@@ -14,7 +14,9 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL과 API 키(컨테이너 안에서 `cli.js key show`로 조회)를 출력한다. 스크립트 상세는 `proxmox/` 참고.
+privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL을 출력한다. 스크립트 상세는 `proxmox/` 참고.
+
+**설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력). 관리자가 생기기 전까지 대시보드는 접속한 *누구에게나* 이 최초 등록 화면을 보여 주므로 바로 만들어야 한다(또는 만들 때까지 컨테이너에 다른 사람이 접근하지 못하게 한다). 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
 
 ### 디스크 passthrough와 권한
 
@@ -40,12 +42,11 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
+- **관리자 계정:** 처음 시작한 직후 `http://<호스트>/`를 열어 만든다(그 전까지는 포트에 접근할 수 있는 누구나 만들 수 있다). 자동화 환경이면 `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10자 이상>`을 추가한다. 관리자가 없을 때만 시작 시 계정을 만들며, 이후에는 무시되어 바꾼 비밀번호를 덮어쓰지 않는다. 재설정: `docker exec chirp node apps/server/dist/cli.js admin reset-password`.
 - `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
 - `/sys`를 읽기 전용으로 마운트해야 호스트 CPU 센서(hwmon)가 보인다. 디스크를 깨우지 않고 sysfs에서 안정적인 디스크 ID를 도출하는 데도 쓰인다.
-- `chirp-data` 볼륨에 API 키(`api-key`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생긴다.
-- **API 키:** 컨테이너 로그에는 출력되지 않는다. 다음으로 확인한다.
-  `docker exec chirp node apps/server/dist/cli.js key show`
-  (로그에 꼭 남기고 싶다면 한 번만 `-e CHIRP_PRINT_KEY=true`로 시작)
+- `chirp-data` 볼륨에 API 키(`api-key`), 관리자 계정(`admin.json`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생기고, 관리자도 다시 등록해야 한다.
+- **API 키:** 로그인 후 **설정 -> API 키**에서 보기·복사·재발급한다. 컨테이너 로그에는 출력되지 않는다. 호스트에서는 `docker exec chirp node apps/server/dist/cli.js key show`로도 확인할 수 있다(로그에 꼭 남기고 싶다면 한 번만 `-e CHIRP_PRINT_KEY=true`로 시작).
 - 장치 이름이 달라질 수 있는 환경이면 `CHIRP_DEVICES`에 `/dev/disk/by-id/...` 경로를 쓴다. RAID 컨트롤러/USB 브리지는 `CHIRP_DEVICE_TYPES=/dev/sda=sat`.
 - 이미지의 `HEALTHCHECK`는 `CHIRP_HOST`/`CHIRP_PORT`가 실제로 바인드하는 주소를 확인한다(`0.0.0.0`/`::`이면 루프백).
 
@@ -77,12 +78,13 @@ Restart=on-failure
 
 컨테이너 안에서 `update`를 실행한다(`pct exec <CTID> -- update`). 릴리스를 내려받아 sha256을 확인하고 `/opt/chirp/releases/<version>`에 푼 뒤 `/opt/chirp/current`를 원자적으로 바꾸고 `/health`를 기다린다.
 
+- 데이터 디렉터리(`/var/lib/chirp`: API 키, 관리자 계정, 인스턴스 ID, 디스크 ID)는 건드리지 않으므로 Home Assistant 연동과 관리자 계정이 업데이트 후에도 유지된다. 계정 기능이 없던 릴리스에서 올리면 기존 API 키는 그대로 쓰이고, 업데이트 후 대시보드에서 관리자 계정을 만들면 된다.
 - 확인 주소는 `/etc/chirp/chirp.env`의 `CHIRP_HOST`/`CHIRP_PORT`를 따른다(`0.0.0.0`/`::`이면 `127.0.0.1`, 그 외에는 설정한 주소).
 - 헬스체크가 실패하면 이전 릴리스로 되돌린다. 첫 설치처럼 되돌릴 릴리스가 없으면 서비스를 멈추고 `current` 링크를 지워, 존재하지 않는 곳을 가리키는 링크를 남기지 않는다.
 
 ## 환경 변수
 
-[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상, 대시보드에서는 읽기 전용) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD`(관리자 시드), `CHIRP_COOKIE_SECURE`(`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
 
 ## 릴리스 절차
 
@@ -92,4 +94,7 @@ Restart=on-failure
 
 ## 보안
 
-HTTP 평문 + privileged 컨테이너 전제. 신뢰하지 않는 네트워크에서는 TLS 역프록시/Tailscale 뒤에 둘 것.
+- **최초 등록 창.** 관리자 계정이 생기기 전까지는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
+- **HTTP 평문이면 자격 증명이 노출된다.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다. 신뢰하는 LAN이 아니라면 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 둔다. 프록시 뒤에서는 `CHIRP_TRUST_PROXY=true`로 두면 세션 쿠키에 `Secure`가 자동으로 붙는다(`CHIRP_COOKIE_SECURE=true`로 강제 가능).
+- 세션: HttpOnly + SameSite=Strict 쿠키, 12시간 무활동 / 최대 7일, 메모리 보관(재시작하면 모두 로그아웃), 비밀번호를 바꾸면 모두 종료. 로그인 실패는 IP·사용자별로 지수적으로 지연된다.
+- privileged 컨테이너 전제이며, 그 root는 사실상 호스트 root다(위 참고).

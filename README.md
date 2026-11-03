@@ -23,7 +23,7 @@ Docs: [`docs/PROJECT.md`](docs/PROJECT.md) · [`docs/api.md`](docs/api.md) · [`
 - **One health verdict** (`ok` / `warning` / `failing` / `unknown`) with machine-readable reasons, decided in one place on the server
 - **Stable disk IDs** (WWN, else model + serial) — never `/dev/sdX`; derived without waking the disk and pinned across restarts
 - **24 h temperature history** (1-minute resolution, in memory) and a web dashboard served by the same process
-- **REST API with a bearer API key**; no database; pure JavaScript, no native dependencies
+- **Admin login** for the dashboard (created on first visit) and **one API key** for Home Assistant, shown and regenerated in Settings; no database; pure JavaScript, no native dependencies
 - **Home Assistant** integration: [`hass-chirp`](https://github.com/eigger/hass-chirp) (integration domain `chirp`)
 
 ## Install
@@ -36,7 +36,7 @@ Run on the Proxmox host shell:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-It creates an LXC container, installs the latest release tarball, passes the selected disks through, and prints the dashboard URL and API key.
+It creates an LXC container, installs the latest release tarball, passes the selected disks through, and prints the dashboard URL. **Open that URL right away and create the admin account** (see [First run](#first-run)).
 
 ### Docker
 
@@ -51,7 +51,7 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible. Get the API key with `docker exec chirp node apps/server/dist/cli.js key show`. See [`docs/deploy.md`](docs/deploy.md).
+Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible. To create the admin account without the browser, add `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10+ characters>` (used only while no admin exists). See [`docs/deploy.md`](docs/deploy.md).
 
 ### From the release tarball
 
@@ -62,16 +62,23 @@ cd /opt/chirp && CHIRP_PORT=8080 node apps/server/dist/index.js
 
 Requires Node.js 24 and `smartmontools`. The `.sha256` asset verifies download integrity (not authenticity; releases are not signed).
 
+## First run
+
+1. Open `http://<chirp address>/`. While no admin account exists, the dashboard shows **Create the admin account**: pick a username and enter the password twice (at least 10 characters). You are signed in right away.
+   **Do this immediately after installing:** until an admin exists, *whoever opens the dashboard first* becomes the admin. (Docker/automation: set `CHIRP_ADMIN_USER` and `CHIRP_ADMIN_PASSWORD` instead.)
+2. Go to **Settings -> API key**, click **Copy** and paste the key into Home Assistant (see below).
+3. Forgot the password? On the server: `node apps/server/dist/cli.js admin reset-password` (Proxmox: `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`). It prints a new random password and signs out every session.
+
 ## API key
 
-On the first start a key (`chp_...`) is generated and written to `/var/lib/chirp/api-key` (mode 0600). The log only names the file and the command below; the key itself is printed only with `CHIRP_PRINT_KEY=true`. Every `/api/v1/*` request needs `Authorization: Bearer <key>`.
+On the first start a key (`chp_...`) is generated and written to `/var/lib/chirp/api-key` (mode 0600). It is never written to the log unless `CHIRP_PRINT_KEY=true`. Signed in, **Settings -> API key** shows it (show/hide, copy) and **Regenerate** replaces it; the old key stops working immediately, so update Home Assistant afterwards. Clients send `Authorization: Bearer <key>`; the dashboard itself uses its login session.
 
 ```bash
 node apps/server/dist/cli.js key show     # print the key
 node apps/server/dist/cli.js key rotate   # create a new key (takes effect immediately)
 ```
 
-`CHIRP_API_KEY` overrides the key file (at least 16 characters). The dashboard HTML/JS is public, but all data requires the key.
+`CHIRP_API_KEY` overrides the key file (at least 16 characters); such a key is shown read-only and cannot be regenerated in the dashboard. Upgrading from an older release keeps the existing key, so Home Assistant keeps working; just create the admin account on the first visit. The dashboard HTML/JS is public, but all data requires a login or the key.
 
 ## Configuration
 
@@ -79,12 +86,14 @@ All settings are environment variables — see [`.env.example`](.env.example). D
 
 ## Home Assistant
 
-Install [`hass-chirp`](https://github.com/eigger/hass-chirp), add the integration (domain `chirp`) and enter the chirp URL and API key. Entities are keyed by the instance UUID and disk WWN, so they survive reboots and device renames.
+Install [`hass-chirp`](https://github.com/eigger/hass-chirp), add the integration (domain `chirp`) and enter the chirp host, port and the API key from **Settings -> API key** in the chirp dashboard. Entities are keyed by the instance UUID and disk WWN, so they survive reboots and device renames.
 
 ## Security notes
 
 - The Proxmox script creates a **privileged LXC** container so `smartctl` can reach the host's block devices. A compromised privileged container is close to a compromised host — keep it on a trusted network. The device rules allow `rw` on the selected disks' majors (see [`docs/deploy.md`](docs/deploy.md#disk-passthrough-and-its-permissions) for why not exact minors).
-- Traffic is **plain HTTP**. The API key is sent in clear text; put chirp behind a TLS reverse proxy (or Tailscale) if the network is not trusted, and set `CHIRP_TRUST_PROXY=true` only behind a proxy you control.
+- **Create the admin account right after installing.** Until it exists, anyone who can reach the dashboard can create it (first-run registration). The server log warns about this on every start.
+- Traffic is **plain HTTP**. The admin password (when signing in), the session cookie and the API key cross the network in clear text; put chirp behind a TLS reverse proxy (or Tailscale) if the network is not trusted, and set `CHIRP_TRUST_PROXY=true` only behind a proxy you control (it also gives the session cookie its `Secure` flag).
+- Sign-in sessions are HttpOnly, SameSite=Strict cookies (12 h idle, 7 days max); failed logins back off exponentially. The API key cannot be used to read or change the key or the account.
 - `POST /api/v1/refresh` has a 30 s cooldown; the server never spins up sleeping disks.
 
 ## Development
