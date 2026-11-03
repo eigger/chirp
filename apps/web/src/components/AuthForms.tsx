@@ -61,10 +61,22 @@ export function LoginForm({
       <button type="submit" className="primary" disabled={busy || !username.trim() || !password}>
         {busy ? t("login.busy") : t("login.submit")}
       </button>
-      <p className="muted small">{t("login.forgot")}</p>
+      <div className="muted small forgot">
+        <p>{t("login.forgot")}</p>
+        <p>
+          {t("login.forgotProxmox")}{" "}
+          <code>pct exec &lt;CTID&gt; -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password</code>
+        </p>
+        <p>
+          {t("login.forgotDocker")} <code>docker exec chirp node apps/server/dist/cli.js admin reset-password</code>
+        </p>
+      </div>
     </form>
   );
 }
+
+/** Mirrors `Username` in @chirp/shared (a test keeps them in sync). */
+export const USERNAME_RE = /^[A-Za-z0-9._@-]{1,64}$/;
 
 /** First-run registration: shown while the server has no admin account. */
 export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) => void; onTaken: () => void }) {
@@ -77,6 +89,7 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!USERNAME_RE.test(username.trim())) return setError(t("bootstrap.badUsername"));
     if ([...password].length < MIN_PASSWORD_LENGTH) return setError(t("password.weak", { n: MIN_PASSWORD_LENGTH }));
     if (password !== confirm) return setError(t("password.mismatch"));
     setBusy(true);
@@ -86,6 +99,8 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
       onDone(me.username);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) return onTaken();
+      // The only free-form field the server can reject as bad_request is the username.
+      if (err instanceof ApiError && err.code === "bad_request") return setError(t("bootstrap.badUsername"));
       setError(errorText(t, err, t("common.failed")));
     } finally {
       setBusy(false);

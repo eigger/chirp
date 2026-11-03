@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, changePassword, fetchApiKey, MIN_PASSWORD_LENGTH, regenerateApiKey, type ApiKeyState } from "../api";
 import { useT } from "../i18n";
 
@@ -42,11 +42,19 @@ export function ApiKeyPanel({ onUnauthorized }: Props) {
     [onUnauthorized],
   );
 
+  // Fetch once when the panel mounts. The latest `fail`/`t` are read through a
+  // ref so a re-render (new callback identity) can never re-trigger the request.
+  const onLoadError = useRef<(e: unknown) => void>(() => {});
+  onLoadError.current = (e) => fail(e, t("key.loadFailed"));
   useEffect(() => {
+    let alive = true;
     fetchApiKey()
-      .then(setState)
-      .catch((e) => fail(e, t("key.loadFailed")));
-  }, [fail, t]);
+      .then((s) => alive && setState(s))
+      .catch((e) => alive && onLoadError.current(e));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const copy = async () => {
     if (!state) return;

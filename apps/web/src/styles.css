@@ -109,3 +109,5 @@ label { font-size: .85rem; color: var(--color-text-muted); }
 .confirm-box { border: 1px solid var(--color-danger); border-radius: var(--radius); padding: 10px 12px; margin: 8px 0; display: grid; gap: 8px; }
 .confirm-box p { margin: 0; }
 .issued-key + .row-actions { margin-top: 8px; }
+.forgot p { margin: 2px 0; }
+.forgot code { overflow-wrap: anywhere; }

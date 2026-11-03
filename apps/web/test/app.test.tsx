@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { vi } from "vitest";
-import { MIN_PASSWORD_LENGTH as SHARED_MIN_PASSWORD_LENGTH } from "@chirp/shared";
+import { MIN_PASSWORD_LENGTH as SHARED_MIN_PASSWORD_LENGTH, Username } from "@chirp/shared";
+import { USERNAME_RE } from "../src/components/AuthForms";
 import { App } from "../src/App";
 import { MIN_PASSWORD_LENGTH } from "../src/api";
 import { overallStatus, maskSerial } from "../src/format";
@@ -152,6 +153,32 @@ describe("first-run registration", () => {
     expect(fn.mock.calls.some(([u]) => u === "/api/v1/bootstrap/admin")).toBe(false);
   });
 
+  it("rejects an invalid username with a specific message (client and server)", async () => {
+    const { fn, state } = fakeServer({ admin: false });
+    render(<App />);
+    const user = await screen.findByLabelText("Username");
+    await userEvent.clear(user);
+    await userEvent.type(user, "my admin");
+    await userEvent.type(screen.getByLabelText(/^Password \(at least/), "a long password");
+    await userEvent.type(screen.getByLabelText("Repeat password"), "a long password");
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("may only contain letters, digits");
+    expect(calls(fn, "/api/v1/bootstrap/admin", "POST")).toBe(0);
+    // If the server still says bad_request (e.g. rules drift), the same message appears.
+    fn.mockImplementationOnce(async () => new Response('{"error":"bad_request"}', { status: 400 }));
+    await userEvent.clear(user);
+    await userEvent.type(user, "admin");
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("may only contain letters, digits");
+    expect(state.admin).toBeNull();
+  });
+
+  it("the client username rule matches the shared contract", () => {
+    for (const name of ["admin", "a.b_c@d-e", "x".repeat(64), "", "my admin", "x".repeat(65), "관리자", "a/b"]) {
+      expect(USERNAME_RE.test(name), name).toBe(Username.safeParse(name).success);
+    }
+  });
+
   it("someone else was faster: falls back to the login form", async () => {
     const { state } = fakeServer({ admin: false });
     render(<App />);
@@ -162,6 +189,45 @@ describe("first-run registration", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
     expect(await screen.findByText(/already exists/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+});
+
+const settle = () => new Promise((r) => setTimeout(r, 500));
+const calls = (fn: ReturnType<typeof fakeServer>["fn"], url: string, method = "GET") =>
+  fn.mock.calls.filter(([u, i]) => u === url && (i?.method ?? "GET") === method).length;
+
+describe("each screen fetches once on mount (no render loops)", () => {
+  it("login screen: one /auth/me and one /bootstrap/status", async () => {
+    const { fn } = fakeServer();
+    render(<App />);
+    await screen.findByRole("button", { name: "Sign in" });
+    await settle();
+    expect(calls(fn, "/api/v1/auth/me")).toBe(1);
+    expect(calls(fn, "/api/v1/bootstrap/status")).toBe(1);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("dashboard: one status and one history request until the 30 s poll", async () => {
+    const { fn } = fakeServer({ signedIn: true });
+    render(<App />);
+    await screen.findByText("pve");
+    await settle();
+    expect(calls(fn, "/api/v1/auth/me")).toBe(1);
+    expect(calls(fn, "/api/v1/status")).toBe(1);
+    expect(fn.mock.calls.filter(([u]) => String(u).startsWith("/api/v1/history")).length).toBe(1);
+  });
+
+  it("settings: exactly one GET /admin/api-key, also after re-renders (language switch, show/hide)", async () => {
+    const { fn } = fakeServer({ signedIn: true });
+    render(<App />);
+    const section = await openSettings();
+    await within(section).findByTestId("api-key");
+    await settle();
+    expect(calls(fn, "/api/v1/admin/api-key")).toBe(1);
+    await userEvent.click(within(section).getByRole("button", { name: "Show" }));
+    await userEvent.click(screen.getByRole("button", { name: "한국어" }));
+    await settle();
+    expect(calls(fn, "/api/v1/admin/api-key")).toBe(1);
   });
 });
 

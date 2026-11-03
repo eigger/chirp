@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useCallback, useContext } from "react";
 
 export type Lang = "en" | "ko";
 
@@ -13,10 +13,13 @@ const en = {
   "login.busy": "Signing in…",
   "login.invalid": "Wrong username or password.",
   "login.expired": "Your session has ended. Please sign in again.",
-  "login.forgot": "Forgot the password? Run on the server: node apps/server/dist/cli.js admin reset-password",
+  "login.forgot": "Forgot the password? Reset it on the server (prints a new password):",
+  "login.forgotProxmox": "Proxmox (on the host):",
+  "login.forgotDocker": "Docker:",
   "bootstrap.title": "Create the admin account",
   "bootstrap.desc": "This chirp server has no admin account yet. Choose a username and password now: whoever completes this form first becomes the admin.",
   "bootstrap.submit": "Create admin account",
+  "bootstrap.badUsername": "The username may only contain letters, digits, '.', '_', '@' and '-' (1-64 characters, no spaces).",
   "bootstrap.taken": "An admin account already exists. Please sign in.",
   "key.title": "API key",
   "key.desc": "Home Assistant (hass-chirp) and other clients read chirp's data with this key.",
@@ -135,10 +138,13 @@ const ko: Record<MessageKey, string> = {
   "login.busy": "로그인 중…",
   "login.invalid": "사용자명 또는 비밀번호가 올바르지 않습니다.",
   "login.expired": "세션이 만료되었습니다. 다시 로그인하세요.",
-  "login.forgot": "비밀번호를 잊었나요? 서버에서 실행: node apps/server/dist/cli.js admin reset-password",
+  "login.forgot": "비밀번호를 잊었나요? 서버에서 재설정하세요(새 비밀번호가 출력됩니다):",
+  "login.forgotProxmox": "Proxmox (호스트에서):",
+  "login.forgotDocker": "Docker:",
   "bootstrap.title": "관리자 계정 만들기",
   "bootstrap.desc": "이 chirp 서버에는 아직 관리자 계정이 없습니다. 지금 사용자명과 비밀번호를 정하세요. 이 양식을 먼저 완료한 사람이 관리자가 됩니다.",
   "bootstrap.submit": "관리자 계정 만들기",
+  "bootstrap.badUsername": "사용자명에는 영문자, 숫자, '.', '_', '@', '-'만 쓸 수 있습니다(1~64자, 공백 없음).",
   "bootstrap.taken": "이미 관리자 계정이 있습니다. 로그인하세요.",
   "key.title": "API 키",
   "key.desc": "Home Assistant(hass-chirp) 등 클라이언트는 이 키로 chirp 데이터를 읽습니다.",
@@ -266,7 +272,8 @@ export function translate(lang: Lang, key: MessageKey, vars?: Record<string, str
 
 export const LangContext = createContext<Lang>("en");
 
+/** Stable per language, so it is safe in hook dependency lists. */
 export function useT() {
   const lang = useContext(LangContext);
-  return (key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars);
+  return useCallback((key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
 }
