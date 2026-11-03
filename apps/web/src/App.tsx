@@ -35,6 +35,8 @@ export function App() {
         fetchHistory(apiKey, "load.cpuUsagePercent")
           .then((h) => setCpuUsageHistory(h.points))
           .catch(() => setCpuUsageHistory([]));
+      } else {
+        setCpuUsageHistory([]);
       }
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {

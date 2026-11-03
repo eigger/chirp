@@ -71,9 +71,20 @@ export function formatBytesIEC(n: number | null | undefined): string {
   return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
-/** Bytes per second, decimal units ("152 KB/s"). */
-export function formatRate(n: number | null | undefined): string {
-  return n == null ? "—" : `${formatBytes(n)}/s`;
+/**
+ * Throughput from bytes per second, shown in bits per second like link
+ * speeds ("1.2 Mbit/s" next to "1 Gbit/s").
+ */
+export function formatRate(bytesPerSec: number | null | undefined): string {
+  if (bytesPerSec == null) return "—";
+  const units = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
+  let v = bytesPerSec * 8;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
 /** Link speed in Mbit/s -> "1 Gbit/s", "2.5 Gbit/s", "100 Mbit/s". */

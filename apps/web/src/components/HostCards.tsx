@@ -140,6 +140,12 @@ export function NetworkTable({ network }: { network: Network }) {
                     <td>{t(`net.kind.${i.kind}`)}</td>
                     <td>
                       <span className={`badge badge-${i.up ? "ok" : "unknown"}`}>{i.up ? t("net.up") : t("net.down")}</span>
+                      {i.operState && i.operState !== "up" && i.operState !== "down" && (
+                        <span className="muted small" data-testid={`operstate-${i.id}`}>
+                          {" "}
+                          {i.operState}
+                        </span>
+                      )}
                     </td>
                     <td>{formatLinkSpeed(i.speedMbps)}</td>
                     <td className="num">{formatRate(i.rxBytesPerSec)}</td>

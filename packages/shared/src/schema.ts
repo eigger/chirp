@@ -180,7 +180,7 @@ export const NetInterface = z.object({
   operState: z.string().nullable(),
   /** Link speed; null when unknown (virtual devices, link down). */
   speedMbps: num,
-  /** Cumulative counters since the interface was created. */
+  /** Cumulative bytes since the interface was created; they restart from 0 when it is re-created. */
   rxBytes: num,
   txBytes: num,
   /**
