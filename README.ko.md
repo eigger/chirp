@@ -93,9 +93,9 @@ node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 - Proxmox 스크립트는 `smartctl`이 호스트 블록 장치에 접근하도록 **privileged LXC** 컨테이너를 만듭니다. privileged 컨테이너가 뚫리면 호스트도 위험하므로 신뢰하는 네트워크에서만 쓰세요. 장치 규칙은 선택한 디스크의 major에 `rw`만 허용합니다(정확한 minor를 쓰지 않는 이유는 [`docs/ko/deploy.md`](docs/ko/deploy.md#디스크-passthrough와-권한) 참고).
 - **설치 직후 관리자 계정을 만드세요.** 계정이 생기기 전까지는 대시보드에 접근할 수 있는 누구나 관리자를 만들 수 있습니다(최초 등록). 서버는 시작할 때마다 로그로 경고합니다.
 - 통신은 **HTTP 평문**입니다. 로그인할 때의 관리자 비밀번호, 세션 쿠키, API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두세요.
-- 프록시 뒤라면 `CHIRP_TRUST_PROXY`를 프록시 개수(보통 `1`)나 프록시 주소로 설정하세요. 설정하지 않으면 로그인 지연에서 모든 클라이언트가 프록시 주소 하나를 공유합니다. `true`는 프록시가 `X-Forwarded-For`를 덮어쓸 때만 안전합니다([`docs/ko/deploy.md`](docs/ko/deploy.md#보안) 참고).
+- 프록시 뒤라면 `CHIRP_TRUST_PROXY`를 **프록시의 IP/CIDR**(예: `10.0.0.5`)로 설정하세요. 설정하지 않으면 로그인 제한에서 모든 클라이언트가 프록시 주소 하나를 공유합니다. 프록시 개수(`1`)나 `true`는 chirp에 프록시를 통해서*만* 접근할 수 있을 때(`CHIRP_HOST=127.0.0.1` 또는 방화벽)만 안전합니다. 아니면 직접 접속한 클라이언트가 `X-Forwarded-For`를 위조할 수 있습니다([`docs/ko/deploy.md`](docs/ko/deploy.md#보안) 참고).
 - `CHIRP_ADMIN_PASSWORD`는 계정이 생긴 뒤에도 환경 변수에 평문으로 남습니다. 첫 기동 후 지우고 대시보드에서 비밀번호를 바꾸세요.
-- 로그인 세션은 HttpOnly, SameSite=Strict 쿠키(12시간 무활동, 최대 7일)이고, 로그인 실패는 지수적으로 지연됩니다. API 키로는 키나 계정을 조회·변경할 수 없습니다.
+- 로그인 세션은 HttpOnly, SameSite=Strict 쿠키(12시간 무활동, 최대 7일)입니다. 비밀번호는 10자 이상이고 흔한 비밀번호는 거부됩니다. 로그인 실패는 주소별(최대 15분)·사용자명별(최대 5초)로 지연되고, 사용자명마다 하루 실패 1000회 예산이 있습니다. 지속적인 공격은 *새* 주소의 로그인을 늦추거나 예산 소진 후 막을 수 있지만, 이전에 로그인한 주소, 열린 세션, Home Assistant에는 영향이 없습니다. `admin reset-password`나 재시작으로 풀립니다([상세](docs/api.md#login-rate-limiting)). API 키로는 키나 계정을 조회·변경할 수 없습니다.
 - `POST /api/v1/refresh`는 30초 쿨다운이 있으며 서버는 잠든 디스크를 깨우지 않습니다.
 
 ## 개발

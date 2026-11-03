@@ -26,18 +26,38 @@ There is one key. It is `CHIRP_API_KEY` (at least 16 characters) when set, other
 
 ### Login rate limiting
 
-Failed credential checks (login, current password on a password change) are counted under two keys, *before* the password is checked (so parallel guesses count too). While a key is backing off, the password is not even checked: `429 {"error":"rate_limited","retryAfter":<s>}` with `Retry-After`.
+Applies to credential checks: `POST /auth/login` and the current password on `POST /auth/password`. A **source** is an IPv4 address or an IPv6 **/64**. Every attempt is recorded *before* the password is checked, so parallel guesses count too. An attempt that is never checked because the server is busy (see the end of this section) is not counted. A correct password clears the source's and the username's backoff and remembers the source as **known** for that username, in memory, until a restart.
 
-| Key | Free failures | Then waits | Cap | Purpose |
-|---|---|---|---|---|
-| client address (IPv4, or the IPv6 **/64**) | 5 | 1 s, 2 s, 4 s, ... doubling | **15 min** | stops guessing from one source |
-| username | 5 | 1 s, 2 s, 4 s | **5 s** | bounds guessing one name from many sources to about one password per 5 s |
+| Mechanism | Applies to | Rule |
+|---|---|---|
+| Source backoff | every attempt | after 5 failures the source waits 1 s, 2 s, 4 s, ... doubling, **capped at 15 min**; forgotten 15 min after its last failure |
+| Username backoff | only sources that already failed in the window and are not known for this username | after 5 failures on the username: 1 s, 2 s, 4 s, **capped at 5 s** |
+| Daily budget | sources not known for this username | at most `CHIRP_LOGIN_DAILY_BUDGET` (default **1000**) failed attempts per username per rolling 24 h (hourly buckets); when spent, only known sources may try |
 
-The username cap is deliberately short: an attacker who keeps failing on the admin's name from many addresses can make the real admin wait **at most 5 s** before the next try; they cannot lock the admin out. A key's failures are forgotten after 15 min without a new one, or on success. Unknown user and wrong password give the same `401` and take the same time.
+While a rule blocks an attempt, the password is not checked: the answer is `429 {"error":"rate_limited","retryAfter":<s>}` with `Retry-After`. Unknown user and wrong password give the same `401` and take the same time.
 
-The client address is the TCP peer unless `CHIRP_TRUST_PROXY` says which proxies to believe (see [`deploy.md`](deploy.md#security)); behind an untrusted-for proxy all clients share the proxy's address and therefore one backoff.
+**The state machine for one username:**
 
-Password hashing (scrypt) runs at most 2 at a time with up to 16 waiting; beyond that, login/bootstrap/password requests are answered at once with `429 {"error":"rate_limited","retryAfter":1}`, so a flood cannot tie up the server.
+- **Normal:** each source has its own backoff, and that is the only limit.
+- **Username backoff active** (5+ recent failures on the name): a source with no recorded failure, or a known one, is still checked. A source that already failed must also wait out the username backoff (at most 5 s). Every checked guess spends budget.
+- **Budget spent** (1000 failures in 24 h): only known sources are checked. Everyone else, including the real admin on a new address, gets 429 until failures age out of the window.
+  - Recovery: wait; sign in from a known address; run `cli.js admin reset-password` (a credential change resets the username's budget and backoff); or restart the service (all limiter state is in memory).
+
+**What this guarantees:**
+
+- One source can test about 10 passwords in the first minute and about 15 in the first 20 minutes, then one per 15 min.
+- A distributed attacker that keeps switching sources can test at most the daily budget per username (1000 per 24 h by default). Pair that with the password rules (at least 10 characters, common passwords refused) and online guessing is impractical.
+- A sustained attack cannot keep out a source that signed in before. A clean source also gets in until the budget is spent.
+- Sessions that are already signed in, the API key, Home Assistant and the CLI are never affected.
+
+**What it does not guarantee:**
+
+- Once the budget is spent, a new address (a phone on mobile data, say) cannot sign in until the window passes or the password is reset.
+- A restart forgets which sources are known.
+
+**Busy server:** password hashing (scrypt) runs at most 2 at a time, with up to 16 waiting plus 4 reserved queue places for known sources and signed-in sessions. Beyond that, login, bootstrap and password requests are answered at once with `429 {"error":"rate_limited","retryAfter":1}`, and such shed attempts are not counted against anyone.
+
+**Behind a proxy**, the source is the TCP peer unless `CHIRP_TRUST_PROXY` names the proxy (see [`deploy.md`](deploy.md#security)). Without it, every client shares the proxy's address: one source backoff for everybody, so an attacker's failures make all users wait up to 15 min, and "known source" means "anyone behind the proxy".
 
 ### First-run registration
 
@@ -80,7 +100,7 @@ All bodies are JSON (`Content-Type: application/json`); schemas are in `schema.t
 | `GET /api/v1/admin/api-key` | session | | `200 {"key":"chp_...","source":"file"\|"env"}` |
 | `POST /api/v1/admin/api-key/regenerate` | session + CSRF | | `200 {"key":"chp_..."}`; the old key is dead at once. `409` when `source` is `env` |
 
-Usernames are 1-64 of `A-Z a-z 0-9 . _ @ -`; passwords 10-256 characters. Responses under `/api/v1` carry `Cache-Control: no-store`.
+Usernames are 1-64 of `A-Z a-z 0-9 . _ @ -`; passwords 10-256 characters and not a common/guessable password (breach-list words with digits, symbols or letter substitutions, keyboard walks, sequences, repeated characters, the username or chirp/admin words). A rejected password gets `400 {"error":"weak_password","reason":"too_short"|"too_long"|"common"}`. Responses under `/api/v1` carry `Cache-Control: no-store`.
 
 ## GET /health  (no auth)
 
