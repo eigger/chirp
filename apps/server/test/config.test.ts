@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigError, loadConfig, MIN_API_KEY_LENGTH } from "../src/config.js";
 import { healthUrl } from "../src/healthcheck.js";
-import { newKeyLogMessage } from "../src/keyNotice.js";
 import { classifyExecError, discoverDevices, parseScan, readDisk, SmartctlError } from "../src/smartctl.js";
 
 describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
@@ -37,18 +36,22 @@ describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
   });
 });
 
-describe("new API key log line", () => {
-  const key = "chp_" + "x".repeat(43);
-  it("names the key file and the CLI but not the key", () => {
-    const msg = newKeyLogMessage({ apiKeyFile: "/var/lib/chirp/api-key", printKey: false }, key);
-    expect(msg).not.toContain(key);
-    expect(msg).toContain("/var/lib/chirp/api-key");
-    expect(msg).toMatch(/cli\.js key show/);
-    expect(msg).toContain("CHIRP_PRINT_KEY=true");
+describe("CHIRP_ADMIN_* / CHIRP_COOKIE_SECURE", () => {
+  it("seeds only when both are set and valid", () => {
+    expect(loadConfig({}).adminUser).toBeNull();
+    const c = loadConfig({ CHIRP_ADMIN_USER: " admin ", CHIRP_ADMIN_PASSWORD: " long enough pw " });
+    expect(c.adminUser).toBe("admin");
+    expect(c.adminPassword).toBe(" long enough pw ");
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin" })).toThrowError(/set together/);
+    expect(() => loadConfig({ CHIRP_ADMIN_PASSWORD: "0123456789" })).toThrowError(/set together/);
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin", CHIRP_ADMIN_PASSWORD: "short" })).toThrowError(/10-256 characters/);
+    expect(() => loadConfig({ CHIRP_ADMIN_USER: "bad user", CHIRP_ADMIN_PASSWORD: "0123456789" })).toThrowError(ConfigError);
   });
-  it("prints the key only with CHIRP_PRINT_KEY=true", () => {
-    expect(loadConfig({ CHIRP_PRINT_KEY: "true" }).printKey).toBe(true);
-    expect(newKeyLogMessage({ apiKeyFile: "/k", printKey: true }, key)).toContain(key);
+  it("cookie Secure flag: auto by default, explicit true/false", () => {
+    expect(loadConfig({}).cookieSecure).toBe("auto");
+    expect(loadConfig({ CHIRP_COOKIE_SECURE: "true" }).cookieSecure).toBe(true);
+    expect(loadConfig({ CHIRP_COOKIE_SECURE: "off" }).cookieSecure).toBe(false);
+    expect(() => loadConfig({ CHIRP_COOKIE_SECURE: "maybe" })).toThrowError(/CHIRP_COOKIE_SECURE/);
   });
 });
 

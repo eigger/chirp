@@ -1,6 +1,6 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
-import { ApiKeyStore } from "./apiKey.js";
+import { authHook, registerAuthRoutes, type Auth } from "./auth.js";
 import type { Config } from "./config.js";
 import type { Collector } from "./scheduler.js";
 import { registerStatic } from "./static.js";
@@ -18,24 +18,24 @@ const RANGES: Record<string, number> = {
 export interface AppOptions {
   config: Config;
   collector: Collector;
-  keys: ApiKeyStore;
+  auth: Auth;
   logger?: boolean;
   now?: () => number;
 }
 
-function bearer(header: string | undefined): string | null {
-  // The auth scheme is case-insensitive (RFC 9110 §11.1).
-  const m = /^bearer[ \t]+(.+)$/i.exec(header ?? "");
-  return m ? m[1].trim() || null : null;
-}
-
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
-  const { config, collector, keys } = opts;
+  const { config, collector, auth } = opts;
   const now = opts.now ?? Date.now;
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: config.trustProxy });
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: config.trustProxy, bodyLimit: 64 * 1024 });
 
   if (config.corsOrigins.length) {
-    await app.register(cors, { origin: config.corsOrigins, allowedHeaders: ["Authorization", "Content-Type"] });
+    // Bearer-key access only: no credentials (cookies) and never the CSRF header,
+    // so a cross-origin page can never act with the dashboard session.
+    await app.register(cors, {
+      origin: config.corsOrigins,
+      allowedHeaders: ["Authorization", "Content-Type"],
+      credentials: false,
+    });
   }
 
   // Every error body follows the shared ErrorResponse schema: {"error": <code>}.
@@ -45,22 +45,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       request.log.error(error);
       return reply.code(status).send({ error: "internal_error" });
     }
-    return reply.code(status === 401 ? 401 : status === 404 ? 404 : 400).send({
-      error: status === 401 ? "unauthorized" : status === 404 ? "not_found" : "bad_request",
-    });
+    const known: Record<number, string> = { 401: "unauthorized", 403: "forbidden", 404: "not_found" };
+    const code = known[status] ? status : 400;
+    return reply.code(code).send({ error: known[code] ?? "bad_request" });
   });
 
   app.get("/health", async () => ({ status: "ok" as const, version: VERSION }));
 
   await app.register(
     async (api) => {
-      api.addHook("onRequest", async (request, reply) => {
-        if (request.method === "OPTIONS") return;
-        const token = bearer(request.headers.authorization);
-        if (!token || !keys.verify(token)) {
-          return reply.code(401).header("www-authenticate", "Bearer").send({ error: "unauthorized" });
-        }
-      });
+      api.addHook("onRequest", authHook(auth, now));
+      registerAuthRoutes(api, auth, config);
 
       api.get("/status", async (_req, reply) => {
         reply.header("cache-control", "no-store");

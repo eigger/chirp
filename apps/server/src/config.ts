@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, Username } from "@chirp/shared";
 
 export interface TempWarn {
   hdd: number;
@@ -10,11 +11,16 @@ export interface TempWarn {
 
 export interface Config {
   port: number;
-  /** Print a newly generated API key to the log (CHIRP_PRINT_KEY, opt-in). */
-  printKey: boolean;
   host: string;
+  /** Legacy single API key (CHIRP_API_KEY); still accepted next to dashboard keys. */
   apiKey: string | null;
+  /** Legacy key file (default <dataDir>/api-key); read if present, never created by the server. */
   apiKeyFile: string;
+  /** Admin account seeded on start when none exists (CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD). */
+  adminUser: string | null;
+  adminPassword: string | null;
+  /** Session cookie `Secure` flag: auto = when the request arrived over HTTPS (honours CHIRP_TRUST_PROXY). */
+  cookieSecure: "auto" | boolean;
   dataDir: string;
   devices: string[];
   deviceTypes: Record<string, string>;
@@ -65,10 +71,38 @@ function apiKey(value: string | undefined): string | null {
   if (v.length < MIN_API_KEY_LENGTH) {
     throw new ConfigError(
       `CHIRP_API_KEY is too short (${v.length} characters, minimum ${MIN_API_KEY_LENGTH}); ` +
-        "unset it to use a generated key, or generate one with: node apps/server/dist/cli.js key rotate",
+        "unset it and create keys in the dashboard (Settings -> API keys) instead",
     );
   }
   return v;
+}
+
+function adminSeed(env: Env): { adminUser: string | null; adminPassword: string | null } {
+  const user = env.CHIRP_ADMIN_USER?.trim() || null;
+  // Passwords are taken verbatim (no trim): spaces may be intended.
+  const password = env.CHIRP_ADMIN_PASSWORD ? env.CHIRP_ADMIN_PASSWORD : null;
+  if (!user && !password) return { adminUser: null, adminPassword: null };
+  if (!user || !password) {
+    throw new ConfigError("CHIRP_ADMIN_USER and CHIRP_ADMIN_PASSWORD must be set together");
+  }
+  if (!Username.safeParse(user).success) {
+    throw new ConfigError("CHIRP_ADMIN_USER must be 1-64 letters, digits, '.', '_', '@' or '-'");
+  }
+  const len = [...password].length;
+  if (len < MIN_PASSWORD_LENGTH || len > MAX_PASSWORD_LENGTH) {
+    throw new ConfigError(
+      `CHIRP_ADMIN_PASSWORD must be ${MIN_PASSWORD_LENGTH}-${MAX_PASSWORD_LENGTH} characters (got ${len})`,
+    );
+  }
+  return { adminUser: user, adminPassword: password };
+}
+
+function cookieSecure(value: string | undefined): Config["cookieSecure"] {
+  const v = (value ?? "").trim().toLowerCase();
+  if (v === "" || v === "auto") return "auto";
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  throw new ConfigError(`CHIRP_COOKIE_SECURE must be auto, true or false (got "${value}")`);
 }
 
 function scanMode(value: string | undefined): Config["scanMode"] {
@@ -151,10 +185,11 @@ export function loadConfig(env: Env = process.env): Config {
   const dataDir = env.CHIRP_DATA_DIR?.trim() || "/var/lib/chirp";
   return {
     port: port(env.CHIRP_PORT),
-    printKey: bool(env.CHIRP_PRINT_KEY),
     host: env.CHIRP_HOST?.trim() || "0.0.0.0",
     apiKey: apiKey(env.CHIRP_API_KEY),
     apiKeyFile: env.CHIRP_API_KEY_FILE?.trim() || resolve(dataDir, "api-key"),
+    ...adminSeed(env),
+    cookieSecure: cookieSecure(env.CHIRP_COOKIE_SECURE),
     dataDir,
     devices,
     deviceTypes,

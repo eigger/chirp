@@ -1,8 +1,8 @@
-import { ApiKeyStore } from "./apiKey.js";
 import { buildApp } from "./app.js";
+import { createAuth } from "./auth.js";
+import { bootstrapAuth } from "./bootstrap.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
 import { loadInstanceId } from "./instanceId.js";
-import { newKeyLogMessage } from "./keyNotice.js";
 import { Collector, defaultDeps } from "./scheduler.js";
 import { VERSION } from "./version.js";
 
@@ -17,7 +17,7 @@ try {
   throw err;
 }
 
-const { store, created, key } = ApiKeyStore.fromConfig(config);
+const auth = createAuth(config);
 const instanceId = loadInstanceId(config.dataDir, (m) => console.warn(m));
 
 // The collector may warn before the app (and its logger) exists.
@@ -33,16 +33,14 @@ const collector = new Collector(defaultDeps(config, (m) => warn(m)), {
   concurrency: 2,
 });
 
-const app = await buildApp({ config, collector, keys: store, logger: true });
+const app = await buildApp({ config, collector, auth, logger: true });
 warn = (m) => app.log.warn(m);
 
 if (config.rejected.length) {
   app.log.warn(`Ignoring unsafe CHIRP_DEVICES/CHIRP_DEVICE_TYPES entries: ${config.rejected.join(", ")}`);
 }
 
-if (created) {
-  app.log.warn(newKeyLogMessage(config, key));
-}
+for (const n of await bootstrapAuth(config, auth)) app.log[n.level](n.msg);
 
 collector.start();
 

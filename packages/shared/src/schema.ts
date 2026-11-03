@@ -150,16 +150,51 @@ export const HistoryResponse = z.object({
 /** POST /api/v1/refresh -> 202 */
 export const RefreshResponse = z.object({ queued: z.literal(true) });
 
-/** Every error body is `{"error": <code>}` (429 adds `retryAfter`). */
-export const ErrorCode = z.enum(["bad_request", "unauthorized", "not_found", "cooldown", "internal_error"]);
+/**
+ * Every error body is `{"error": <code>}` (429 adds `retryAfter`).
+ * Codes were only ever added to this list (compatible): clients must treat an
+ * unknown code like the HTTP status it came with.
+ */
+export const ErrorCode = z.enum([
+  "bad_request",
+  "unauthorized",
+  "not_found",
+  "cooldown",
+  "internal_error",
+  "forbidden",
+  "conflict",
+  "rate_limited",
+  "invalid_credentials",
+  "weak_password",
+]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 export const ErrorResponse = z.object({ error: ErrorCode });
 export type ErrorResponse = z.infer<typeof ErrorResponse>;
 
 /** 400: bad query parameters, malformed URL encoding, unparsable request body. */
 export const BadRequestResponse = z.object({ error: z.literal("bad_request") });
-/** 401: missing or wrong API key (`WWW-Authenticate: Bearer`). */
+/**
+ * 401: missing or wrong credentials (`WWW-Authenticate: Bearer`): no/invalid API
+ * key or session on a data route, no session on a session route, wrong
+ * username/password on login, wrong setup code.
+ */
 export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") });
+/**
+ * 403: an API key used on a session-only route (`/auth/*`, `/keys`), or a
+ * cookie-authenticated state-changing request without the CSRF header.
+ */
+export const ForbiddenResponse = z.object({ error: z.literal("forbidden") });
+/** 409: setup when an admin already exists; revoking the read-only legacy key; too many keys. */
+export const ConflictResponse = z.object({ error: z.literal("conflict") });
+/** 429: too many failed login / setup / password attempts (`Retry-After` header carries the same seconds). */
+export const RateLimitedResponse = z.object({
+  error: z.literal("rate_limited"),
+  retryAfter: z.number(),
+});
+/** 400: wrong current password on POST /auth/password. */
+export const InvalidCredentialsResponse = z.object({ error: z.literal("invalid_credentials") });
+/** 400: a new password shorter than MIN_PASSWORD_LENGTH (or longer than MAX_PASSWORD_LENGTH). */
+export const WeakPasswordResponse = z.object({ error: z.literal("weak_password") });
 /** 404: unknown disk id, unknown history metric, unknown /api or /health path. */
 export const NotFoundResponse = z.object({ error: z.literal("not_found") });
 /** 429: POST /refresh within the cooldown (`Retry-After` header carries the same seconds). */
@@ -171,3 +206,83 @@ export const CooldownResponse = z.object({
 export const InternalErrorResponse = z.object({ error: z.literal("internal_error") });
 
 export const API_KEY_PREFIX = "chp_";
+
+// ---------------------------------------------------------------------------
+// Authentication (dashboard sessions) and API key management.
+//
+// Two ways to authenticate:
+//  - `Authorization: Bearer chp_...` (API key): data routes only (status, disks,
+//    history, refresh). This is what Home Assistant uses.
+//  - the `chirp_session` cookie (admin login): data routes and the session-only
+//    routes below. State-changing cookie requests need the `X-Chirp-Csrf: 1` header.
+// ---------------------------------------------------------------------------
+
+/** HttpOnly, SameSite=Strict session cookie set by login/setup. */
+export const SESSION_COOKIE = "chirp_session";
+/** Required on every non-GET request authenticated by the session cookie (and on login/setup). */
+export const CSRF_HEADER = "x-chirp-csrf";
+export const MIN_PASSWORD_LENGTH = 10;
+export const MAX_PASSWORD_LENGTH = 256;
+
+/** Admin username: 1-64 of letters, digits, `.`, `_`, `@`, `-`. */
+export const Username = z.string().regex(/^[A-Za-z0-9._@-]{1,64}$/);
+
+/** POST /api/v1/auth/login */
+export const LoginRequest = z.object({
+  username: z.string().max(256),
+  password: z.string().max(1024),
+});
+
+/** GET /api/v1/auth/setup (no auth): whether the one-time setup form is active (no admin yet). */
+export const SetupStateResponse = z.object({ required: z.boolean() });
+
+/** POST /api/v1/auth/setup: create the admin with the one-time setup code. */
+export const SetupRequest = z.object({
+  setupCode: z.string().max(256),
+  username: Username,
+  password: z.string().max(1024),
+});
+
+/** GET /api/v1/auth/me, and the body of a successful login/setup. */
+export const AuthUserResponse = z.object({ username: z.string() });
+
+/** POST /api/v1/auth/password -> 204 (all sessions end; the caller gets a fresh one). */
+export const ChangePasswordRequest = z.object({
+  currentPassword: z.string().max(1024),
+  newPassword: z.string().max(1024),
+});
+
+/**
+ * Where a key comes from: `dashboard` keys are created/revoked in Settings;
+ * `env` (CHIRP_API_KEY) and `file` (<dataDir>/api-key) are the read-only legacy key.
+ */
+export const ApiKeySource = z.enum(["dashboard", "env", "file"]);
+
+/** One API key as listed. Never contains the plaintext key or its hash. */
+export const ApiKeyInfo = z.object({
+  /** `legacy` for the env/file key. */
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  name: z.string(),
+  /** First characters of the key (`chp_` + 8), for recognising it. */
+  prefix: z.string(),
+  source: ApiKeySource,
+  revocable: z.boolean(),
+  createdAt: z.string().nullable(),
+  /** Updated at most every 5 minutes; null = never used (legacy: since the server started). */
+  lastUsedAt: z.string().nullable(),
+});
+export type ApiKeyInfo = z.infer<typeof ApiKeyInfo>;
+
+/** GET /api/v1/keys */
+export const ApiKeyListResponse = z.object({ keys: z.array(ApiKeyInfo) });
+
+/** POST /api/v1/keys */
+export const CreateApiKeyRequest = z.object({
+  name: z.string().trim().min(1).max(64),
+});
+
+/** 201 from POST /api/v1/keys: the only response that ever carries the plaintext key. */
+export const ApiKeyCreatedResponse = ApiKeyInfo.extend({
+  key: z.string().startsWith(API_KEY_PREFIX),
+});
+export type ApiKeyCreatedResponse = z.infer<typeof ApiKeyCreatedResponse>;
