@@ -685,11 +685,6 @@ describe("client address behind proxies", () => {
   });
 });
 
-/** Resolves once the scrypt gate's normal queue is full (a flood is in progress). */
-async function whenGateFull(): Promise<void> {
-  for (let i = 0; i < 1000 && scryptGate.queued < scryptGate.queueMax; i++) await new Promise((r) => setImmediate(r));
-}
-
 describe("scrypt concurrency gate", () => {
   it("runs at most `max` jobs, queues `queueMax`, rejects the rest immediately", async () => {
     const gate = new Semaphore(2, 3);
@@ -727,49 +722,63 @@ describe("scrypt concurrency gate", () => {
     expect(codes.every((c) => c === 401 || c === 429)).toBe(true);
   });
 
+  /** Fill the global scrypt gate (2 running + full normal queue) with jobs that wait for release(). */
+  function occupyGate() {
+    const waiting: (() => void)[] = [];
+    let done = 0;
+    const total = scryptGate.max + scryptGate.queueMax;
+    for (let i = 0; i < total; i++) {
+      void scryptGate.run(() => new Promise<void>((resolve) => waiting.push(resolve))).then(() => done++);
+    }
+    return async () => {
+      while (done < total) {
+        waiting.shift()?.();
+        await new Promise((r) => setImmediate(r));
+      }
+    };
+  }
+
   it("busy rejections are not counted: after a flood nobody stays penalised", async () => {
     await start();
-    // Fresh flood addresses every round, so the flood is never throttled away and really fills the gate.
-    const flood = (round: number) =>
-      Promise.all(Array.from({ length: 40 }, (_, i) => login(USER, `flood guess ${i}`, `10.88.${round}.${i}`)));
-    // The admin tries the right password while the gate is full, from a new address each round
-    // (so each try is a stranger to the reserved lane): those tries are shed with 429 busy.
-    const shedAdmin: string[] = [];
+    // Ten floods in a row; each time the admin tries the right password from a new address while the
+    // gate is full, and the same for a stranger with a wrong one: both are shed with 429.
+    const shed: string[] = [];
     for (let round = 0; round < 10; round++) {
+      const release = occupyGate();
       const ip = `192.168.7.${round + 1}`;
-      const [floodResults, code] = await Promise.all([
-        flood(round),
-        whenGateFull().then(() => login(USER, PASS, ip)).then((r) => r.statusCode),
-      ]);
-      expect(floodResults.some((r) => r.statusCode === 429)).toBe(true);
-      if (code === 429) shedAdmin.push(ip);
-      clock += 100;
+      const adminRes = await login(USER, PASS, ip);
+      const strangerRes = await login(USER, "wrong password!", `10.88.0.${round}`);
+      for (const r of [adminRes, strangerRes]) {
+        expect(r.statusCode).toBe(429);
+        expect(RateLimitedResponse.parse(r.json()).retryAfter).toBe(1);
+      }
+      shed.push(ip);
+      await release();
     }
-    expect(shedAdmin.length).toBeGreaterThanOrEqual(5);
-    // Nothing was recorded for the shed tries: once capacity is back each address gets in at once.
-    for (const ip of shedAdmin) {
-      expect(auth.limiter.sourceFailures(ip)).toBe(0);
-      expect(auth.limiter.check(ip, USER).ok).toBe(true);
-      expect((await login(USER, PASS, ip)).statusCode).toBe(200);
-    }
-    // Flood sources whose attempts were shed (busy) have nothing recorded against them.
-    const shed = (await flood(99)).map((r, i) => ({ i, code: r.statusCode })).filter((x) => x.code === 429);
-    expect(shed.length).toBeGreaterThan(0);
-    for (const { i } of shed.slice(0, 5)) {
-      expect(auth.limiter.sourceFailures(`10.88.99.${i}`)).toBe(0);
-    }
+    // Nothing was recorded for any shed attempt: no source failures, no username backoff, no budget.
+    for (let round = 0; round < 10; round++) expect(auth.limiter.sourceFailures(`10.88.0.${round}`)).toBe(0);
+    for (const ip of shed) expect(auth.limiter.sourceFailures(ip)).toBe(0);
+    // Once capacity is back the admin gets in at once, from every one of those addresses.
+    for (const ip of shed) expect((await login(USER, PASS, ip)).statusCode).toBe(200);
   });
 
-  it("an address that signed in before gets the reserved lane while strangers flood the gate", async () => {
+  it("an address that signed in before gets the reserved lane while strangers fill the gate", async () => {
     await start();
     expect((await login(USER, PASS, "192.168.7.8")).statusCode).toBe(200);
-    const [floodResults, known] = await Promise.all([
-      Promise.all(Array.from({ length: 40 }, (_, i) => login(`stranger${i}`, "wrong password!", `10.89.${i}.1`))),
-      // Fired after the flood has filled the normal queue.
-      whenGateFull().then(() => login(USER, PASS, "192.168.7.8")).then((r) => r.statusCode),
-    ]);
-    expect(floodResults.filter((r) => r.statusCode === 429).length).toBeGreaterThan(0);
-    expect(known).toBe(200);
+    const release = occupyGate();
+    expect((await login("stranger", "wrong password!", "10.89.0.1")).statusCode).toBe(429);
+    const known = login(USER, PASS, "192.168.7.8"); // queued in the reserved lane, not rejected
+    await new Promise((r) => setImmediate(r));
+    await release();
+    expect((await known).statusCode).toBe(200);
+  });
+
+  it("a real flood is shed quickly and never runs more than 2 hashes at once", async () => {
+    await start();
+    scryptGate.peak = 0;
+    const results = await Promise.all(Array.from({ length: 60 }, (_, i) => login(USER, `flood ${i}`, `10.90.${i}.1`)));
+    expect(scryptGate.peak).toBeLessThanOrEqual(2);
+    expect(results.every((r) => r.statusCode === 401 || r.statusCode === 429)).toBe(true);
   });
 
   it("the gate's priority lane is served first and bounded", async () => {
