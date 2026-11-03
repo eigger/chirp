@@ -106,7 +106,8 @@ export class AdminStore {
   /** Changes whenever the credentials change; empty when there is no admin. */
   credentialStamp(): string {
     this.refresh();
-    return this.admin ? `${this.admin.username}\n${this.admin.passwordChangedAt}` : "";
+    // The random salt changes on every reset, including resets in the same millisecond.
+    return this.admin ? digest(JSON.stringify([this.admin.username, this.admin.password])).toString("hex") : "";
   }
 
   private async build(username: string, password: string, createdAt?: string): Promise<AdminFile> {

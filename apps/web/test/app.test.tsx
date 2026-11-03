@@ -123,6 +123,30 @@ describe("sign-in flow", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
     expect(state.session).toBe(false);
   });
+
+  it.each(["network", "server"])("keeps the session visible after a %s logout failure and allows retry", async (failure) => {
+    const { fn, state } = fakeServer({ signedIn: true });
+    const handle = fn.getMockImplementation()!;
+    let failLogout = true;
+    fn.mockImplementation(async (url, init) => {
+      if (url === "/api/v1/auth/logout" && failLogout) {
+        failLogout = false;
+        if (failure === "network") throw new TypeError("Failed to fetch");
+        return new Response('{"error":"internal_error"}', { status: 500 });
+      }
+      return handle(url, init);
+    });
+    render(<App />);
+    await screen.findByText("pve");
+    await userEvent.click(screen.getByRole("button", { name: "Log out" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not log out");
+    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(state.session).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Log out" }));
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(state.session).toBe(false);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("first-run registration", () => {

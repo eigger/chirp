@@ -72,6 +72,8 @@ export function App() {
   const [lang, setLang] = useState<Lang>(detectLang);
   const [auth, setAuth] = useState<AuthState>({ kind: "checking" });
   const [view, setView] = useState<View>("dashboard");
+  const [signingOut, setSigningOut] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
 
   const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
 
@@ -106,6 +108,7 @@ export function App() {
   }, [lang]);
 
   const signedIn = (username: string) => {
+    setLogoutFailed(false);
     setView("dashboard");
     setAuth({ kind: "in", username });
   };
@@ -114,12 +117,16 @@ export function App() {
   const unauthorized = useCallback(() => void check(true), [check]);
 
   const signOut = async () => {
+    setSigningOut(true);
+    setLogoutFailed(false);
     try {
       await logout();
+      setAuth({ kind: "login" });
     } catch {
-      /* the cookie is cleared server-side; nothing else to do */
+      setLogoutFailed(true);
+    } finally {
+      setSigningOut(false);
     }
-    setAuth({ kind: "login" });
   };
 
   return (
@@ -146,7 +153,7 @@ export function App() {
                 {t("nav.settings")}
               </button>
               <span className="muted user">{auth.username}</span>
-              <button type="button" className="link" onClick={() => void signOut()}>
+              <button type="button" className="link" disabled={signingOut} onClick={() => void signOut()}>
                 {t("nav.logout")}
               </button>
             </>
@@ -157,6 +164,7 @@ export function App() {
         </nav>
       </header>
       <main className="container">
+        {auth.kind === "in" && logoutFailed && <p role="alert" className="error">{t("logout.failed")}</p>}
         {auth.kind === "checking" && <p className="muted">{t("common.loading")}</p>}
         {auth.kind === "bootstrap" && (
           <BootstrapForm onDone={signedIn} onTaken={() => setAuth({ kind: "login", notice: "taken" })} />

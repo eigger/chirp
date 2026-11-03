@@ -16,7 +16,7 @@ import {
   WeakPasswordResponse,
 } from "@chirp/shared";
 import type { FastifyInstance } from "fastify";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminStore } from "../src/admin.js";
 import { ApiKeyStore, rotateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
@@ -25,7 +25,7 @@ import { bootstrapAuth, trustProxyNotice } from "../src/bootstrap.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { BusyError, dummyVerify, hashPassword, passwordProblem, scryptGate, Semaphore, verifyPassword } from "../src/password.js";
 import { clientKey, FREE_FAILURES } from "../src/rateLimit.js";
-import { createFileExclusive } from "../src/secureFile.js";
+import { createFileExclusive, writeFileAtomic } from "../src/secureFile.js";
 import { SESSION_IDLE_MS, SESSION_MAX_MS } from "../src/session.js";
 import { Collector } from "../src/scheduler.js";
 import { FAST_SCRYPT } from "./helpers.js";
@@ -155,6 +155,36 @@ describe("password hashing", () => {
 
 describe("login / session", () => {
   beforeEach(() => start());
+
+  it("rejects an old-password login when credentials change during verification", async () => {
+    const resetFile = join(dir, "reset.json");
+    await new AdminStore(resetFile, FAST_SCRYPT, () => clock).create(USER, "reset from the cli");
+    await app.ready();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const blockers = Array.from({ length: scryptGate.max }, () => scryptGate.run(() => blocked));
+    const pending = login().then((res) => res);
+    try {
+      await vi.waitFor(() => expect(scryptGate.queued).toBe(1));
+      // Simulate the CLI's atomic replacement, even within the same clock tick.
+      writeFileAtomic(adminFile(dir), readFileSync(resetFile, "utf8"));
+    } finally {
+      release();
+      await Promise.all(blockers);
+    }
+    const res = await pending;
+    expect(res.statusCode).toBe(401);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(auth.sessions.size).toBe(0);
+    expect((await login(USER, "reset from the cli")).statusCode).toBe(200);
+  });
+
+  it("ends existing sessions when a reset has the same passwordChangedAt", async () => {
+    const cookie = await session();
+    await new AdminStore(adminFile(dir), FAST_SCRYPT, () => clock).setPassword("reset from the cli");
+    const res = await app.inject({ url: "/api/v1/auth/me", headers: { cookie } });
+    expect(res.statusCode).toBe(401);
+  });
 
   it("login sets an HttpOnly SameSite=Strict cookie and /auth/me answers", async () => {
     const res = await login();

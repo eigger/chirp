@@ -175,10 +175,10 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
   const pub = { config: { auth: "public" as const } };
   const sess = { config: { auth: "session" as const } };
 
-  const startSession = (request: FastifyRequest, reply: FastifyReply) => {
+  const startSession = (request: FastifyRequest, reply: FastifyReply, stamp = auth.admin.credentialStamp()) => {
     const username = auth.admin.username();
     if (!username) throw new Error("admin vanished while creating a session");
-    setSessionCookie(config, request, reply, auth.sessions.create(username, auth.admin.credentialStamp()));
+    setSessionCookie(config, request, reply, auth.sessions.create(username, stamp));
     return { username };
   };
 
@@ -241,14 +241,16 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     const decision = auth.limiter.check(request.ip, username);
     if (!decision.ok) return rateLimited(reply, decision.waitMs);
     const known = auth.limiter.isTrusted(request.ip, username);
+    const stamp = auth.admin.credentialStamp();
     // Same 401 for an unknown user, a wrong password and "no admin yet".
     const ok = await counted(auth.limiter.begin(request.ip, username), () => auth.admin.verify(username, password, known));
-    if (!ok.result) return sendError(reply, 401, "unauthorized");
+    if (!ok.result || stamp !== auth.admin.credentialStamp()) return sendError(reply, 401, "unauthorized");
     auth.limiter.succeed(ok.attempt);
     // Never keep two sessions for one browser: the session of the cookie this
     // request came with (if any) ends before the new one is issued.
     auth.sessions.destroy(readCookie(request.headers.cookie, SESSION_COOKIE));
-    return startSession(request, reply);
+    // Bind to the credentials actually verified, even if the CLI resets them again.
+    return startSession(request, reply, stamp);
   });
 
   // Public so a stale cookie can always be cleared; still needs the CSRF header.
