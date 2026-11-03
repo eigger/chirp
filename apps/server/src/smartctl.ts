@@ -226,6 +226,22 @@ function run(bin: string, args: string[], timeoutMs: number, maxBuffer = SMARTCT
   });
 }
 
+/**
+ * smartctl cannot auto-detect the device type of a bind-mounted by-id node inside an LXC
+ * (there is no udev/sysfs symlink to follow) and fails with this message. Retrying with an
+ * explicit type fixes it, e.g. `-d sat` for SATA disks.
+ */
+const NEEDS_DEVICE_TYPE = /Unable to detect device type|Please specify device type/i;
+const FALLBACK_DEVICE_TYPES = ["sat", "scsi"] as const;
+
+/** Types that worked after the fallback, remembered per device path for this process. */
+const detectedTypes = new Map<string, string>();
+
+/** For tests. */
+export function resetDetectedDeviceTypes(): void {
+  detectedTypes.clear();
+}
+
 export async function readDisk(
   config: Pick<Config, "smartctl" | "tempWarn" | "deviceTypes">,
   devicePath: string,
@@ -233,29 +249,53 @@ export async function readDisk(
   timeoutMs = 20_000,
   maxBuffer = SMARTCTL_MAX_BUFFER,
 ): Promise<DiskReading> {
-  const t = type ?? config.deviceTypes[devicePath];
+  const explicit = type ?? config.deviceTypes[devicePath];
+  const t = explicit ?? detectedTypes.get(devicePath);
   // Defence in depth: never hand smartctl something it could parse as an option.
   if (!isSafeDevicePath(devicePath) || (t !== undefined && !isSafeDeviceType(t))) {
     throw new SmartctlError("open_failed");
   }
-  const args = ["-j", "-a", "-n", "standby", ...(t ? ["-d", t] : []), devicePath];
-  // smartctl exits non-zero (a bit mask) for many benign reasons, so only stdout matters.
-  const { stdout, timedOut, overflow, spawnFailed } = await run(config.smartctl, args, timeoutMs, maxBuffer);
-  if (timedOut) throw new SmartctlError("timeout");
-  // Truncated output is unusable JSON: report it as a parse error, with the real cause as detail.
-  if (overflow) throw new SmartctlError("parse_error", `smartctl output exceeded ${maxBuffer} bytes`);
-  if (spawnFailed) throw new SmartctlError("open_failed");
-  let json: unknown;
+
+  const attempt = async (deviceType: string | undefined): Promise<DiskReading> => {
+    const args = ["-j", "-a", "-n", "standby", ...(deviceType ? ["-d", deviceType] : []), devicePath];
+    // smartctl exits non-zero (a bit mask) for many benign reasons, so only stdout matters.
+    const { stdout, timedOut, overflow, spawnFailed } = await run(config.smartctl, args, timeoutMs, maxBuffer);
+    if (timedOut) throw new SmartctlError("timeout");
+    // Truncated output is unusable JSON: report it as a parse error, with the real cause as detail.
+    if (overflow) throw new SmartctlError("parse_error", `smartctl output exceeded ${maxBuffer} bytes`);
+    if (spawnFailed) throw new SmartctlError("open_failed");
+    let json: unknown;
+    try {
+      json = JSON.parse(stdout);
+    } catch {
+      throw new SmartctlError("parse_error");
+    }
+    try {
+      return parseSmartctl(json, { devicePath, tempWarn: config.tempWarn });
+    } catch (err) {
+      if ((err as { code?: string }).code === "open_failed") {
+        throw new SmartctlError("open_failed", NEEDS_DEVICE_TYPE.test(stdout) ? "needs_device_type" : undefined);
+      }
+      throw new SmartctlError("parse_error");
+    }
+  };
+
   try {
-    json = JSON.parse(stdout);
-  } catch {
-    throw new SmartctlError("parse_error");
-  }
-  try {
-    return parseSmartctl(json, { devicePath, tempWarn: config.tempWarn });
+    return await attempt(t);
   } catch (err) {
-    if ((err as { code?: string }).code === "open_failed") throw new SmartctlError("open_failed");
-    throw new SmartctlError("parse_error");
+    // Only when no type was given or learned, and only for the specific "cannot detect" failure:
+    // an unplugged or broken disk must not cost two extra smartctl runs every cycle.
+    if (t !== undefined || !(err instanceof SmartctlError) || err.detail !== "needs_device_type") throw err;
+    for (const candidate of FALLBACK_DEVICE_TYPES) {
+      try {
+        const reading = await attempt(candidate);
+        detectedTypes.set(devicePath, candidate);
+        return reading;
+      } catch (retryErr) {
+        if (retryErr instanceof SmartctlError && retryErr.code === "timeout") throw retryErr;
+      }
+    }
+    throw err;
   }
 }
 

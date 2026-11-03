@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigError, loadConfig, MIN_API_KEY_LENGTH } from "../src/config.js";
 import { healthUrl } from "../src/healthcheck.js";
 import { newKeyLogMessage } from "../src/keyNotice.js";
-import { classifyExecError, discoverDevices, parseScan, readDisk, SmartctlError } from "../src/smartctl.js";
+import { classifyExecError, discoverDevices, parseScan, readDisk, resetDetectedDeviceTypes, SmartctlError } from "../src/smartctl.js";
 
 describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
   it("accepts integer ports 1-65535 and defaults to 80", () => {
@@ -156,6 +156,69 @@ describe("smartctl argv", () => {
   it("--scan-open only when configured", async () => {
     await discoverDevices({ ...cfg(), scanMode: "scan-open" });
     expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual(["--scan-open", "-j"]);
+  });
+
+  describe("device type fallback (LXC bind-mounted by-id nodes)", () => {
+    const sataOk = readFileSync(new URL("./fixtures/sata-ssd-ok.json", import.meta.url), "utf8");
+    const cannotDetect =
+      '{"smartctl":{"exit_status":1,"messages":[{"string":"/dev/disk/by-id/ata-X: Unable to detect device type","severity":"error"}]}}';
+    const countFile = () => join(dir, "calls");
+
+    // Fails to detect the type unless `-d sat` is passed; records every invocation.
+    const writeNeedsSat = () => {
+      writeFileSync(join(dir, "ok.json"), sataOk);
+      writeFileSync(join(dir, "fail.json"), cannotDetect);
+      writeFileSync(
+        bin,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> "${countFile()}"\n` +
+          `case " $* " in *" -d sat "*) cat "${join(dir, "ok.json")}";; *) cat "${join(dir, "fail.json")}"; exit 1;; esac\n`,
+      );
+    };
+
+    beforeEach(() => resetDetectedDeviceTypes());
+
+    it("retries with -d sat when the type cannot be detected, then remembers it", async () => {
+      writeNeedsSat();
+      const dev = "/dev/disk/by-id/ata-X";
+      const r = await readDisk(cfg(), dev);
+      expect(r.disk.model).toBeTruthy();
+      let calls = readFileSync(countFile(), "utf8").trim().split("\n");
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).not.toContain("-d");
+      expect(calls[1]).toContain("-d sat");
+
+      await readDisk(cfg(), dev);
+      calls = readFileSync(countFile(), "utf8").trim().split("\n");
+      expect(calls).toHaveLength(3); // learned type: a single run, no fallback
+      expect(calls[2]).toContain("-d sat");
+    });
+
+    it("does not retry when a type is configured explicitly", async () => {
+      writeNeedsSat();
+      const err = await readDisk({ ...cfg(), deviceTypes: { "/dev/disk/by-id/ata-X": "scsi" } }, "/dev/disk/by-id/ata-X").catch((e) => e);
+      expect(err).toBeInstanceOf(SmartctlError);
+      expect(readFileSync(countFile(), "utf8").trim().split("\n")).toHaveLength(1);
+    });
+
+    it("does not retry an ordinary open failure", async () => {
+      writeFileSync(
+        bin,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> "${countFile()}"\n` +
+          `echo '{"smartctl":{"exit_status":2,"messages":[{"string":"Smartctl open device: /dev/sdz failed: No such device"}]}}'; exit 2\n`,
+      );
+      const err = await readDisk(cfg(), "/dev/sdz").catch((e) => e);
+      expect(err).toBeInstanceOf(SmartctlError);
+      expect(err.code).toBe("open_failed");
+      expect(readFileSync(countFile(), "utf8").trim().split("\n")).toHaveLength(1);
+    });
+
+    it("reports open_failed when every fallback type fails too", async () => {
+      writeFileSync(join(dir, "fail.json"), cannotDetect);
+      writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${countFile()}"\ncat "${join(dir, "fail.json")}"; exit 1\n`);
+      const err = await readDisk(cfg(), "/dev/disk/by-id/ata-X").catch((e) => e);
+      expect(err.code).toBe("open_failed");
+      expect(readFileSync(countFile(), "utf8").trim().split("\n")).toHaveLength(3); // none, sat, scsi
+    });
   });
 
   it("output larger than maxBuffer is a parse_error, not a timeout", async () => {
