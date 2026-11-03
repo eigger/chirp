@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Fan, Load, Memory, Network, Power, Voltage } from "@chirp/shared";
@@ -462,6 +462,26 @@ describe("review fixes", () => {
     expect(new NetMatcher({ include: [], exclude: ["e".repeat(65) + "*"] }).byName("e".repeat(70))).toBeNull();
   });
 
+  it("logs the patterns dropped by the caps once at start", () => {
+    const warnings: string[] = [];
+    const long = "e".repeat(65) + "*";
+    const many = Array.from({ length: MAX_GLOBS + 1 }, (_, i) => `x${i}`);
+    const empty = tree({});
+    const hm = new HostMetrics({
+      roots: { hostProc: empty, hostSys: empty, proc: empty, sys: empty, inContainer: false },
+      sysfsRoot: empty,
+      netFilter: { include: [long], exclude: many },
+      warn: (m) => warnings.push(m),
+    });
+    hm.sample(0);
+    hm.sample(10_000);
+    expect(warnings).toEqual([
+      `CHIRP_NET_INCLUDE: ignoring 1 pattern(s) beyond the limits (64 patterns of at most 64 characters): ${long}`,
+      `CHIRP_NET_EXCLUDE: ignoring 1 pattern(s) beyond the limits (64 patterns of at most 64 characters): x64`,
+    ]);
+    expect(new NetMatcher({ include: [], exclude: ["eno1"] }).ignored).toEqual({ include: [], exclude: [] });
+  });
+
   it("hidden interfaces are skipped by name before any file of theirs is read", () => {
     const files: Record<string, string> = { ...nic("eno1", { device: "" }) };
     for (let i = 0; i < 50; i++) Object.assign(files, nic(`tap${i}i0`), nic(`fwbr${i}i0`, { bridge: "" }));
@@ -550,5 +570,34 @@ describe("review fixes", () => {
       { chip: "nct6798", label: "fan1", rpm: 1200 },
     ]);
     expect(x.voltages).toEqual([{ chip: "amdgpu", label: "in0", volts: null }]);
+  });
+
+  it("never skips CPU chips or non-GPU devices that report suspended (runtime PM auto)", () => {
+    const root = tree({
+      "class/hwmon/hwmon0/name": "zenpower\n",
+      "class/hwmon/hwmon0/device/power/runtime_status": "suspended\n",
+      "class/hwmon/hwmon0/power1_input": "40000000\n",
+      "class/hwmon/hwmon1/name": "nct6798\n",
+      "class/hwmon/hwmon1/device/power/runtime_status": "suspended\n",
+      "class/hwmon/hwmon1/fan1_input": "1200\n",
+      "class/hwmon/hwmon2/name": "gpu_sensor\n",
+      "class/hwmon/hwmon2/device/power/runtime_status": "suspended\n",
+      "class/hwmon/hwmon2/fan1_input": "800\n",
+    });
+    // a GPU recognised by its driver link rather than the hwmon name
+    symlinkSync("../../../../bus/pci/drivers/nouveau", join(root, "class/hwmon/hwmon2/device/driver"));
+    const x = readHwmonExtras(root);
+    expect(x.power).toEqual([{ chip: "zenpower", label: "power1", watts: 40 }]);
+    expect(x.fans).toEqual([
+      { chip: "gpu_sensor", label: "fan1", rpm: null },
+      { chip: "nct6798", label: "fan1", rpm: 1200 },
+    ]);
+    const empty = tree({});
+    const hm = new HostMetrics({
+      roots: { hostProc: empty, hostSys: empty, proc: empty, sys: empty, inContainer: false },
+      sysfsRoot: root,
+      netFilter: { include: [], exclude: [] },
+    });
+    expect(hm.sample(0).power).toMatchObject({ packageWatts: 40, packageSource: "hwmon" });
   });
 });

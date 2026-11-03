@@ -1,7 +1,7 @@
 import type { Fan, Load, MetricScope, Memory, Network, Power, PowerSource, Voltage } from "@chirp/shared";
 import { readProc, type HostRoots } from "./hostPaths.js";
 import { uniqueIds } from "./ids.js";
-import { NetMatcher, readInterfaces, type NetFilter } from "./netdev.js";
+import { MAX_GLOB_LENGTH, MAX_GLOBS, NetMatcher, readInterfaces, type NetFilter } from "./netdev.js";
 import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones } from "./power.js";
 import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
 
@@ -50,6 +50,16 @@ export class HostMetrics {
 
   constructor(private readonly opts: HostMetricsOptions) {
     this.matcher = new NetMatcher(opts.netFilter);
+    for (const [name, list] of [
+      ["CHIRP_NET_INCLUDE", this.matcher.ignored.include],
+      ["CHIRP_NET_EXCLUDE", this.matcher.ignored.exclude],
+    ] as const) {
+      if (list.length) {
+        opts.warn?.(
+          `${name}: ignoring ${list.length} pattern(s) beyond the limits (${MAX_GLOBS} patterns of at most ${MAX_GLOB_LENGTH} characters): ${list.join(", ")}`,
+        );
+      }
+    }
   }
 
   /**

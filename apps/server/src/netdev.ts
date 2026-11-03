@@ -69,18 +69,26 @@ export function globMatch(glob: string, name: string): boolean {
   return gi === g.length;
 }
 
-function cap(globs: string[]): string[] {
-  return globs.filter((g) => g.length > 0 && g.length <= MAX_GLOB_LENGTH).slice(0, MAX_GLOBS);
+function cap(globs: string[], ignored: string[]): string[] {
+  const kept: string[] = [];
+  for (const g of globs) {
+    if (g.length === 0) continue;
+    if (g.length > MAX_GLOB_LENGTH || kept.length >= MAX_GLOBS) ignored.push(g);
+    else kept.push(g);
+  }
+  return kept;
 }
 
 /** Interface filter, built once from the configuration. */
 export class NetMatcher {
   private readonly include: string[];
   private readonly exclude: string[];
+  /** Patterns dropped by the MAX_GLOBS / MAX_GLOB_LENGTH caps (logged once at start). */
+  readonly ignored: { include: string[]; exclude: string[] } = { include: [], exclude: [] };
 
   constructor(filter: NetFilter) {
-    this.include = cap(filter.include);
-    this.exclude = cap(filter.exclude);
+    this.include = cap(filter.include, this.ignored.include);
+    this.exclude = cap(filter.exclude, this.ignored.exclude);
   }
 
   /**

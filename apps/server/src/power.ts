@@ -1,5 +1,5 @@
 import { readdirSync, readlinkSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { readText } from "./hostPaths.js";
 
 /** One RAPL powercap zone (`/sys/class/powercap/intel-rapl:N[:M]`; AMD Zen uses the same driver). */
@@ -102,11 +102,30 @@ interface ChipDir {
   /** Sort key that survives hwmonN renumbering: the device link target. */
   key: string;
   /**
-   * The parent device is runtime-suspended (e.g. an idle discrete GPU). Its
+   * A GPU-class device (GPU_DRIVERS) that is runtime-suspended (an idle discrete GPU). Its
    * sensor inputs are not read (that could wake it); entries are listed with
    * null values so IDs stay stable.
    */
   suspended: boolean;
+}
+
+/**
+ * GPU drivers whose sensor reads can wake a runtime-suspended card. Only these
+ * are skipped while suspended: with PCI runtime PM on `auto` (powertop
+ * --auto-tune) CPU-side devices may report "suspended" too, and their power and
+ * temperature chips must keep reporting.
+ */
+export const GPU_DRIVERS = ["amdgpu", "radeon", "nouveau", "nvidia", "i915", "xe"];
+const NEVER_SKIP = new Set([...CPU_POWER_CHIPS, "zenpower", "cpu_thermal"]);
+
+function isGpu(path: string, name: string): boolean {
+  if (NEVER_SKIP.has(name)) return false;
+  if (GPU_DRIVERS.includes(name)) return true;
+  try {
+    return GPU_DRIVERS.includes(basename(readlinkSync(join(path, "device", "driver"))));
+  } catch {
+    return false;
+  }
 }
 
 function hwmonChips(sysRoot: string): ChipDir[] {
@@ -122,7 +141,7 @@ function hwmonChips(sysRoot: string): ChipDir[] {
     } catch {
       /* no device link (virtual chip): keep the directory name */
     }
-    const suspended = readText(join(path, "device", "power", "runtime_status"))?.trim() === "suspended";
+    const suspended = isGpu(path, name) && readText(join(path, "device", "power", "runtime_status"))?.trim() === "suspended";
     chips.push({ path, name, key, suspended });
   }
   return chips.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key) || a.path.localeCompare(b.path));
