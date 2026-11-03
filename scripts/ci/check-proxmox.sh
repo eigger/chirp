@@ -94,6 +94,9 @@ for doc in docs/deploy.md docs/ko/deploy.md README.md README.ko.md; do
   grep -q 'CHIRP_HOST_MOUNTS=proc' "$REPO_ROOT/$doc" || fail "$doc does not document CHIRP_HOST_MOUNTS=proc"
 done
 grep -q 'chirp_check_host_mounts' "$PT" || fail "the smoke test does not verify the host metric mounts"
+# Proxmox moves `#` lines of a CT config into the description (top of file): never rely on markers.
+grep -q 'chirp-passthrough:start' "$PT" && fail "chirp-passthrough.sh still writes/uses marker comments"
+grep -q 'CHIRP_CONF_AWK' "$PT" || fail "chirp_apply_conf does not recognise its lines by content"
 grep -q '"/host/proc"' "$CFG" || fail "config.ts does not default to /host/proc"
 grep -q '"/host/sys"' "$CFG" || fail "config.ts does not default to /host/sys"
 

@@ -7,9 +7,10 @@
 #   (the selection replaces the current one; non-interactive runs default to all)
 #   Host metric mounts: CHIRP_HOST_MOUNTS=all (default) | proc | 0 (see below)
 #
-# What it does: detect host disks -> pick them in a checklist -> (re)write the
-#   `# chirp-passthrough:start` ... `:end` block (disk rules + read-only host metric
-#   mounts) in /etc/pve/lxc/<CTID>.conf ->
+# What it does: detect host disks -> pick them in a checklist -> (re)write chirp's
+#   lxc.* lines (disk rules + read-only host metric mounts) in /etc/pve/lxc/<CTID>.conf,
+#   recognised by content (no marker comments: Proxmox would move them into the CT
+#   description), before the first [snapshot] section ->
 #   update CHIRP_DEVICES in the container's chirp.env -> pct reboot -> smoke test
 #   (smartctl, /health).
 #
@@ -37,7 +38,7 @@
 #    /proc/net/dev is never mounted: /proc/net follows the reading process's namespace.
 #    chirp reads /host first and reports `scope: "host"`; the smoke test compares MemTotal
 #    and checks that a host-only interface is visible under /host/sys/class/net.
-#    Re-running with another mode rewrites the block.
+#    Re-running with another mode replaces chirp's lines.
 #  - Device cgroup rules: `b <major>:* rw` for the majors of the selected disks.
 #    * rw, not rwm: the disks are bind-mounted (no mknod needed), and smartctl
 #      opens SCSI/SAT devices O_RDWR for SG_IO. Override with CHIRP_DEV_PERM.
@@ -50,8 +51,10 @@
 #
 # Safe to `source` (defines functions only; with CHIRP_PASSTHROUGH_LIB=1 main does not run).
 
-CHIRP_MARK_START="# chirp-passthrough:start"
-CHIRP_MARK_END="# chirp-passthrough:end"
+# Marker comments written by older versions. Proxmox treats every `#` line of a CT config as
+# the CT description and moves it to the top of the file whenever it rewrites the config
+# (GUI / pct set), re-encoding ":" as "%3A", so markers cannot delimit anything; chirp no
+# longer writes them and only deletes them (in either form) when migrating an old config.
 CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"
 CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-all}"
 # Host files bind-mounted read-only for the host metrics (source -> <rootfs>/host/<source>).
@@ -200,14 +203,12 @@ chirp_render_host_mounts() {
   echo "lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0"
 }
 
-# stdin: selected TSV -> stdout: marker block (disk rules + host metric mounts;
-# nothing when both are empty).
+# stdin: selected TSV -> stdout: the chirp lines (disk rules + host metric mounts; nothing
+# when both are empty). No marker comments: chirp_apply_conf recognises its lines by content.
 chirp_render_block() {
   local tsv majors m byid host
   tsv="$(cat)"
   host="$(chirp_render_host_mounts)" || return 1
-  [[ -n "$tsv" || -n "$host" ]] || return 0
-  echo "$CHIRP_MARK_START"
   if [[ -n "$tsv" ]]; then
     majors="$(chirp_majors <<<"$tsv")"
     for m in $majors; do
@@ -219,14 +220,91 @@ chirp_render_block() {
     done <<<"$tsv"
   fi
   [[ -n "$host" ]] && printf '%s\n' "$host"
-  echo "$CHIRP_MARK_END"
+  return 0
 }
 
-# $1: conf file, $2: block file (empty = only remove the old block). Idempotent.
-# Inserted before the first snapshot section ([name]) - appended after it, it would
-# become part of the snapshot's config.
+# $1: by-id name -> stdout: the block device major it resolves to on this host (nothing if gone).
+chirp_byid_major() {
+  local hex
+  hex="$(stat -L -c '%t' "/dev/disk/by-id/$1" 2>/dev/null)" || return 0
+  [[ "$hex" =~ ^[0-9a-fA-F]+$ ]] && printf '%d\n' "0x${hex}"
+  return 0
+}
+
+# The awk program that recognises chirp-managed lines in the main section of a CT config
+# (before the first `[section]`; snapshot and pending sections are never touched). Exactly
+# the formats chirp_render_block writes (either `key: value` or `key = value`, as Proxmox
+# may normalise them), plus older chirp formats and marker comments:
+#  - host metric mounts: /proc/{meminfo,stat,loadavg} -> host/proc/..., /sys -> host/sys
+#  - disk mounts: /dev/disk/by-id/X dev/disk/by-id/X none bind,optional,create=file
+#  - `lxc.cgroup2.devices.allow: b <M>:* <perm>` for M in the `majors` variable (the majors
+#    chirp adds now plus those of the disk mounts it removes)
+# mode=list prints the by-id names of the disk mounts; mode=rewrite drops every chirp line
+# and inserts the block file once, before the first section.
+CHIRP_CONF_AWK='
+  function trim(x) { sub(/^[ \t]+/, "", x); sub(/[ \t]+$/, "", x); return x }
+  function kv(line, key,   r) {
+    if (index(line, key) != 1) return ""
+    r = substr(line, length(key) + 1)
+    if (r !~ /^[ \t]*[:=]/) return ""
+    sub(/^[ \t]*[:=][ \t]*/, "", r)
+    return trim(r)
+  }
+  function ours(line,   v, f, n, okmaj) {
+    # Old markers, verbatim or as Proxmox re-encodes description lines (":" -> "%3A").
+    if (line ~ /^#[ \t]*chirp-passthrough(:|%3[Aa])(start|end)[ \t]*$/) return 1
+    v = kv(line, "lxc.mount.entry")
+    if (v != "") {
+      n = split(v, f, /[ \t]+/)
+      if (n == 6 && f[3] == "none" && f[5] == "0" && f[6] == "0") {
+        if ((f[1] == "/proc/meminfo" || f[1] == "/proc/stat" || f[1] == "/proc/loadavg") \
+            && f[2] == "host" f[1] && f[4] == "bind,ro,optional,create=file") return 1
+        if (f[1] == "/sys" && f[2] == "host/sys" \
+            && (f[4] == "bind,ro,optional,create=dir" || f[4] == "bind,ro,nosuid,nodev,noexec,optional,create=dir")) return 1
+      }
+      if (n == 4 && f[1] ~ /^\/dev\/disk\/by-id\/[^\/]+$/ && f[2] == substr(f[1], 2) \
+          && f[3] == "none" && f[4] == "bind,optional,create=file") return 2
+      return 0
+    }
+    v = kv(line, "lxc.cgroup2.devices.allow")
+    if (v != "") {
+      n = split(v, f, /[ \t]+/)
+      if (n == 3 && f[1] == "b" && f[2] ~ /^[0-9]+:\*$/ && f[3] ~ /^r?w?m?$/ && f[3] != "") {
+        okmaj = f[2]; sub(/:\*$/, "", okmaj)
+        if (index("," majors ",", "," okmaj ",")) return 1
+      }
+    }
+    return 0
+  }
+  function emit(   l) {
+    if (done) return
+    done = 1
+    if (bf == "") return
+    while ((getline l < bf) > 0) print l
+    close(bf)
+  }
+  /^\[/ { if (mode == "rewrite") emit(); sect = 1 }
+  {
+    if (!sect) {
+      t = ours($0)
+      if (mode == "list") {
+        if (t == 2) { v = kv($0, "lxc.mount.entry"); split(v, f, /[ \t]+/); sub(/^\/dev\/disk\/by-id\//, "", f[1]); print f[1] }
+        next
+      }
+      if (t) next
+    }
+    if (mode == "rewrite") print
+  }
+  END { if (mode == "rewrite") emit() }
+'
+
+# $1: conf file, $2: file with the freshly rendered chirp lines (empty = only remove them).
+# Removes every chirp-managed line from the main section wherever it is (Proxmox may have
+# reordered the file) and writes the new set once, before the first `[section]` (appended
+# after it, it would become part of a snapshot's config). Idempotent; never touches
+# snapshot/pending sections or other lxc.* lines; leaves the file unchanged on any doubt.
 chirp_apply_conf() {
-  local conf="$1" blockfile="$2" tmp
+  local conf="$1" blockfile="$2" tmp majors byid m
   if [[ ! -s "$conf" ]]; then
     _cp_err "${conf} is missing or empty."
     return 1
@@ -235,30 +313,21 @@ chirp_apply_conf() {
     _cp_err "Cannot read the block file: ${blockfile}"
     return 1
   fi
-  # A start marker without its end marker would make the rewrite drop every following line
-  # (including [snapshot] sections): refuse and leave the file alone.
-  local starts ends
-  starts="$(grep -cxF -- "$CHIRP_MARK_START" "$conf")"
-  ends="$(grep -cxF -- "$CHIRP_MARK_END" "$conf")"
-  if [[ "$starts" != "$ends" ]]; then
-    _cp_err "${conf} has unbalanced chirp-passthrough markers (${starts} start, ${ends} end); fix it by hand. Leaving it unchanged."
+  if grep -q $'\r' "$conf"; then
+    _cp_err "${conf} has Windows (CRLF) line endings; Proxmox does not write those. Fix it by hand. Leaving it unchanged."
     return 1
   fi
+  # Device rules chirp owns: the majors it adds now plus those of the disk mounts it removes.
+  majors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
+  while IFS= read -r byid; do
+    [[ -n "$byid" ]] || continue
+    m="$(chirp_byid_major "$byid")"
+    [[ -n "$m" ]] && majors+=$'\n'"$m"
+  done < <(awk -v mode=list -v majors="" "$CHIRP_CONF_AWK" "$conf")
+  majors="$(printf '%s\n' "$majors" | sed '/^$/d' | sort -n -u | paste -sd, -)"
   tmp="$(mktemp)" || return 1
-  if ! awk -v s="$CHIRP_MARK_START" -v e="$CHIRP_MARK_END" -v bf="$blockfile" '
-    function emit(   l) {
-      if (done) return
-      done = 1
-      while ((getline l < bf) > 0) print l
-      close(bf)
-    }
-    $0==s {skip=1; next}
-    $0==e {skip=0; next}
-    skip {next}
-    /^\[/ {emit()}
-    {print}
-    END {emit()}
-  ' "$conf" >"$tmp"; then
+  if ! awk -v mode=rewrite -v majors="$majors" \
+      -v bf="$blockfile" "$CHIRP_CONF_AWK" "$conf" >"$tmp"; then
     _cp_err "Failed to rewrite ${conf}; leaving it unchanged."
     rm -f "$tmp"
     return 1
@@ -499,13 +568,13 @@ chirp_passthrough_run() {
   fi
   if [[ -s "$blockfile" ]]; then
     if [[ -n "$sel_tsv" ]]; then
-      _cp_msg "Applied the passthrough block to ${conf}:"
+      _cp_msg "Applied the chirp lines to ${conf}:"
     else
       _cp_msg "No disks selected; applied the host metric mounts to ${conf}:"
     fi
-    sed -n "/^${CHIRP_MARK_START}\$/,/^${CHIRP_MARK_END}\$/p" "$conf"
+    sed 's/^/  /' "$blockfile"
   else
-    _cp_msg "No disks selected and CHIRP_HOST_MOUNTS=0; removed the passthrough block."
+    _cp_msg "No disks selected and CHIRP_HOST_MOUNTS=0; removed the chirp lines from ${conf}."
   fi
   rm -f "$blockfile"
 

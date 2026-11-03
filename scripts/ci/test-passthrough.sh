@@ -7,6 +7,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export CHIRP_PASSTHROUGH_LIB=1
 # shellcheck disable=SC1091
 source "$REPO_ROOT/proxmox/install/chirp-passthrough.sh"
+# No real /dev/disk/by-id here: majors of the fake disks.
+chirp_byid_major() { case "$1" in wwn-*|ata-*) echo 8 ;; nvme-*) echo 259 ;; esac; }
 
 PASS=0; FAILS=0
 eq() { # name expected actual
@@ -69,8 +71,7 @@ SEL_ALL="$(chirp_resolve_selection all "$DETECTED")"
 eq "majors" "8,259" "$(chirp_majors <<<"$SEL_ALL" | paste -sd, -)"
 SEL_SDB="$(chirp_resolve_selection ata-WDC_WD40EFRX_WD-1234 "$DETECTED")"
 BLOCK="$(chirp_render_block <<<"$SEL_ALL")"
-EXPECTED_BLOCK='# chirp-passthrough:start
-lxc.cgroup2.devices.allow: b 8:* rw
+EXPECTED_BLOCK='lxc.cgroup2.devices.allow: b 8:* rw
 lxc.cgroup2.devices.allow: b 259:* rw
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
 lxc.mount.entry: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 none bind,optional,create=file
@@ -78,15 +79,13 @@ lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-e
 lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
-lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0
-# chirp-passthrough:end'
+lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0'
 eq "block content" "$EXPECTED_BLOCK" "$BLOCK"
-EXPECTED_HOST_ONLY='# chirp-passthrough:start
-lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+EXPECTED_HOST_ONLY='lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
-lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0
-# chirp-passthrough:end'
+lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0'
+eq "no marker comments rendered" "0" "$(chirp_render_block <<<"$SEL_ALL" | grep -c '^#')"
 eq "empty selection -> host metric mounts only" "$EXPECTED_HOST_ONLY" "$(chirp_render_block <<<"")"
 eq "empty selection + CHIRP_HOST_MOUNTS=0 -> no block" "" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"")"
 eq "CHIRP_HOST_MOUNTS=0 -> no host mounts" "0" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"$SEL_ALL" | grep -c ' host/')"
@@ -118,8 +117,8 @@ chirp_apply_conf "$CONF" "$TMP/b1"
 cp "$CONF" "$TMP/after1"
 chirp_apply_conf "$CONF" "$TMP/b1"
 eq "apply twice == once" "$(cat "$TMP/after1")" "$(cat "$CONF")"
-eq "single start marker" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
-eq "block precedes snapshot section" "1" "$(awk '/chirp-passthrough:end/{e=NR} /^\[snap1\]/{s=NR} END{print (e<s)}' "$CONF")"
+eq "each chirp line once" "9" "$(grep -c '^lxc\.' "$CONF")"
+eq "lines precede the snapshot section" "1" "$(awk '/^lxc\./{e=NR} /^\[snap1\]/{s=NR} END{print (e<s)}' "$CONF")"
 chirp_render_block <<<"$SEL_SDB" >"$TMP/b2"
 chirp_apply_conf "$CONF" "$TMP/b2"
 eq "replaced: only sdb disk mount" "1" "$(grep -c '^lxc.mount.entry: /dev/disk' "$CONF")"
@@ -131,7 +130,7 @@ chirp_apply_conf "$CONF" "$TMP/old"
 eq "old block: no host mounts" "0" "$(grep -c ' host/' "$CONF")"
 chirp_apply_conf "$CONF" "$TMP/b2"
 eq "re-run adds host mounts" "4" "$(grep -c ' host/' "$CONF")"
-eq "re-run keeps a single block" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
+eq "re-run: each line once" "6" "$(grep -c '^lxc\.' "$CONF")"
 # Switching modes rewrites the block in place.
 (CHIRP_HOST_MOUNTS=proc; chirp_render_block <<<"$SEL_SDB") >"$TMP/bp"
 chirp_apply_conf "$CONF" "$TMP/bp"
@@ -143,11 +142,11 @@ eq "proc -> 0: no host mounts" "0" "$(grep -c ' host/' "$CONF")"
 eq "proc -> 0: disk kept" "1" "$(grep -c '^lxc.mount.entry: /dev/disk' "$CONF")"
 chirp_apply_conf "$CONF" "$TMP/b2"
 eq "0 -> all: 4 host mounts" "4" "$(grep -c ' host/' "$CONF")"
-eq "mode switches keep a single block" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
+eq "mode switches: each line once" "6" "$(grep -c '^lxc\.' "$CONF")"
 eq "replaced: no 259 rule" "0" "$(grep -c '259:' "$CONF")"
 : >"$TMP/b3"
 chirp_apply_conf "$CONF" "$TMP/b3"
-eq "removed block" "0" "$(grep -c 'chirp-passthrough' "$CONF")"
+eq "removed all chirp lines" "0" "$(grep -c '^lxc\.' "$CONF")"
 printf 'arch: amd64\nhostname: chirp\nunprivileged: 0\n\n[snap1]\nhostname: chirp\nunprivileged: 0\n' >"$TMP/orig"
 eq "back to original" "$(cat "$TMP/orig")" "$(cat "$CONF")"
 
@@ -187,13 +186,81 @@ eq "eth0 counts when the CT has none" "eth0" "$(chirp_pick_host_iface "$NET" "lo
 rm -rf "$NET"; mkdir -p "$NET"; : >"$NET/bonding_masters"; mkiface lo; mkiface tap100i0
 chirp_pick_host_iface "$NET" "" >/dev/null; eq "only guest devices -> rc 1" "1" "$?"
 
-echo "[10b] unbalanced markers leave the conf unchanged"
-printf 'arch: amd64\n# chirp-passthrough:start\nlxc.mount.entry: x\n\n[snap1]\nhostname: chirp\n' >"$TMP/broken.conf"
-cp "$TMP/broken.conf" "$TMP/broken.orig"
-chirp_apply_conf "$TMP/broken.conf" "$TMP/b2" 2>/dev/null; eq "start without end -> rc 1" "1" "$?"
-eq "start without end -> untouched (snapshot kept)" "$(cat "$TMP/broken.orig")" "$(cat "$TMP/broken.conf")"
-printf 'arch: amd64\n# chirp-passthrough:end\n' >"$TMP/broken2.conf"
-chirp_apply_conf "$TMP/broken2.conf" "$TMP/b2" 2>/dev/null; eq "end without start -> rc 1" "1" "$?"
+echo "[10b] content-based apply: Proxmox rewrites, old markers, user lines, snapshots"
+chirp_render_block <<<"$SEL_SDB" >"$TMP/new"
+snap() { awk '/^\[/{f=1} f' "$1"; }
+main() { awk '/^\[/{exit} 1' "$1"; }
+# What Proxmox writes after a GUI/pct edit of a config that had an old marker block: the
+# markers become description lines at the top (":" encoded as %3A), lxc.* lines go last.
+cat >"$TMP/pve.conf" <<'CONF'
+# chirp-passthrough%3Astart
+# chirp-passthrough%3Aend
+#My own notes
+arch: amd64
+hostname: chirp
+unprivileged: 0
+lxc.cgroup2.devices.allow: b 8:* rw
+lxc.cgroup2.devices.allow: b 259:* rw
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
+lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-eui.0025385b21400001 none bind,optional,create=file
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+lxc.mount.entry: /dev/disk/by-id/usb-Mine dev/disk/by-id/usb-Mine none bind,ro,create=file
+lxc.mount.entry = /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+
+[snap1]
+# chirp-passthrough%3Astart
+hostname: chirp
+lxc.cgroup2.devices.allow: b 8:* rw
+lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
+CONF
+snap "$TMP/pve.conf" >"$TMP/pve.snap"
+chirp_apply_conf "$TMP/pve.conf" "$TMP/new"; eq "pve layout -> rc 0" "0" "$?"
+eq "moved markers deleted (main section)" "0" "$(awk '/^\[/{exit} /chirp-passthrough/' "$TMP/pve.conf" | wc -l | tr -d ' ')"
+eq "user's description kept" "1" "$(grep -c '^#My own notes$' "$TMP/pve.conf")"
+eq "user's own cgroup rule kept" "1" "$(grep -c '^lxc.cgroup2.devices.allow: c 10:200 rwm$' "$TMP/pve.conf")"
+eq "user's own mounts kept" "2" "$(main "$TMP/pve.conf" | grep -cE '^lxc.mount.entry: (/dev/net/tun|/dev/disk/by-id/usb-Mine) ')"
+eq "old disk rules for removed disks gone (259)" "0" "$(awk '/^\[/{exit} /259:/' "$TMP/pve.conf" | wc -l | tr -d ' ')"
+eq "old nvme mount gone" "0" "$(awk '/^\[/{exit} /nvme-eui/' "$TMP/pve.conf" | wc -l | tr -d ' ')"
+eq "'key = value' form recognised (meminfo once)" "1" "$(grep -c 'host/proc/meminfo' "$TMP/pve.conf" | tr -d ' ')"
+eq "old /sys format replaced" "1" "$(grep -c 'host/sys none bind,ro,nosuid' "$TMP/pve.conf")"
+eq "chirp lines exactly once" "$(cat "$TMP/new")" "$(main "$TMP/pve.conf" | grep -xF -f "$TMP/new")"
+eq "snapshot section untouched" "$(cat "$TMP/pve.snap")" "$(snap "$TMP/pve.conf")"
+cp "$TMP/pve.conf" "$TMP/pve.once"
+chirp_apply_conf "$TMP/pve.conf" "$TMP/new"
+eq "idempotent re-run" "$(cat "$TMP/pve.once")" "$(cat "$TMP/pve.conf")"
+# Proxmox rewrites again (chirp lines move after the user's lines): still once, no growth.
+awk '/^\[/{f=1} !f && /^lxc\./{print > "/dev/stderr"; next} {print}' "$TMP/pve.conf" 2>"$TMP/lxc" >"$TMP/x"
+awk -v lf="$TMP/lxc" '/^\[/ && !d {while ((getline l < lf) > 0) print l; d=1} {print}' "$TMP/x" >"$TMP/pve.conf"
+chirp_apply_conf "$TMP/pve.conf" "$TMP/new"
+eq "after another rewrite: chirp lines once" "$(cat "$TMP/new")" "$(main "$TMP/pve.conf" | grep -xF -f "$TMP/new")"
+(CHIRP_HOST_MOUNTS=proc; chirp_render_block <<<"$SEL_SDB") >"$TMP/newp"
+chirp_apply_conf "$TMP/pve.conf" "$TMP/newp"
+eq "mode switch all -> proc on a pve layout" "0" "$(grep -c 'host/sys' "$TMP/pve.conf")"
+eq "mode switch keeps the snapshot" "$(cat "$TMP/pve.snap")" "$(snap "$TMP/pve.conf")"
+
+# Old marker block still in place (written by an older chirp, never rewritten by Proxmox).
+printf 'arch: amd64\n# chirp-passthrough:start\nlxc.cgroup2.devices.allow: b 8:* rw\nlxc.mount.entry: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234 none bind,optional,create=file\n# chirp-passthrough:end\n\n[snap1]\nhostname: chirp\n' >"$TMP/old.conf"
+chirp_apply_conf "$TMP/old.conf" "$TMP/new"
+eq "old marker block migrated" "0" "$(grep -c 'chirp-passthrough' "$TMP/old.conf")"
+eq "old marker block: lines once" "$(cat "$TMP/new")" "$(main "$TMP/old.conf" | grep -xF -f "$TMP/new")"
+
+# L4: wrong order / unbalanced markers no longer delimit anything: nothing else is dropped.
+printf 'arch: amd64\n# chirp-passthrough:end\nhostname: chirp\n# chirp-passthrough:start\nmemory: 512\n\n[snap1]\nhostname: chirp\n' >"$TMP/order.conf"
+snap "$TMP/order.conf" >"$TMP/order.snap"
+chirp_apply_conf "$TMP/order.conf" "$TMP/new"; eq "end before start -> rc 0" "0" "$?"
+eq "end before start: other keys kept" "2" "$(main "$TMP/order.conf" | grep -cE '^(hostname: chirp|memory: 512)$')"
+eq "end before start: snapshot kept" "$(cat "$TMP/order.snap")" "$(snap "$TMP/order.conf")"
+printf 'arch: amd64\n# chirp-passthrough:start\nmemory: 512\n\n[snap1]\nhostname: chirp\n' >"$TMP/nostart.conf"
+chirp_apply_conf "$TMP/nostart.conf" "$TMP/new"
+eq "start without end: keys and snapshot kept" "2" "$(grep -cE '^(memory: 512|\[snap1\])$' "$TMP/nostart.conf")"
+
+# CRLF files are refused and left unchanged.
+printf 'arch: amd64\r\nhostname: chirp\r\n' >"$TMP/crlf.conf"
+cp "$TMP/crlf.conf" "$TMP/crlf.orig"
+chirp_apply_conf "$TMP/crlf.conf" "$TMP/new" 2>/dev/null; eq "CRLF -> rc 1" "1" "$?"
+eq "CRLF -> unchanged" "$(od -c "$TMP/crlf.orig")" "$(od -c "$TMP/crlf.conf")"
 
 echo "[11] CHIRP_DEV_PERM overrides the default rw"
 eq "rwm override" "lxc.cgroup2.devices.allow: b 8:* rwm" \
