@@ -1,0 +1,19 @@
+{
+  "smartctl": { "version": [7, 4], "exit_status": 4 },
+  "device": { "name": "/dev/nvme1", "type": "nvme", "protocol": "NVMe" },
+  "model_name": "Fake NVMe 512GB",
+  "serial_number": "FAKENVME0004",
+  "firmware_version": "1.0",
+  "smart_status": { "passed": false, "nvme": { "value": 4 } },
+  "nvme_smart_health_information_log": {
+    "critical_warning": 4,
+    "temperature": 50,
+    "available_spare": 100,
+    "available_spare_threshold": 10,
+    "percentage_used": 12,
+    "data_units_written": 100,
+    "unsafe_shutdowns": 1,
+    "media_errors": 3
+  },
+  "temperature": { "current": 50 }
+}

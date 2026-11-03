@@ -1,0 +1,25 @@
+{
+  "name": "chirp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w apps/server",
+    "dev:web": "npm run dev -w apps/web",
+    "build:shared": "npm run build -w packages/shared",
+    "build": "npm run build:shared && npm run build -w apps/server && npm run build -w apps/web",
+    "test": "npm run build:shared && npm run test -w packages/shared && npm run test -w apps/server && npm run test -w apps/web",
+    "lint": "npm run lint -w apps/server && npm run lint -w apps/web"
+  },
+  "overrides": {
+    "postcss": "^8.5.25",
+    "eslint": "^9.39.5"
+  }
+}

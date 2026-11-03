@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+# 로컬 데이터 (CHIRP_DATA_DIR 를 저장소 안에 둔 경우) — API 키는 절대 커밋 금지
+api-key
+instance-id
+
+# 릴리스 산출물 (release.yml 이 CI 에서 만든다)
+chirp-*.tar.gz
+chirp-*.tar.gz.sha256
+
+.claude/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+.vscode/
+.idea/
+
+# agent/MCP 인증 실패 시 잘못 생성되는 npm 캐시 디렉터리 (git status 오염 방지)
+{"error":"unauthorized"}/
+**/{"error":"unauthorized"}/

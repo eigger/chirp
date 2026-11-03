@@ -1,0 +1,20 @@
+{
+  "smartctl": { "version": [7, 4], "exit_status": 64 },
+  "device": { "name": "/dev/sdc", "type": "sat", "protocol": "ATA" },
+  "model_name": "WDC WD40EFRX-68N32N0",
+  "serial_number": "FAKE0005",
+  "wwn": { "naa": 5, "oui": 3152, "id": 99 },
+  "user_capacity": { "bytes": 4000787030016 },
+  "rotation_rate": 5400,
+  "smart_status": { "passed": true },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5, "value": 190, "raw": { "value": 8 } },
+      { "id": 194, "value": 36, "raw": { "value": 36 } },
+      { "id": 197, "value": 200, "raw": { "value": 0 } },
+      { "id": 198, "value": 200, "raw": { "value": 0 } }
+    ]
+  },
+  "power_on_time": { "hours": 50000 },
+  "temperature": { "current": 36 }
+}
