@@ -1,11 +1,20 @@
 import { useState, type FormEvent } from "react";
-import { ApiError, bootstrapAdmin, login, MIN_PASSWORD_LENGTH } from "../api";
+import { ApiError, bootstrapAdmin, login, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, passwordLengthProblem } from "../api";
 import { useT } from "../i18n";
 
-function errorText(t: ReturnType<typeof useT>, e: unknown, on401: string): string {
+type T = ReturnType<typeof useT>;
+
+/** Message for a password rule violation (client check or the server's weak_password reason). */
+export function passwordRuleText(t: T, problem: string | null): string {
+  if (problem === "too_long") return t("password.tooLong", { n: MAX_PASSWORD_LENGTH });
+  if (problem === "common") return t("password.common");
+  return t("password.weak", { n: MIN_PASSWORD_LENGTH });
+}
+
+function errorText(t: T, e: unknown, on401: string): string {
   if (e instanceof ApiError && e.status === 401) return on401;
   if (e instanceof ApiError && e.status === 429) return t("common.rateLimited", { n: e.retryAfter ?? "?" });
-  if (e instanceof ApiError && e.code === "weak_password") return t("password.weak", { n: MIN_PASSWORD_LENGTH });
+  if (e instanceof ApiError && e.code === "weak_password") return passwordRuleText(t, e.reason);
   if (e instanceof ApiError && e.code === "password_mismatch") return t("password.mismatch");
   return t("common.failed");
 }
@@ -90,7 +99,8 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!USERNAME_RE.test(username.trim())) return setError(t("bootstrap.badUsername"));
-    if ([...password].length < MIN_PASSWORD_LENGTH) return setError(t("password.weak", { n: MIN_PASSWORD_LENGTH }));
+    const problem = passwordLengthProblem(password);
+    if (problem) return setError(passwordRuleText(t, problem));
     if (password !== confirm) return setError(t("password.mismatch"));
     setBusy(true);
     setError(null);
@@ -99,8 +109,10 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
       onDone(me.username);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) return onTaken();
-      // The only free-form field the server can reject as bad_request is the username.
-      if (err instanceof ApiError && err.code === "bad_request") return setError(t("bootstrap.badUsername"));
+      // bad_request: a field broke the shared schema. Name the username only when it is the culprit.
+      if (err instanceof ApiError && err.code === "bad_request" && !USERNAME_RE.test(username.trim())) {
+        return setError(t("bootstrap.badUsername"));
+      }
       setError(errorText(t, err, t("common.failed")));
     } finally {
       setBusy(false);

@@ -3,10 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { vi } from "vitest";
-import { MIN_PASSWORD_LENGTH as SHARED_MIN_PASSWORD_LENGTH, Username } from "@chirp/shared";
+import { MAX_PASSWORD_LENGTH as SHARED_MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH as SHARED_MIN_PASSWORD_LENGTH, Username } from "@chirp/shared";
 import { USERNAME_RE } from "../src/components/AuthForms";
 import { App } from "../src/App";
-import { MIN_PASSWORD_LENGTH } from "../src/api";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../src/api";
 import { overallStatus, maskSerial } from "../src/format";
 import { detectLang, messages, translate } from "../src/i18n";
 import { REFRESH_RELOAD_MS, Summary } from "../src/components/Summary";
@@ -164,13 +164,41 @@ describe("first-run registration", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("may only contain letters, digits");
     expect(calls(fn, "/api/v1/bootstrap/admin", "POST")).toBe(0);
-    // If the server still says bad_request (e.g. rules drift), the same message appears.
+    // A server bad_request with a valid username is not blamed on the username.
     fn.mockImplementationOnce(async () => new Response('{"error":"bad_request"}', { status: 400 }));
     await userEvent.clear(user);
     await userEvent.type(user, "admin");
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("may only contain letters, digits");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The request failed.");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("may only contain");
     expect(state.admin).toBeNull();
+  });
+
+  it("checks the password maximum in the browser and explains a common password from the server", async () => {
+    const { fn } = fakeServer({ admin: false });
+    render(<App />);
+    const pw = await screen.findByLabelText(/^Password \(at least/);
+    const again = screen.getByLabelText("Repeat password");
+    const long = "x".repeat(257);
+    await userEvent.click(pw);
+    await userEvent.paste(long);
+    await userEvent.click(again);
+    await userEvent.paste(long);
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("at most 256 characters");
+    expect(calls(fn, "/api/v1/bootstrap/admin", "POST")).toBe(0);
+
+    fn.mockImplementationOnce(async () => new Response('{"error":"weak_password","reason":"common"}', { status: 400 }));
+    await userEvent.clear(pw);
+    await userEvent.type(pw, "password123!");
+    await userEvent.clear(again);
+    await userEvent.type(again, "password123!");
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("too common or easy to guess");
+  });
+
+  it("keeps the dashboard's password maximum equal to the shared contract", () => {
+    expect(MAX_PASSWORD_LENGTH).toBe(SHARED_MAX_PASSWORD_LENGTH);
   });
 
   it("the client username rule matches the shared contract", () => {

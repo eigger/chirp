@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiError, changePassword, fetchApiKey, MIN_PASSWORD_LENGTH, regenerateApiKey, type ApiKeyState } from "../api";
+import { ApiError, changePassword, fetchApiKey, MIN_PASSWORD_LENGTH, passwordLengthProblem, regenerateApiKey, type ApiKeyState } from "../api";
+import { passwordRuleText } from "./AuthForms";
 import { useT } from "../i18n";
 
 interface Props {
@@ -144,7 +145,8 @@ export function ChangePassword({ onUnauthorized }: Props) {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if ([...next].length < MIN_PASSWORD_LENGTH) return setMsg({ ok: false, text: t("password.weak", { n: MIN_PASSWORD_LENGTH }) });
+    const problem = passwordLengthProblem(next);
+    if (problem) return setMsg({ ok: false, text: passwordRuleText(t, problem) });
     if (next !== confirm) return setMsg({ ok: false, text: t("password.mismatch") });
     setBusy(true);
     setMsg(null);
@@ -161,7 +163,7 @@ export function ChangePassword({ onUnauthorized }: Props) {
         code === "invalid_credentials"
           ? t("pw.wrongCurrent")
           : code === "weak_password"
-            ? t("password.weak", { n: MIN_PASSWORD_LENGTH })
+            ? passwordRuleText(t, (err as ApiError).reason)
             : code === "password_mismatch"
               ? t("password.mismatch")
               : err instanceof ApiError && err.status === 429

@@ -12,6 +12,16 @@ const CSRF_HEADER = "X-Chirp-Csrf";
  * rather than imported so the bundle does not pull in zod for one number.
  */
 export const MIN_PASSWORD_LENGTH = 10;
+/** Mirrors MAX_PASSWORD_LENGTH in @chirp/shared. */
+export const MAX_PASSWORD_LENGTH = 256;
+
+/** Client-side password rule check: the server also rejects common passwords (`reason: "common"`). */
+export function passwordLengthProblem(password: string): "too_short" | "too_long" | null {
+  const len = [...password].length;
+  if (len < MIN_PASSWORD_LENGTH) return "too_short";
+  if (len > MAX_PASSWORD_LENGTH) return "too_long";
+  return null;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -23,6 +33,11 @@ export class ApiError extends Error {
   get code(): string | null {
     const b = this.body as { error?: unknown } | null;
     return b && typeof b.error === "string" ? b.error : null;
+  }
+  /** `reason` of a weak_password error: too_short | too_long | common. */
+  get reason(): string | null {
+    const b = this.body as { reason?: unknown } | null;
+    return b && typeof b.reason === "string" ? b.reason : null;
   }
   get retryAfter(): number | null {
     const b = this.body as { retryAfter?: unknown } | null;
