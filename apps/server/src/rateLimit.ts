@@ -1,5 +1,5 @@
 /**
- * Exponential backoff for failed credential checks (login, setup code, current
+ * Exponential backoff for failed credential checks (login, current
  * password). No hard lockout: after FREE_FAILURES failures a key must wait
  * 1 s, 2 s, 4 s, ... before the next attempt is even evaluated, capped per
  * kind. The per-username cap is short so an attacker who keeps failing on the

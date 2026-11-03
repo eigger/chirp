@@ -42,10 +42,10 @@ function digest(s: string): Buffer {
 
 /**
  * The single admin account in `<dataDir>/admin.json` (0600). Written by both
- * the server (setup, password change) and the CLI (create, reset-password), so
- * the server re-reads the file whenever it changes on disk. Creation uses an
- * exclusive create, so two concurrent creators (setup form vs. CLI) cannot both
- * win. `credentialStamp` changes on every password change/reset; sessions
+ * the server (first-run registration, password change, env seed) and the CLI
+ * (reset-password), so the server re-reads the file whenever it changes on
+ * disk. Creation is an exclusive create, so two concurrent creators (two
+ * browsers, two processes) can never both win. `credentialStamp` changes on every password change/reset; sessions
  * remember it and die with it.
  */
 export class AdminStore {

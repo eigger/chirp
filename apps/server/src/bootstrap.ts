@@ -1,13 +1,7 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { AdminExistsError } from "./admin.js";
 import type { Auth } from "./auth.js";
 import type { Config } from "./config.js";
-
-/** Absolute path of the CLI next to this module (dist/cli.js in a release). */
-export function cliPath(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "cli.js");
-}
+import { cliPath } from "./keyNotice.js";
 
 export interface Notice {
   level: "info" | "warn";
@@ -15,18 +9,16 @@ export interface Notice {
 }
 
 /**
- * Start-up account handling, in order:
- * 1. CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD seed the admin when none exists
- *    (ignored once an admin exists: they never overwrite a changed password).
- * 2. Without an admin, a one-time setup code is created and logged; the
- *    dashboard's setup form requires it, so nobody can claim the server without
- *    access to its log, its data directory or its shell.
- * 3. With an admin, a leftover setup code is removed.
- * Nothing here logs a password or an API key.
+ * Start-up account handling:
+ * - CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD seed the admin when none exists
+ *   (for automated Docker setups; ignored once an admin exists, so they never
+ *   overwrite a password changed later).
+ * - Otherwise, while no admin exists, the dashboard offers first-run
+ *   registration to whoever opens it first. That window is announced loudly.
+ * Nothing here logs a password.
  */
 export async function bootstrapAuth(config: Pick<Config, "adminUser" | "adminPassword">, auth: Auth): Promise<Notice[]> {
   const out: Notice[] = [];
-  const cli = cliPath();
   if (config.adminUser && config.adminPassword) {
     if (!auth.admin.exists()) {
       try {
@@ -40,23 +32,17 @@ export async function bootstrapAuth(config: Pick<Config, "adminUser" | "adminPas
         level: "info",
         msg:
           "An admin account already exists; CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD are ignored. " +
-          `Change the password in the dashboard or with: node ${cli} admin reset-password`,
+          `Change the password in the dashboard or with: node ${cliPath()} admin reset-password`,
       });
     }
   }
-  if (auth.admin.exists()) {
-    auth.setup.clear();
-  } else {
-    const code = auth.setup.ensure();
+  if (!auth.admin.exists()) {
     out.push({
       level: "warn",
       msg:
-        `No admin account yet. Open the dashboard and enter the one-time setup code ${code} ` +
-        `(show it again with: node ${cli} admin setup-code), or create the account with: node ${cli} admin create`,
+        "No admin account yet: open the dashboard now and create it. Until then anyone who can reach " +
+        "this server can create the admin account (or set CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD).",
     });
-  }
-  if (!auth.legacy.active && auth.keys.size === 0) {
-    out.push({ level: "info", msg: "No API keys yet: sign in to the dashboard and create one under Settings -> API keys" });
   }
   return out;
 }

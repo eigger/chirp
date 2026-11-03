@@ -2,14 +2,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ApiKeyCreatedResponse,
-  ApiKeyListResponse,
+  ApiKeyRegenerateResponse,
+  ApiKeyResponse,
   AuthUserResponse,
+  BootstrapStatusResponse,
   ConflictResponse,
   ForbiddenResponse,
   InvalidCredentialsResponse,
+  PasswordMismatchResponse,
   RateLimitedResponse,
-  SetupStateResponse,
   StatusSnapshot,
   UnauthorizedResponse,
   WeakPasswordResponse,
@@ -17,22 +18,21 @@ import {
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AdminStore } from "../src/admin.js";
-import { LAST_USED_INTERVAL_MS } from "../src/apiKeys.js";
+import { ApiKeyStore, rotateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
-import { createAuth, dataFiles, type Auth } from "../src/auth.js";
+import { adminFile, createAuth, type Auth } from "../src/auth.js";
 import { bootstrapAuth } from "../src/bootstrap.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { dummyVerify, hashPassword, verifyPassword } from "../src/password.js";
 import { FREE_FAILURES } from "../src/rateLimit.js";
 import { createFileExclusive } from "../src/secureFile.js";
 import { SESSION_IDLE_MS, SESSION_MAX_MS } from "../src/session.js";
-import { generateSetupCode, normalizeSetupCode } from "../src/setupCode.js";
 import { Collector } from "../src/scheduler.js";
 import { FAST_SCRYPT } from "./helpers.js";
 
 const USER = "admin";
 const PASS = "correct horse battery";
-const LEGACY = "chp_legacy_env_key_1234567890";
+const ENV_KEY = "chp_env_key_from_config_1234567890";
 const CSRF = { "x-chirp-csrf": "1" };
 
 let dir: string;
@@ -58,7 +58,7 @@ function collector(): Collector {
 
 async function start(env: Record<string, string> = {}, opts: { admin?: boolean } = { admin: true }) {
   config = { ...loadConfig({ CHIRP_DATA_DIR: dir, ...env }), webDir: join(dir, "no-web") };
-  auth = createAuth(config, { now: () => clock, scrypt: FAST_SCRYPT });
+  auth = createAuth(config, ApiKeyStore.fromConfig(config).store, { now: () => clock, scrypt: FAST_SCRYPT });
   if (opts.admin) await auth.admin.create(USER, PASS);
   app = await buildApp({ config, collector: collector(), auth, now: () => clock });
 }
@@ -86,10 +86,10 @@ async function session(): Promise<string> {
   return cookieOf(res);
 }
 
-async function createKey(cookie: string, name = "Home Assistant") {
-  const res = await app.inject({ method: "POST", url: "/api/v1/keys", headers: { cookie, ...CSRF }, payload: { name } });
-  expect(res.statusCode).toBe(201);
-  return ApiKeyCreatedResponse.parse(res.json());
+async function getKey(cookie: string): Promise<string> {
+  const res = await app.inject({ url: "/api/v1/admin/api-key", headers: { cookie } });
+  expect(res.statusCode).toBe(200);
+  return ApiKeyResponse.parse(res.json()).key;
 }
 
 beforeEach(() => {
@@ -121,7 +121,7 @@ describe("password hashing", () => {
 
   it("admin.json is 0600 and holds only the hash", async () => {
     await start();
-    const file = dataFiles(dir).admin;
+    const file = adminFile(dir);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     const text = readFileSync(file, "utf8");
     expect(text).not.toContain(PASS);
@@ -243,14 +243,17 @@ describe("login / session", () => {
     const change = (payload: object, cookie = mine) =>
       app.inject({ method: "POST", url: "/api/v1/auth/password", headers: { cookie, ...CSRF }, payload });
 
-    const wrong = await change({ currentPassword: "not it at all", newPassword: "a brand new password" });
+    const mismatch = await change({ currentPassword: PASS, newPassword: "a brand new password", newPasswordConfirm: "a brand new passw0rd" });
+    expect(mismatch.statusCode).toBe(400);
+    expect(PasswordMismatchResponse.parse(mismatch.json())).toEqual({ error: "password_mismatch" });
+    const wrong = await change({ currentPassword: "not it at all", newPassword: "a brand new password", newPasswordConfirm: "a brand new password" });
     expect(wrong.statusCode).toBe(400);
     expect(InvalidCredentialsResponse.parse(wrong.json())).toEqual({ error: "invalid_credentials" });
-    const weak = await change({ currentPassword: PASS, newPassword: "short" });
+    const weak = await change({ currentPassword: PASS, newPassword: "short", newPasswordConfirm: "short" });
     expect(weak.statusCode).toBe(400);
     expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password" });
 
-    const ok = await change({ currentPassword: PASS, newPassword: "a brand new password" });
+    const ok = await change({ currentPassword: PASS, newPassword: "a brand new password", newPasswordConfirm: "a brand new password" });
     expect(ok.statusCode).toBe(204);
     const fresh = cookieOf(ok);
     expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie: mine } })).statusCode).toBe(401);
@@ -263,7 +266,7 @@ describe("login / session", () => {
   it("a password reset from the CLI (another process) also ends sessions", async () => {
     const cookie = await session();
     clock += 5; // a distinct passwordChangedAt
-    await new AdminStore(dataFiles(dir).admin, FAST_SCRYPT, () => clock).setPassword("reset from the cli");
+    await new AdminStore(adminFile(dir), FAST_SCRYPT, () => clock).setPassword("reset from the cli");
     expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(401);
     expect((await login(USER, "reset from the cli")).statusCode).toBe(200);
   });
@@ -285,110 +288,92 @@ describe("cookie Secure flag", () => {
   });
 });
 
-describe("API keys", () => {
-  beforeEach(() => start({ CHIRP_API_KEY: LEGACY }));
+describe("API key (dashboard)", () => {
+  beforeEach(() => start());
 
-  it("create returns the plaintext once; the list never does; revoke is immediate", async () => {
+  it("is created on first start (0600), shown to the admin, and works as a Bearer key", async () => {
+    const file = join(dir, "api-key");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
     const cookie = await session();
-    const created = await createKey(cookie);
-    expect(created.key.startsWith("chp_")).toBe(true);
-    expect(created.prefix).toBe(created.key.slice(0, 12));
-    expect(created).toMatchObject({ name: "Home Assistant", source: "dashboard", revocable: true, lastUsedAt: null });
-
-    const list = await app.inject({ url: "/api/v1/keys", headers: { cookie } });
-    expect(list.statusCode).toBe(200);
-    expect(list.body).not.toContain(created.key);
-    const keys = ApiKeyListResponse.parse(list.json()).keys;
-    expect(keys.map((k) => k.id)).toEqual(["legacy", created.id]);
-    expect(Object.keys(keys[1])).not.toContain("key");
-    expect(Object.keys(keys[1])).not.toContain("hash");
-
-    const file = readFileSync(dataFiles(dir).keys, "utf8");
-    expect(file).not.toContain(created.key);
-    expect(statSync(dataFiles(dir).keys).mode & 0o777).toBe(0o600);
-
-    const bearer = { authorization: `Bearer ${created.key}` };
-    const status = await app.inject({ url: "/api/v1/status", headers: bearer });
+    const res = await app.inject({ url: "/api/v1/admin/api-key", headers: { cookie } });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const body = ApiKeyResponse.parse(res.json());
+    expect(body.source).toBe("file");
+    expect(body.key).toBe(readFileSync(file, "utf8").trim());
+    const status = await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${body.key}` } });
     expect(status.statusCode).toBe(200);
     StatusSnapshot.parse(status.json());
-
-    const del = await app.inject({ method: "DELETE", url: `/api/v1/keys/${created.id}`, headers: { cookie, ...CSRF } });
-    expect(del.statusCode).toBe(204);
-    const after = await app.inject({ url: "/api/v1/status", headers: bearer });
-    expect(after.statusCode).toBe(401);
-    expect(after.headers["www-authenticate"]).toBe("Bearer");
-    expect((await app.inject({ method: "DELETE", url: `/api/v1/keys/${created.id}`, headers: { cookie, ...CSRF } })).statusCode).toBe(404);
   });
 
-  it("an API key can never manage keys or the account (403); no credentials is 401", async () => {
+  it("regenerate: the old key is 401 at once, the new key works and is persisted", async () => {
     const cookie = await session();
-    const { key, id } = await createKey(cookie);
-    for (const k of [key, LEGACY]) {
-      const h = { authorization: `Bearer ${k}`, ...CSRF };
-      for (const [method, url, payload] of [
-        ["GET", "/api/v1/keys", undefined],
-        ["POST", "/api/v1/keys", { name: "x" }],
-        ["DELETE", `/api/v1/keys/${id}`, undefined],
-        ["GET", "/api/v1/auth/me", undefined],
-        ["POST", "/api/v1/auth/password", { currentPassword: PASS, newPassword: "0123456789ab" }],
-      ] as const) {
-        const res = await app.inject({ method, url, headers: h, payload });
-        expect(res.statusCode, `${method} ${url}`).toBe(403);
-        expect(ForbiddenResponse.parse(res.json())).toEqual({ error: "forbidden" });
-      }
+    const old = await getKey(cookie);
+    const noCsrf = await app.inject({ method: "POST", url: "/api/v1/admin/api-key/regenerate", headers: { cookie } });
+    expect(noCsrf.statusCode).toBe(403);
+    expect(await getKey(cookie)).toBe(old);
+    const res = await app.inject({ method: "POST", url: "/api/v1/admin/api-key/regenerate", headers: { cookie, ...CSRF } });
+    expect(res.statusCode).toBe(200);
+    const fresh = ApiKeyRegenerateResponse.parse(res.json()).key;
+    expect(fresh).not.toBe(old);
+    const before = await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${old}` } });
+    expect(before.statusCode).toBe(401);
+    expect(before.headers["www-authenticate"]).toBe("Bearer");
+    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${fresh}` } })).statusCode).toBe(200);
+    expect(readFileSync(join(dir, "api-key"), "utf8").trim()).toBe(fresh);
+    expect(statSync(join(dir, "api-key")).mode & 0o777).toBe(0o600);
+    expect(await getKey(cookie)).toBe(fresh);
+  });
+
+  it("a `cli.js key rotate` in another process is picked up by the dashboard too", async () => {
+    const cookie = await session();
+    const rotated = rotateApiKey({ apiKeyFile: join(dir, "api-key") });
+    expect(await getKey(cookie)).toBe(rotated);
+  });
+
+  it("the API key can never read or regenerate itself, or reach the account (403); no credentials is 401", async () => {
+    const cookie = await session();
+    const key = await getKey(cookie);
+    const h = { authorization: `Bearer ${key}`, ...CSRF };
+    for (const [method, url, payload] of [
+      ["GET", "/api/v1/admin/api-key", undefined],
+      ["POST", "/api/v1/admin/api-key/regenerate", undefined],
+      ["GET", "/api/v1/auth/me", undefined],
+      ["POST", "/api/v1/auth/password", { currentPassword: PASS, newPassword: "0123456789ab", newPasswordConfirm: "0123456789ab" }],
+    ] as const) {
+      const res = await app.inject({ method, url, headers: h, payload });
+      expect(res.statusCode, `${method} ${url}`).toBe(403);
+      expect(ForbiddenResponse.parse(res.json())).toEqual({ error: "forbidden" });
     }
-    expect((await app.inject({ url: "/api/v1/keys" })).statusCode).toBe(401);
-    expect((await app.inject({ method: "POST", url: "/api/v1/keys", headers: CSRF, payload: { name: "x" } })).statusCode).toBe(401);
+    expect(await getKey(cookie)).toBe(key); // not regenerated
+    expect((await app.inject({ url: "/api/v1/admin/api-key" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/v1/admin/api-key/regenerate", headers: CSRF })).statusCode).toBe(401);
   });
+});
 
-  it("the legacy env/file key keeps working and is listed read-only", async () => {
+describe("API key from CHIRP_API_KEY", () => {
+  beforeEach(() => start({ CHIRP_API_KEY: ENV_KEY }));
+
+  it("is shown read-only, cannot be regenerated, keeps working, and is never written to disk", async () => {
     const cookie = await session();
-    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${LEGACY}` } })).statusCode).toBe(200);
-    const keys = ApiKeyListResponse.parse((await app.inject({ url: "/api/v1/keys", headers: { cookie } })).json()).keys;
-    expect(keys[0]).toMatchObject({ id: "legacy", source: "env", revocable: false, prefix: LEGACY.slice(0, 12) });
-    expect(keys[0].lastUsedAt).not.toBeNull();
-    expect(JSON.stringify(keys)).not.toContain(LEGACY);
-    const del = await app.inject({ method: "DELETE", url: "/api/v1/keys/legacy", headers: { cookie, ...CSRF } });
-    expect(del.statusCode).toBe(409);
-    expect(ConflictResponse.parse(del.json())).toEqual({ error: "conflict" });
-    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${LEGACY}` } })).statusCode).toBe(200);
+    const res = await app.inject({ url: "/api/v1/admin/api-key", headers: { cookie } });
+    expect(ApiKeyResponse.parse(res.json())).toEqual({ key: ENV_KEY, source: "env" });
+    const regen = await app.inject({ method: "POST", url: "/api/v1/admin/api-key/regenerate", headers: { cookie, ...CSRF } });
+    expect(regen.statusCode).toBe(409);
+    expect(ConflictResponse.parse(regen.json())).toEqual({ error: "conflict" });
+    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${ENV_KEY}` } })).statusCode).toBe(200);
+    expect(existsSync(join(dir, "api-key"))).toBe(false);
   });
+});
 
-  it("lastUsedAt is written at most every 5 minutes", async () => {
-    const cookie = await session();
-    const { key, id } = await createKey(cookie);
-    const use = () => app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${key}` } });
-    const stored = () => (JSON.parse(readFileSync(dataFiles(dir).keys, "utf8")).keys as { id: string; lastUsedAt: string }[]).find((k) => k.id === id)!.lastUsedAt;
-    await use();
-    const first = stored();
-    expect(first).toBe(new Date(clock).toISOString());
-    clock += LAST_USED_INTERVAL_MS - 1000;
-    await use();
-    expect(stored()).toBe(first);
-    clock += 1000;
-    await use();
-    expect(stored()).toBe(new Date(clock).toISOString());
-  });
-
-  it("validates names; concurrent creation keeps every key", async () => {
-    const cookie = await session();
-    const bad = await app.inject({ method: "POST", url: "/api/v1/keys", headers: { cookie, ...CSRF }, payload: { name: "   " } });
-    expect(bad.statusCode).toBe(400);
-    const created = await Promise.all(Array.from({ length: 20 }, (_, i) => createKey(cookie, `k${i}`)));
-    expect(new Set(created.map((c) => c.id)).size).toBe(20);
-    const stored = JSON.parse(readFileSync(dataFiles(dir).keys, "utf8")).keys;
-    expect(stored).toHaveLength(20);
-    for (const c of created) {
-      expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${c.key}` } })).statusCode).toBe(200);
-    }
-  });
-
-  it("keys survive a restart (new store from the same file)", async () => {
-    const cookie = await session();
-    const { key } = await createKey(cookie);
-    await app.close();
+describe("upgrade from a pre-account install", () => {
+  it("an existing api-key file keeps working for Home Assistant and shows up in Settings", async () => {
+    const legacy = rotateApiKey({ apiKeyFile: join(dir, "api-key") });
     await start({}, { admin: false });
-    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${key}` } })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/api/v1/status", headers: { authorization: `Bearer ${legacy}` } })).statusCode).toBe(200);
+    expect(BootstrapStatusResponse.parse((await app.inject("/api/v1/bootstrap/status")).json())).toEqual({ needsBootstrap: true });
+    await auth.admin.create(USER, PASS);
+    expect(await getKey(await session())).toBe(legacy);
   });
 });
 
@@ -403,7 +388,7 @@ describe("CSRF on cookie-authenticated data routes", () => {
     const wrong = await app.inject({ method: "POST", url: "/api/v1/refresh", headers: { cookie, "x-chirp-csrf": "yes" } });
     expect(wrong.statusCode).toBe(403);
     expect((await app.inject({ method: "POST", url: "/api/v1/refresh", headers: { cookie, ...CSRF } })).statusCode).toBe(202);
-    const { key } = await createKey(cookie);
+    const key = await getKey(cookie);
     clock += 60_000;
     expect((await app.inject({ method: "POST", url: "/api/v1/refresh", headers: { authorization: `Bearer ${key}` } })).statusCode).toBe(202);
   });
@@ -415,82 +400,65 @@ describe("CSRF on cookie-authenticated data routes", () => {
   });
 });
 
-describe("first-run setup", () => {
+describe("first-run registration (bootstrap)", () => {
   beforeEach(() => start({}, { admin: false }));
 
-  const setup = (payload: object, ip = "10.0.0.1") =>
-    app.inject({ method: "POST", url: "/api/v1/auth/setup", headers: CSRF, payload, remoteAddress: ip });
+  const bootstrap = (payload: object, headers: Record<string, string> = CSRF) =>
+    app.inject({ method: "POST", url: "/api/v1/bootstrap/admin", headers, payload });
+  const good = { username: USER, password: PASS, passwordConfirm: PASS };
 
-  it("needs the setup code; creating the admin consumes it and disables setup", async () => {
-    const notices = await bootstrapAuth(config, auth);
-    const code = readFileSync(dataFiles(dir).setupCode, "utf8").trim();
-    expect(statSync(dataFiles(dir).setupCode).mode & 0o777).toBe(0o600);
-    expect(notices.some((n) => n.msg.includes(code))).toBe(true);
-    expect(SetupStateResponse.parse((await app.inject("/api/v1/auth/setup")).json())).toEqual({ required: true });
-
-    expect((await setup({ setupCode: "WRONG-CODE", username: USER, password: PASS })).statusCode).toBe(401);
-    expect((await setup({ username: USER, password: PASS })).statusCode).toBe(400);
-    expect((await setup({ setupCode: code, username: USER, password: PASS }, "10.0.0.3")).statusCode).toBe(201);
-    expect(existsSync(dataFiles(dir).setupCode)).toBe(false);
-    expect(SetupStateResponse.parse((await app.inject("/api/v1/auth/setup")).json())).toEqual({ required: false });
-    const again = await setup({ setupCode: code, username: "mallory", password: "another password" });
-    expect(again.statusCode).toBe(409);
-    expect((await login()).statusCode).toBe(200);
-  });
-
-  it("successful setup signs the admin in; weak passwords are refused", async () => {
-    const code = auth.setup.ensure();
-    const weak = await setup({ setupCode: code, username: USER, password: "short" });
-    expect(weak.statusCode).toBe(400);
-    expect(weak.json()).toEqual({ error: "weak_password" });
-    // lower case and missing dashes are accepted
-    const res = await setup({ setupCode: code.toLowerCase().replace(/-/g, ""), username: USER, password: PASS });
+  it("the first visitor creates the admin and is signed in; afterwards it is 409", async () => {
+    expect(BootstrapStatusResponse.parse((await app.inject("/api/v1/bootstrap/status")).json())).toEqual({ needsBootstrap: true });
+    expect((await login()).statusCode).toBe(401);
+    const res = await bootstrap(good);
     expect(res.statusCode).toBe(201);
     expect(AuthUserResponse.parse(res.json())).toEqual({ username: USER });
     expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie: cookieOf(res) } })).statusCode).toBe(200);
+    expect(BootstrapStatusResponse.parse((await app.inject("/api/v1/bootstrap/status")).json())).toEqual({ needsBootstrap: false });
+    const again = await bootstrap({ username: "mallory", password: "another password", passwordConfirm: "another password" });
+    expect(again.statusCode).toBe(409);
+    expect(ConflictResponse.parse(again.json())).toEqual({ error: "conflict" });
+    expect(auth.admin.username()).toBe(USER);
+    expect((await login()).statusCode).toBe(200);
   });
 
-  it("without a setup code file, setup is impossible (no open claim window)", async () => {
-    expect(existsSync(dataFiles(dir).setupCode)).toBe(false);
-    for (const guess of ["", "0000-0000-0000-0000"]) {
-      expect((await setup({ setupCode: guess, username: USER, password: PASS }, `10.2.0.${guess.length}`)).statusCode).toBe(401);
-    }
-    expect((await login()).statusCode).toBe(401);
+  it("rejects a mismatched confirmation, a weak password, a bad username and a missing CSRF header", async () => {
+    const mismatch = await bootstrap({ ...good, passwordConfirm: "correct horse batterY" });
+    expect(mismatch.statusCode).toBe(400);
+    expect(PasswordMismatchResponse.parse(mismatch.json())).toEqual({ error: "password_mismatch" });
+    const weak = await bootstrap({ username: USER, password: "short", passwordConfirm: "short" });
+    expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password" });
+    expect((await bootstrap({ ...good, username: "bad user" })).json()).toEqual({ error: "bad_request" });
+    expect((await bootstrap({ username: USER, password: PASS })).json()).toEqual({ error: "bad_request" });
+    expect((await bootstrap(good, {})).statusCode).toBe(403);
+    expect(auth.admin.exists()).toBe(false);
   });
 
-  it("wrong codes back off like logins", async () => {
-    auth.setup.ensure();
-    for (let i = 0; i < FREE_FAILURES; i++) await setup({ setupCode: "AAAA-AAAA-AAAA-AAAA", username: USER, password: PASS });
-    expect((await setup({ setupCode: "AAAA-AAAA-AAAA-AAAA", username: USER, password: PASS })).statusCode).toBe(429);
+  it("concurrent registrations: exactly one wins", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => bootstrap({ username: `user${i}`, password: PASS, passwordConfirm: PASS })),
+    );
+    const codes = results.map((r) => r.statusCode).sort();
+    expect(codes.filter((c) => c === 201)).toHaveLength(1);
+    expect(codes.filter((c) => c === 409)).toHaveLength(7);
+    const winner = results.find((r) => r.statusCode === 201)!;
+    expect(auth.admin.username()).toBe(AuthUserResponse.parse(winner.json()).username);
   });
 
-  it("two concurrent setups: exactly one wins", async () => {
-    const code = auth.setup.ensure();
-    const [a, b] = await Promise.all([
-      setup({ setupCode: code, username: "first", password: PASS }, "10.0.0.1"),
-      setup({ setupCode: code, username: "second", password: PASS }, "10.0.0.2"),
-    ]);
-    expect([a.statusCode, b.statusCode].sort()).toEqual([201, 409]);
-    expect(auth.admin.username()).toBe(a.statusCode === 201 ? "first" : "second");
-  });
-
-  it("an admin created by the CLI while the server runs disables setup at once", async () => {
-    const code = auth.setup.ensure();
-    await new AdminStore(dataFiles(dir).admin, FAST_SCRYPT).create("cli-admin", PASS);
-    expect(SetupStateResponse.parse((await app.inject("/api/v1/auth/setup")).json())).toEqual({ required: false });
-    expect((await setup({ setupCode: code, username: USER, password: PASS })).statusCode).toBe(409);
-    expect((await login("cli-admin", PASS)).statusCode).toBe(200);
+  it("an admin created by another process (CLI/second server) closes the window at once", async () => {
+    await new AdminStore(adminFile(dir), FAST_SCRYPT).create("other", PASS);
+    expect(BootstrapStatusResponse.parse((await app.inject("/api/v1/bootstrap/status")).json())).toEqual({ needsBootstrap: false });
+    expect((await bootstrap(good)).statusCode).toBe(409);
   });
 });
 
-describe("bootstrap", () => {
-  it("CHIRP_ADMIN_USER/PASSWORD seed the admin once, never log the password, and remove the setup code", async () => {
+describe("start-up notices", () => {
+  it("CHIRP_ADMIN_USER/PASSWORD seed the admin once and never log the password", async () => {
     await start({ CHIRP_ADMIN_USER: "ops", CHIRP_ADMIN_PASSWORD: "seeded password!" }, { admin: false });
-    auth.setup.ensure();
     const notices = await bootstrapAuth(config, auth);
     expect(auth.admin.username()).toBe("ops");
-    expect(existsSync(dataFiles(dir).setupCode)).toBe(false);
     expect(JSON.stringify(notices)).not.toContain("seeded password!");
+    expect(notices.some((n) => n.level === "warn")).toBe(false);
     expect((await login("ops", "seeded password!")).statusCode).toBe(200);
     // A later start with a different password does not overwrite the account.
     const again = await bootstrapAuth({ adminUser: "ops", adminPassword: "different password" }, auth);
@@ -498,22 +466,10 @@ describe("bootstrap", () => {
     expect((await login("ops", "different password", "10.0.0.9")).statusCode).toBe(401);
   });
 
-  it("without an admin a setup code is created and logged; with one, nothing", async () => {
+  it("warns about the open registration window until an admin exists", async () => {
     await start({}, { admin: false });
-    const notices = await bootstrapAuth(config, auth);
-    const code = auth.setup.read();
-    expect(code).toMatch(/^[0-9A-Z]{4}(-[0-9A-Z]{4}){3}$/);
-    expect(notices.find((n) => n.level === "warn")?.msg).toContain(code!);
-    expect((await bootstrapAuth(config, auth)).find((n) => n.level === "warn")?.msg).toContain(code!); // stable
+    expect((await bootstrapAuth(config, auth)).find((n) => n.level === "warn")?.msg).toMatch(/create it/);
     await auth.admin.create(USER, PASS);
-    const after = await bootstrapAuth(config, auth);
-    expect(after.some((n) => n.level === "warn")).toBe(false);
-    expect(auth.setup.read()).toBeNull();
-  });
-
-  it("setup codes are random and normalise look-alikes", () => {
-    const codes = new Set(Array.from({ length: 50 }, generateSetupCode));
-    expect(codes.size).toBe(50);
-    expect(normalizeSetupCode(" ab1o-il ")).toBe("AB10" + "11");
+    expect((await bootstrapAuth(config, auth)).some((n) => n.level === "warn")).toBe(false);
   });
 });

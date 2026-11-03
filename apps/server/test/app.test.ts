@@ -14,7 +14,7 @@ import {
 } from "@chirp/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { generateApiKey } from "../src/apiKey.js";
+import { ApiKeyStore, generateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
 import { createAuth } from "../src/auth.js";
 import { loadConfig } from "../src/config.js";
@@ -55,7 +55,7 @@ beforeEach(async () => {
   app = await buildApp({
     config: { ...loadConfig({}), webDir: tmp },
     collector,
-    auth: createAuth({ dataDir: join(tmp, "data"), apiKey: KEY, apiKeyFile: join(tmp, "data", "api-key") }, { scrypt: FAST_SCRYPT }),
+    auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
     now: () => clock,
   });
 });
@@ -180,7 +180,7 @@ describe("static dashboard", () => {
     const bare = await buildApp({
       config: { ...loadConfig({}), webDir: join(tmp, "missing") },
       collector,
-      auth: createAuth({ dataDir: join(tmp, "data"), apiKey: KEY, apiKeyFile: join(tmp, "data", "api-key") }, { scrypt: FAST_SCRYPT }),
+      auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
     });
     const root = await bare.inject("/");
     expect(root.statusCode).toBe(404);

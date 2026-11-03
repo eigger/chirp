@@ -1,22 +1,20 @@
 import { join } from "node:path";
 import {
+  BootstrapAdminRequest,
   ChangePasswordRequest,
-  CreateApiKeyRequest,
   CSRF_HEADER,
   LoginRequest,
+  PASSWORD_MISMATCH,
   SESSION_COOKIE,
-  SetupRequest,
-  type ApiKeyInfo,
 } from "@chirp/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { ZodError } from "zod";
 import { AdminExistsError, AdminStore, WeakPasswordError } from "./admin.js";
-import { LegacyApiKey } from "./apiKey.js";
-import { ApiKeyStore, TooManyKeysError } from "./apiKeys.js";
+import { ApiKeyStore, EnvKeyError } from "./apiKey.js";
 import type { Config } from "./config.js";
 import { DEFAULT_SCRYPT, passwordProblem, type ScryptParams } from "./password.js";
 import { LoginLimiter } from "./rateLimit.js";
 import { SESSION_MAX_MS, SessionStore } from "./session.js";
-import { SetupCode } from "./setupCode.js";
 
 /** How a route may be reached. Routes without a mode are `data`. */
 export type AuthMode = "public" | "data" | "session";
@@ -31,34 +29,43 @@ declare module "fastify" {
 export interface Auth {
   admin: AdminStore;
   sessions: SessionStore;
-  keys: ApiKeyStore;
-  legacy: LegacyApiKey;
-  setup: SetupCode;
+  key: ApiKeyStore;
   limiter: LoginLimiter;
 }
 
-export function dataFiles(dataDir: string) {
-  return {
-    admin: join(dataDir, "admin.json"),
-    keys: join(dataDir, "api-keys.json"),
-    setupCode: join(dataDir, "setup-code"),
-  };
+export function adminFile(dataDir: string): string {
+  return join(dataDir, "admin.json");
 }
 
 export function createAuth(
-  config: Pick<Config, "dataDir" | "apiKey" | "apiKeyFile">,
+  config: Pick<Config, "dataDir">,
+  key: ApiKeyStore,
   opts: { now?: () => number; scrypt?: ScryptParams } = {},
 ): Auth {
   const now = opts.now ?? Date.now;
-  const files = dataFiles(config.dataDir);
   return {
-    admin: new AdminStore(files.admin, opts.scrypt ?? DEFAULT_SCRYPT, now),
+    admin: new AdminStore(adminFile(config.dataDir), opts.scrypt ?? DEFAULT_SCRYPT, now),
     sessions: new SessionStore(now),
-    keys: new ApiKeyStore(files.keys, now),
-    legacy: LegacyApiKey.fromConfig(config),
-    setup: new SetupCode(files.setupCode),
+    key,
     limiter: new LoginLimiter(now),
   };
+}
+
+/** Runs async jobs one at a time (in this process); the exclusive file create covers other processes. */
+function serial() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(job: () => Promise<T>): Promise<T> => {
+    const run = tail.then(job, job);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
+/** `password_mismatch` when the only problem is a differing confirmation, else `bad_request`. */
+function bodyError(error: ZodError): "password_mismatch" | "bad_request" {
+  return error.issues.length > 0 && error.issues.every((i) => i.message === PASSWORD_MISMATCH)
+    ? "password_mismatch"
+    : "bad_request";
 }
 
 function bearer(header: string | undefined): string | null {
@@ -111,14 +118,14 @@ const sessionOf = new WeakMap<FastifyRequest, SessionCtx>();
 /**
  * The auth gate for `/api/v1/*` (registered inside the api plugin):
  * - `public`: no credentials; state-changing requests still need the CSRF header.
- * - `data`: a Bearer API key (dashboard or legacy key) OR the session cookie.
+ * - `data`: the Bearer API key OR the session cookie.
  *   A present Authorization header is decisive: a wrong key is 401 even with a
  *   valid cookie.
  * - `session`: the session cookie only. An Authorization header is refused
- *   with 403, so an API key (e.g. the one in Home Assistant) can never manage
- *   keys or the admin account.
+ *   with 403, so the API key (e.g. the one in Home Assistant) can never read
+ *   or regenerate itself or touch the admin account.
  */
-export function authHook(auth: Auth, now: () => number) {
+export function authHook(auth: Auth) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     if (request.method === "OPTIONS") return;
     reply.header("cache-control", "no-store");
@@ -130,7 +137,7 @@ export function authHook(auth: Auth, now: () => number) {
     const authz = request.headers.authorization;
     if (mode === "data" && authz !== undefined) {
       const key = bearer(authz);
-      if (key && (auth.keys.verify(key) || auth.legacy.verify(key, new Date(now())))) return;
+      if (key && auth.key.verify(key)) return;
       return unauthorized(reply);
     }
     if (mode === "session" && authz !== undefined) return sendError(reply, 403, "forbidden");
@@ -159,21 +166,7 @@ function clearSessionCookie(config: Pick<Config, "cookieSecure">, request: Fasti
   reply.header("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
 }
 
-function legacyEntry(auth: Auth): ApiKeyInfo | null {
-  const info = auth.legacy.info();
-  if (!info) return null;
-  return {
-    id: "legacy",
-    name: info.source === "env" ? "default (CHIRP_API_KEY)" : "default (api-key file)",
-    prefix: info.prefix,
-    source: info.source,
-    revocable: false,
-    createdAt: info.createdAt,
-    lastUsedAt: info.lastUsedAt,
-  };
-}
-
-/** `/api/v1/auth/*` and `/api/v1/keys*`. Registered inside the api plugin (after authHook). */
+/** `/api/v1/bootstrap/*`, `/api/v1/auth/*` and `/api/v1/admin/*`. Registered inside the api plugin (after authHook). */
 export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pick<Config, "cookieSecure">): void {
   const pub = { config: { auth: "public" as const } };
   const sess = { config: { auth: "session" as const } };
@@ -185,27 +178,29 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     return { username };
   };
 
-  api.get("/auth/setup", pub, async () => ({ required: !auth.admin.exists() }));
+  const bootstrapLock = serial();
 
-  api.post("/auth/setup", pub, async (request, reply) => {
-    const body = SetupRequest.safeParse(request.body);
-    if (!body.success) return sendError(reply, 400, "bad_request");
-    if (auth.admin.exists()) return sendError(reply, 409, "conflict");
-    const wait = auth.limiter.retryAfterMs(request.ip, null);
-    if (wait > 0) return rateLimited(reply, wait);
-    // Count the attempt before checking, so parallel guesses are throttled too.
-    auth.limiter.fail(request.ip, null);
-    if (!auth.setup.matches(body.data.setupCode)) return sendError(reply, 401, "unauthorized");
-    auth.limiter.succeed(request.ip, null);
+  api.get("/bootstrap/status", pub, async () => ({ needsBootstrap: !auth.admin.exists() }));
+
+  // First-run registration: while no admin exists, the first visitor creates it
+  // (like kibble). Requests are serialized here, and the admin file is created
+  // exclusively, so two racing requests (or a racing CLI) never both succeed.
+  api.post("/bootstrap/admin", pub, async (request, reply) => {
+    const body = BootstrapAdminRequest.safeParse(request.body);
+    if (!body.success) return sendError(reply, 400, bodyError(body.error));
     if (passwordProblem(body.data.password)) return sendError(reply, 400, "weak_password");
-    try {
-      await auth.admin.create(body.data.username, body.data.password);
-    } catch (err) {
-      if (err instanceof AdminExistsError) return sendError(reply, 409, "conflict");
-      throw err;
-    }
-    auth.setup.clear();
-    request.log.info(`Admin account "${body.data.username}" created with the setup code`);
+    const created = await bootstrapLock(async () => {
+      if (auth.admin.exists()) return false;
+      try {
+        await auth.admin.create(body.data.username, body.data.password);
+        return true;
+      } catch (err) {
+        if (err instanceof AdminExistsError) return false;
+        throw err;
+      }
+    });
+    if (!created) return sendError(reply, 409, "conflict");
+    request.log.info(`Admin account "${body.data.username}" created from the dashboard (${request.ip})`);
     return reply.code(201).send(startSession(request, reply));
   });
 
@@ -233,7 +228,7 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
 
   api.post("/auth/password", sess, async (request, reply) => {
     const body = ChangePasswordRequest.safeParse(request.body);
-    if (!body.success) return sendError(reply, 400, "bad_request");
+    if (!body.success) return sendError(reply, 400, bodyError(body.error));
     const user = sessionOf.get(request)!.user;
     const wait = auth.limiter.retryAfterMs(request.ip, user);
     if (wait > 0) return rateLimited(reply, wait);
@@ -255,30 +250,17 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     return reply.code(204).send();
   });
 
-  api.get("/keys", sess, async () => {
-    const legacy = legacyEntry(auth);
-    return { keys: [...(legacy ? [legacy] : []), ...auth.keys.list()] };
-  });
+  api.get("/admin/api-key", sess, async () => auth.key.current());
 
-  api.post("/keys", sess, async (request, reply) => {
-    const body = CreateApiKeyRequest.safeParse(request.body);
-    if (!body.success) return sendError(reply, 400, "bad_request");
+  api.post("/admin/api-key/regenerate", sess, async (request, reply) => {
     try {
-      const { info, key } = auth.keys.create(body.data.name);
-      request.log.info(`API key "${info.name}" (${info.prefix}…) created`);
-      return reply.code(201).send({ ...info, key });
+      const key = auth.key.regenerate();
+      request.log.info("API key regenerated from the dashboard; the previous key no longer works");
+      return { key };
     } catch (err) {
-      if (err instanceof TooManyKeysError) return sendError(reply, 409, "conflict");
+      // CHIRP_API_KEY is configuration: change it where it is set.
+      if (err instanceof EnvKeyError) return sendError(reply, 409, "conflict");
       throw err;
     }
-  });
-
-  api.delete<{ Params: { id: string } }>("/keys/:id", sess, async (request, reply) => {
-    const { id } = request.params;
-    // The legacy key is configuration, not data: remove CHIRP_API_KEY / the api-key file instead.
-    if (id === "legacy") return sendError(reply, 409, "conflict");
-    if (!auth.keys.revoke(id)) return sendError(reply, 404, "not_found");
-    request.log.info(`API key ${id} revoked`);
-    return reply.code(204).send();
   });
 }

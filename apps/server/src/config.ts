@@ -11,10 +11,12 @@ export interface TempWarn {
 
 export interface Config {
   port: number;
+  /** Print a newly generated API key to the log (CHIRP_PRINT_KEY, opt-in). */
+  printKey: boolean;
   host: string;
-  /** Legacy single API key (CHIRP_API_KEY); still accepted next to dashboard keys. */
+  /** API key set by the operator (CHIRP_API_KEY); wins over the key file and cannot be regenerated. */
   apiKey: string | null;
-  /** Legacy key file (default <dataDir>/api-key); read if present, never created by the server. */
+  /** Key file (default <dataDir>/api-key); created on the first start when CHIRP_API_KEY is unset. */
   apiKeyFile: string;
   /** Admin account seeded on start when none exists (CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD). */
   adminUser: string | null;
@@ -71,7 +73,7 @@ function apiKey(value: string | undefined): string | null {
   if (v.length < MIN_API_KEY_LENGTH) {
     throw new ConfigError(
       `CHIRP_API_KEY is too short (${v.length} characters, minimum ${MIN_API_KEY_LENGTH}); ` +
-        "unset it and create keys in the dashboard (Settings -> API keys) instead",
+        "unset it to use a generated key, or generate one with: node apps/server/dist/cli.js key rotate",
     );
   }
   return v;
@@ -185,6 +187,7 @@ export function loadConfig(env: Env = process.env): Config {
   const dataDir = env.CHIRP_DATA_DIR?.trim() || "/var/lib/chirp";
   return {
     port: port(env.CHIRP_PORT),
+    printKey: bool(env.CHIRP_PRINT_KEY),
     host: env.CHIRP_HOST?.trim() || "0.0.0.0",
     apiKey: apiKey(env.CHIRP_API_KEY),
     apiKeyFile: env.CHIRP_API_KEY_FILE?.trim() || resolve(dataDir, "api-key"),

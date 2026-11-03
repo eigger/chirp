@@ -166,6 +166,7 @@ export const ErrorCode = z.enum([
   "rate_limited",
   "invalid_credentials",
   "weak_password",
+  "password_mismatch",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 export const ErrorResponse = z.object({ error: ErrorCode });
@@ -180,11 +181,11 @@ export const BadRequestResponse = z.object({ error: z.literal("bad_request") });
  */
 export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") });
 /**
- * 403: an API key used on a session-only route (`/auth/*`, `/keys`), or a
- * cookie-authenticated state-changing request without the CSRF header.
+ * 403: an API key used on a session-only route (`/auth/me`, `/auth/password`,
+ * `/admin/*`), or a state-changing request without the CSRF header.
  */
 export const ForbiddenResponse = z.object({ error: z.literal("forbidden") });
-/** 409: setup when an admin already exists; revoking the read-only legacy key; too many keys. */
+/** 409: POST /bootstrap/admin once an admin exists; regenerating a key that comes from CHIRP_API_KEY. */
 export const ConflictResponse = z.object({ error: z.literal("conflict") });
 /** 429: too many failed login / setup / password attempts (`Retry-After` header carries the same seconds). */
 export const RateLimitedResponse = z.object({
@@ -195,6 +196,8 @@ export const RateLimitedResponse = z.object({
 export const InvalidCredentialsResponse = z.object({ error: z.literal("invalid_credentials") });
 /** 400: a new password shorter than MIN_PASSWORD_LENGTH (or longer than MAX_PASSWORD_LENGTH). */
 export const WeakPasswordResponse = z.object({ error: z.literal("weak_password") });
+/** 400: the password and its confirmation differ (bootstrap, password change). */
+export const PasswordMismatchResponse = z.object({ error: z.literal("password_mismatch") });
 /** 404: unknown disk id, unknown history metric, unknown /api or /health path. */
 export const NotFoundResponse = z.object({ error: z.literal("not_found") });
 /** 429: POST /refresh within the cooldown (`Retry-After` header carries the same seconds). */
@@ -208,24 +211,41 @@ export const InternalErrorResponse = z.object({ error: z.literal("internal_error
 export const API_KEY_PREFIX = "chp_";
 
 // ---------------------------------------------------------------------------
-// Authentication (dashboard sessions) and API key management.
+// Authentication (dashboard sessions) and the API key.
 //
 // Two ways to authenticate:
-//  - `Authorization: Bearer chp_...` (API key): data routes only (status, disks,
-//    history, refresh). This is what Home Assistant uses.
-//  - the `chirp_session` cookie (admin login): data routes and the session-only
-//    routes below. State-changing cookie requests need the `X-Chirp-Csrf: 1` header.
+//  - `Authorization: Bearer chp_...` (the API key): data routes only (status,
+//    disks, history, refresh). This is what Home Assistant uses.
+//  - the `chirp_session` cookie (admin login): data routes and the
+//    session-only routes below. State-changing requests need `X-Chirp-Csrf: 1`.
 // ---------------------------------------------------------------------------
 
-/** HttpOnly, SameSite=Strict session cookie set by login/setup. */
+/** HttpOnly, SameSite=Strict session cookie set by login/bootstrap. */
 export const SESSION_COOKIE = "chirp_session";
-/** Required on every non-GET request authenticated by the session cookie (and on login/setup). */
+/** Required on every non-GET `/api/v1` request that is not authenticated by a Bearer key. */
 export const CSRF_HEADER = "x-chirp-csrf";
 export const MIN_PASSWORD_LENGTH = 10;
 export const MAX_PASSWORD_LENGTH = 256;
+/** zod issue message (and error code) when a password and its confirmation differ. */
+export const PASSWORD_MISMATCH = "password_mismatch";
 
 /** Admin username: 1-64 of letters, digits, `.`, `_`, `@`, `-`. */
 export const Username = z.string().regex(/^[A-Za-z0-9._@-]{1,64}$/);
+
+/** GET /api/v1/bootstrap/status (no auth): true while no admin account exists. */
+export const BootstrapStatusResponse = z.object({ needsBootstrap: z.boolean() });
+
+/**
+ * POST /api/v1/bootstrap/admin (no auth, only while no admin exists): the first
+ * visitor creates the admin account and is signed in. 201 -> AuthUserResponse.
+ */
+export const BootstrapAdminRequest = z
+  .object({
+    username: Username,
+    password: z.string().max(1024),
+    passwordConfirm: z.string().max(1024),
+  })
+  .refine((d) => d.password === d.passwordConfirm, { message: PASSWORD_MISMATCH, path: ["passwordConfirm"] });
 
 /** POST /api/v1/auth/login */
 export const LoginRequest = z.object({
@@ -233,56 +253,26 @@ export const LoginRequest = z.object({
   password: z.string().max(1024),
 });
 
-/** GET /api/v1/auth/setup (no auth): whether the one-time setup form is active (no admin yet). */
-export const SetupStateResponse = z.object({ required: z.boolean() });
-
-/** POST /api/v1/auth/setup: create the admin with the one-time setup code. */
-export const SetupRequest = z.object({
-  setupCode: z.string().max(256),
-  username: Username,
-  password: z.string().max(1024),
-});
-
-/** GET /api/v1/auth/me, and the body of a successful login/setup. */
+/** GET /api/v1/auth/me, and the body of a successful login/bootstrap. */
 export const AuthUserResponse = z.object({ username: z.string() });
 
 /** POST /api/v1/auth/password -> 204 (all sessions end; the caller gets a fresh one). */
-export const ChangePasswordRequest = z.object({
-  currentPassword: z.string().max(1024),
-  newPassword: z.string().max(1024),
-});
+export const ChangePasswordRequest = z
+  .object({
+    currentPassword: z.string().max(1024),
+    newPassword: z.string().max(1024),
+    newPasswordConfirm: z.string().max(1024),
+  })
+  .refine((d) => d.newPassword === d.newPasswordConfirm, { message: PASSWORD_MISMATCH, path: ["newPasswordConfirm"] });
 
 /**
- * Where a key comes from: `dashboard` keys are created/revoked in Settings;
- * `env` (CHIRP_API_KEY) and `file` (<dataDir>/api-key) are the read-only legacy key.
+ * GET /api/v1/admin/api-key (session only): the key Home Assistant needs.
+ * `env` = set by CHIRP_API_KEY (read-only); `file` = `<dataDir>/api-key`.
  */
-export const ApiKeySource = z.enum(["dashboard", "env", "file"]);
-
-/** One API key as listed. Never contains the plaintext key or its hash. */
-export const ApiKeyInfo = z.object({
-  /** `legacy` for the env/file key. */
-  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
-  name: z.string(),
-  /** First characters of the key (`chp_` + 8), for recognising it. */
-  prefix: z.string(),
-  source: ApiKeySource,
-  revocable: z.boolean(),
-  createdAt: z.string().nullable(),
-  /** Updated at most every 5 minutes; null = never used (legacy: since the server started). */
-  lastUsedAt: z.string().nullable(),
-});
-export type ApiKeyInfo = z.infer<typeof ApiKeyInfo>;
-
-/** GET /api/v1/keys */
-export const ApiKeyListResponse = z.object({ keys: z.array(ApiKeyInfo) });
-
-/** POST /api/v1/keys */
-export const CreateApiKeyRequest = z.object({
-  name: z.string().trim().min(1).max(64),
+export const ApiKeyResponse = z.object({
+  key: z.string(),
+  source: z.enum(["file", "env"]),
 });
 
-/** 201 from POST /api/v1/keys: the only response that ever carries the plaintext key. */
-export const ApiKeyCreatedResponse = ApiKeyInfo.extend({
-  key: z.string().startsWith(API_KEY_PREFIX),
-});
-export type ApiKeyCreatedResponse = z.infer<typeof ApiKeyCreatedResponse>;
+/** POST /api/v1/admin/api-key/regenerate (session only): the new key; the old one is dead at once. */
+export const ApiKeyRegenerateResponse = z.object({ key: z.string().startsWith(API_KEY_PREFIX) });

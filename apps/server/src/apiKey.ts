@@ -16,125 +16,118 @@ export function isApiKeyPlaintext(value: string): boolean {
   return value.startsWith(API_KEY_PREFIX) && value.length > API_KEY_PREFIX.length + 16;
 }
 
-/** What the key list shows of a key: `chp_` plus the next 8 characters. */
-export function apiKeyPrefix(plaintext: string): string {
-  return plaintext.slice(0, API_KEY_PREFIX.length + 8);
-}
-
 function readKeyFile(file: string): string | null {
   if (!existsSync(file)) return null;
   const key = readFileSync(file, "utf8").trim();
   return key || null;
 }
 
-/**
- * Rotate the legacy key: write a brand-new key to the key file (atomic, 0600)
- * and return it. A running server picks it up on the next request.
- */
+/** Rotate: write a brand-new key to the key file (atomic, 0600) and return it. */
 export function rotateApiKey(config: Pick<Config, "apiKeyFile">): string {
   const key = generateApiKey();
   writeFileAtomic(config.apiKeyFile, `${key}\n`);
   return key;
 }
 
-/**
- * The legacy key (CHIRP_API_KEY first, then the key file), or null.
- * Since admin accounts exist the server no longer creates this key on its own:
- * new installs have no legacy key and create keys in the dashboard.
- */
-export function resolveApiKey(
-  config: Pick<Config, "apiKey" | "apiKeyFile">,
-): { key: string; source: "env" | "file" } | null {
-  if (config.apiKey) return { key: config.apiKey, source: "env" };
+/** Read the key (env first, then file). Creates the file when missing. */
+export function resolveApiKey(config: Pick<Config, "apiKey" | "apiKeyFile">): {
+  key: string;
+  created: boolean;
+  source: "env" | "file";
+} {
+  if (config.apiKey) return { key: config.apiKey, created: false, source: "env" };
   const existing = readKeyFile(config.apiKeyFile);
-  return existing ? { key: existing, source: "file" } : null;
+  if (existing) return { key: existing, created: false, source: "file" };
+  const key = rotateApiKey(config);
+  return { key, created: true, source: "file" };
+}
+
+/** The key comes from CHIRP_API_KEY: it cannot be regenerated from the dashboard. */
+export class EnvKeyError extends Error {
+  constructor() {
+    super("The API key is set by CHIRP_API_KEY and cannot be regenerated here");
+  }
 }
 
 /**
- * The legacy single API key (CHIRP_API_KEY or `<dataDir>/api-key`), kept so
- * installs from before admin accounts keep working. Read-only from the API.
- * A file key is re-read whenever the file changes, so `cli.js key rotate`
- * needs no restart; deleting the file disables it immediately.
+ * The server's single API key (what Home Assistant uses): CHIRP_API_KEY, or
+ * `<dataDir>/api-key` (0600, created on the first start). When it comes from
+ * the file it is reloaded whenever the file changes, so `cli.js key rotate`
+ * and a dashboard regeneration take effect on the very next request.
  */
-export class LegacyApiKey {
-  private hash: Buffer | null = null;
-  private plainPrefix: string | null = null;
+export class ApiKeyStore {
+  private key: string;
+  private hash: Buffer;
   private stamp = "";
-  private createdAt: string | null = null;
-  lastUsedAt: string | null = null;
 
   constructor(
-    private readonly env: string | null,
+    key: string,
     private readonly file: string | null,
   ) {
-    if (env) this.set(env);
-    else this.refresh(true);
+    this.key = key;
+    this.hash = hashApiKey(key);
+    this.stamp = this.statStamp();
   }
 
-  static fromConfig(config: Pick<Config, "apiKey" | "apiKeyFile">): LegacyApiKey {
-    return new LegacyApiKey(config.apiKey, config.apiKey ? null : config.apiKeyFile);
+  static fromConfig(config: Pick<Config, "apiKey" | "apiKeyFile">): {
+    store: ApiKeyStore;
+    created: boolean;
+    key: string;
+  } {
+    const resolved = resolveApiKey(config);
+    return {
+      store: new ApiKeyStore(resolved.key, resolved.source === "file" ? config.apiKeyFile : null),
+      created: resolved.created,
+      key: resolved.key,
+    };
   }
 
   get source(): "env" | "file" {
-    return this.env ? "env" : "file";
-  }
-
-  private set(key: string): void {
-    this.hash = hashApiKey(key);
-    this.plainPrefix = apiKeyPrefix(key);
+    return this.file ? "file" : "env";
   }
 
   /** inode + size + mtime: a rename-based rotation always changes the inode. */
-  private statStamp(): { stamp: string; mtime: string | null } {
-    if (!this.file) return { stamp: "", mtime: null };
+  private statStamp(): string {
+    if (!this.file) return "";
     try {
       const s = statSync(this.file);
-      return { stamp: `${s.ino}:${s.size}:${s.mtimeMs}`, mtime: s.mtime.toISOString() };
+      return `${s.ino}:${s.size}:${s.mtimeMs}`;
     } catch {
-      return { stamp: "missing", mtime: null };
+      return "";
     }
   }
 
-  private refresh(force = false): void {
+  private refresh(): void {
     if (!this.file) return;
-    const { stamp, mtime } = this.statStamp();
-    if (!force && stamp === this.stamp) return;
-    if (stamp === "missing") {
-      // Deleting the file is how the legacy key is turned off.
-      this.hash = null;
-      this.plainPrefix = null;
-      this.createdAt = null;
-      this.stamp = stamp;
-      return;
-    }
+    const stamp = this.statStamp();
+    if (stamp === this.stamp) return;
     try {
       const key = readKeyFile(this.file);
-      if (!key) return; // empty: keep the previous key and retry on the next request
-      this.set(key);
-      this.createdAt = mtime;
+      if (!key) return; // missing/empty: keep the previous key and retry on the next request
+      this.key = key;
+      this.hash = hashApiKey(key);
       this.stamp = stamp;
     } catch {
-      /* unreadable: keep the previous key; retry on the next request */
+      /* keep the previous key; retry on the next request */
     }
   }
 
-  /** Whether a legacy key is currently configured. */
-  get active(): boolean {
+  /** The current key in plain text (for the signed-in admin only). */
+  current(): { key: string; source: "env" | "file" } {
     this.refresh();
-    return this.hash !== null;
+    return { key: this.key, source: this.source };
   }
 
-  info(): { prefix: string; source: "env" | "file"; createdAt: string | null; lastUsedAt: string | null } | null {
+  /** Replace the file key; the old key stops working immediately. */
+  regenerate(): string {
+    if (!this.file) throw new EnvKeyError();
+    rotateApiKey({ apiKeyFile: this.file });
     this.refresh();
-    if (!this.hash || !this.plainPrefix) return null;
-    return { prefix: this.plainPrefix, source: this.source, createdAt: this.createdAt, lastUsedAt: this.lastUsedAt };
+    return this.key;
   }
 
-  verify(candidate: string, now = new Date()): boolean {
+  verify(candidate: string): boolean {
     this.refresh();
-    if (!this.hash) return false;
-    const ok = timingSafeEqual(hashApiKey(candidate), this.hash);
-    if (ok) this.lastUsedAt = now.toISOString();
-    return ok;
+    return timingSafeEqual(hashApiKey(candidate), this.hash);
   }
 }

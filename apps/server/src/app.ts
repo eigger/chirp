@@ -54,7 +54,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   await app.register(
     async (api) => {
-      api.addHook("onRequest", authHook(auth, now));
+      api.addHook("onRequest", authHook(auth));
       registerAuthRoutes(api, auth, config);
 
       api.get("/status", async (_req, reply) => {

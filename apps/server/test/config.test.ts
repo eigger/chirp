@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigError, loadConfig, MIN_API_KEY_LENGTH } from "../src/config.js";
 import { healthUrl } from "../src/healthcheck.js";
+import { newKeyLogMessage } from "../src/keyNotice.js";
 import { classifyExecError, discoverDevices, parseScan, readDisk, SmartctlError } from "../src/smartctl.js";
 
 describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
@@ -33,6 +34,22 @@ describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
     expect(loadConfig({}).rescanIntervalSec).toBe(3600);
     expect(loadConfig({ CHIRP_RESCAN_INTERVAL: "5" }).rescanIntervalSec).toBe(3600);
     expect(loadConfig({ CHIRP_RESCAN_INTERVAL: "600" }).rescanIntervalSec).toBe(600);
+  });
+});
+
+describe("new API key log line", () => {
+  const key = "chp_" + "x".repeat(43);
+  it("names the key file, the dashboard and the CLI but not the key", () => {
+    const msg = newKeyLogMessage({ apiKeyFile: "/var/lib/chirp/api-key", printKey: false }, key);
+    expect(msg).not.toContain(key);
+    expect(msg).toContain("/var/lib/chirp/api-key");
+    expect(msg).toContain("Settings -> API key");
+    expect(msg).toMatch(/cli\.js key show/);
+    expect(msg).toContain("CHIRP_PRINT_KEY=true");
+  });
+  it("prints the key only with CHIRP_PRINT_KEY=true", () => {
+    expect(loadConfig({ CHIRP_PRINT_KEY: "true" }).printKey).toBe(true);
+    expect(newKeyLogMessage({ apiKeyFile: "/k", printKey: true }, key)).toContain(key);
   });
 });
 
