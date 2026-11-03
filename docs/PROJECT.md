@@ -17,9 +17,13 @@ Collects the CPU temperature and disk SMART health of a Proxmox host and serves 
 
 | File | Contents |
 |---|---|
-| `config.ts` | Environment -> `Config`; rejects invalid `CHIRP_PORT` / short `CHIRP_API_KEY` (`ConfigError`) |
-| `apiKey.ts` | `chp_` key generation, sha256 + `timingSafeEqual` verification, picks up key-file changes |
-| `keyNotice.ts` | Log line for a newly generated key (path + CLI hint; the key only with `CHIRP_PRINT_KEY=true`) |
+| `config.ts` | Environment -> `Config`; rejects invalid `CHIRP_PORT` / short `CHIRP_API_KEY` / bad `CHIRP_ADMIN_*` / `CHIRP_COOKIE_SECURE` (`ConfigError`) |
+| `apiKey.ts` | The single `chp_` API key: generation, sha256 + `timingSafeEqual` verification, picks up key-file changes, regenerate (file keys only) |
+| `keyNotice.ts` | Log line for a newly generated key (path + dashboard/CLI hint; the key only with `CHIRP_PRINT_KEY=true`) |
+| `admin.ts` / `password.ts` | The admin account in `admin.json` (exclusive create, atomic update, reloaded on change) / scrypt hashing (`node:crypto`) |
+| `session.ts` / `rateLimit.ts` | In-memory sessions (12 h sliding, 7 d max) / exponential login backoff per IP and username |
+| `auth.ts` / `bootstrap.ts` | Auth gate (Bearer key vs. session vs. public, CSRF header), account and key routes / start-up env seed and notices |
+| `secureFile.ts` | 0600 atomic writes (temp + rename) and exclusive creates (temp + link) |
 | `instanceId.ts` | `CHIRP_DATA_DIR/instance-id` (UUIDv4) |
 | `hwmon.ts` | `/sys/class/hwmon` parsing (coretemp/k10temp/zenpower/cpu_thermal), multi-socket merge, thermal_zone fallback, `/proc/cpuinfo` |
 | `smartctl.ts` | Runs and parses `smartctl -j -a -n standby`, device discovery (`--scan`), the read-side ID rule |
@@ -28,7 +32,8 @@ Collects the CPU temperature and disk SMART health of a Proxmox host and serves 
 | `scheduler.ts` | `Collector`: sensors 10 s / SMART 300 s, concurrency 2, keeps standby values, cached discovery |
 | `history.ts` | 1-minute downsampled, 24 h in-memory ring buffer |
 | `app.ts` / `static.ts` | REST routes, auth, cooldown, JSON error bodies / dashboard + SPA fallback |
-| `index.ts` / `cli.ts` / `healthcheck.ts` | Server entry point / `key show|rotate` / container health probe |
+| `envFile.ts` | The CLI's env file (`--env-file`, `CHIRP_ENV_FILE`, else `/etc/chirp/chirp.env`) |
+| `index.ts` / `cli.ts` / `healthcheck.ts` | Server entry point / `key show\|rotate`, `admin reset-password\|show-user` / container health probe |
 
 ## Health
 
@@ -65,6 +70,19 @@ With `CHIRP_DEVICES` empty the server runs `smartctl --scan -j`, which globs dev
 
 ## Security model
 
-- `/health` and the static dashboard need no auth. All data under `/api/v1/*` needs the bearer key.
-- A generated key is stored in the key file (0600) and not logged unless `CHIRP_PRINT_KEY=true`.
-- Plain HTTP and a privileged LXC are assumed; see the security notes in the README and [`deploy.md`](deploy.md).
+- `/health`, the static dashboard and `GET /api/v1/bootstrap/status` need no auth. All data under `/api/v1/*` needs the API key (Bearer) or an admin session (cookie).
+- **One admin account** (`<dataDir>/admin.json`, 0600, scrypt N=32768 r=8 p=1 with a 16-byte salt). It is created by the first visitor of the dashboard (first-run registration, like kibble), or seeded from `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`. Until it exists anyone who can reach the server can create it, so the installer and the server log say to do it right away. Registration is serialized in process and the file is created with an exclusive link(2), so two racing requests (or processes) can never both win.
+- **Sessions** are random 256-bit tokens in an `HttpOnly; SameSite=Strict` cookie (`Secure` over HTTPS), kept in memory as sha256, 12 h idle / 7 d absolute, all ended by a password change or `cli.js admin reset-password` (the server notices admin.json changes).
+- **CSRF:** SameSite=Strict plus a required `X-Chirp-Csrf: 1` header on state-changing requests that are not Bearer-authenticated. A cross-site page cannot set a custom header without a CORS preflight, which chirp never grants. Origin/Host comparison was not used because reverse proxies often rewrite `Host`.
+- **Brute force** (`rateLimit.ts`, details and guarantees in [`api.md`](api.md#login-rate-limiting)):
+  - Per-source backoff (IPv4 / IPv6 /64, capped at 15 min) always applies.
+  - Username backoff (capped at 5 s) applies only to sources that already failed and never signed in as that user. A clean or known source is still checked, so a distributed attack cannot keep the admin out.
+  - A daily per-username budget (`CHIRP_LOGIN_DAILY_BUDGET`, default 1000) caps distributed guessing. Once it is spent only known sources may try, until the window passes, a password reset, or a restart.
+  - Attempts are counted before the scrypt check (parallel guesses are throttled) and refunded when the scrypt gate sheds them.
+  - Same `401` and same work (a dummy scrypt) for an unknown user and a wrong password.
+  - At most 2 scrypt hashes run at once (16 queued, plus 4 reserved for known sources and sessions; the rest get a quick 429).
+  - scrypt parameters read from admin.json are capped (N <= 2^17, r <= 16, p <= 4).
+- **Password rules:** 10-256 characters, plus a rule-based blocklist (`commonPassword.ts`). It catches breach-list base words with digits, symbols or leet substitutions, keyboard walks, sequences, repetition, the username, and chirp/admin words, which covers thousands of variants without shipping a word list. It applies to bootstrap, password change, `cli.js admin reset-password --password-stdin` and `CHIRP_ADMIN_PASSWORD`.
+- **Client address:** the TCP peer, unless `CHIRP_TRUST_PROXY` names the proxies to believe. Recommended: the proxy's IP/CIDR list. A hop count or `true` believes `X-Forwarded-For` from any peer, so it is only safe when chirp is reachable only through the proxy. The server warns when either is combined with a wildcard bind.
+- **The API key** (`CHIRP_API_KEY` or `<dataDir>/api-key`, 0600, generated on first start) is the only Bearer credential. The admin reads and regenerates it in Settings; the key itself can never call the account/key routes (`403`). It is not logged unless `CHIRP_PRINT_KEY=true`.
+- Plain HTTP and a privileged LXC are assumed. Over plain HTTP the password, the session cookie and the API key cross the LAN in clear text: put chirp behind a TLS reverse proxy (set `CHIRP_TRUST_PROXY` to the hop count or proxy address so the cookie gets its `Secure` flag and the backoff sees real client addresses) or Tailscale; see the README and [`deploy.md`](deploy.md).

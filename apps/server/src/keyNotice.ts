@@ -15,6 +15,6 @@ export function cliPath(): string {
 export function newKeyLogMessage(config: Pick<Config, "apiKeyFile" | "printKey">, key: string): string {
   const base =
     `Generated a new API key and stored it in ${config.apiKeyFile} (mode 0600). ` +
-    `Show it with: node ${cliPath()} key show`;
+    `See it in the dashboard (Settings -> API key) or with: node ${cliPath()} key show`;
   return config.printKey ? `${base} | key: ${key}` : `${base} (set CHIRP_PRINT_KEY=true to print it here)`;
 }

@@ -24,6 +24,9 @@ ENV NODE_ENV=production \
     CHIRP_WEB_DIR=/app/apps/web/dist
 COPY --from=build /out/ ./
 RUN mkdir -p /var/lib/chirp
+# Holds the API key, the admin account (admin.json), instance-id and disk-ids.json.
+# Optional: -e CHIRP_ADMIN_USER=... -e CHIRP_ADMIN_PASSWORD=... creates the admin on the first start;
+# otherwise open the dashboard right away and create it there.
 VOLUME /var/lib/chirp
 EXPOSE 80
 # Probes the address CHIRP_HOST/CHIRP_PORT actually bind (loopback for 0.0.0.0/::).
