@@ -51,7 +51,7 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 호스트의 CPU 센서가 보이도록 `/sys`는 읽기 전용으로 마운트하세요. 브라우저 없이 관리자 계정을 만들려면 `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10자 이상>`을 추가합니다(관리자가 없을 때만 사용). 자세한 내용은 [`docs/ko/deploy.md`](docs/ko/deploy.md).
+`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 호스트의 CPU 센서가 보이도록 `/sys`는 읽기 전용으로 마운트하세요. 브라우저 없이 관리자 계정을 만들려면 `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10자 이상>`을 추가합니다(관리자가 없을 때만 사용. 비밀번호가 `docker inspect`에 계속 보이므로 첫 기동 후 두 변수를 지우고 대시보드에서 비밀번호를 바꾸세요). 자세한 내용은 [`docs/ko/deploy.md`](docs/ko/deploy.md).
 
 ### 릴리스 tarball
 
@@ -67,7 +67,7 @@ Node.js 24와 `smartmontools`가 필요합니다. `.sha256` 자산은 다운로�
 1. `http://<chirp 주소>/`를 엽니다. 관리자 계정이 없으면 대시보드가 **관리자 계정 만들기** 화면을 보여 줍니다. 사용자명을 정하고 비밀번호를 두 번(10자 이상) 입력하면 바로 로그인됩니다.
    **설치 직후 바로 하세요:** 관리자가 생기기 전까지는 *대시보드를 먼저 연 사람*이 관리자가 됩니다. (Docker/자동화: 대신 `CHIRP_ADMIN_USER`와 `CHIRP_ADMIN_PASSWORD`를 설정)
 2. **설정 -> API 키**에서 **복사**를 눌러 Home Assistant에 붙여 넣습니다(아래 참고).
-3. 비밀번호를 잊었다면 서버에서 `node apps/server/dist/cli.js admin reset-password`(Proxmox: `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`). 새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃합니다.
+3. 비밀번호를 잊었다면 Proxmox(호스트에서): `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`, Docker: `docker exec chirp node apps/server/dist/cli.js admin reset-password`. 새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃합니다. (CLI는 `/etc/chirp/chirp.env`가 있으면 읽습니다. 설정이 다른 파일에 있으면 `--env-file <경로>`를 붙이세요.)
 
 ## API 키
 
@@ -92,7 +92,9 @@ node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 
 - Proxmox 스크립트는 `smartctl`이 호스트 블록 장치에 접근하도록 **privileged LXC** 컨테이너를 만듭니다. privileged 컨테이너가 뚫리면 호스트도 위험하므로 신뢰하는 네트워크에서만 쓰세요. 장치 규칙은 선택한 디스크의 major에 `rw`만 허용합니다(정확한 minor를 쓰지 않는 이유는 [`docs/ko/deploy.md`](docs/ko/deploy.md#디스크-passthrough와-권한) 참고).
 - **설치 직후 관리자 계정을 만드세요.** 계정이 생기기 전까지는 대시보드에 접근할 수 있는 누구나 관리자를 만들 수 있습니다(최초 등록). 서버는 시작할 때마다 로그로 경고합니다.
-- 통신은 **HTTP 평문**입니다. 로그인할 때의 관리자 비밀번호, 세션 쿠키, API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두고, `CHIRP_TRUST_PROXY=true`는 직접 관리하는 프록시 뒤에서만 켜세요(세션 쿠키에 `Secure`도 붙습니다).
+- 통신은 **HTTP 평문**입니다. 로그인할 때의 관리자 비밀번호, 세션 쿠키, API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두세요.
+- 프록시 뒤라면 `CHIRP_TRUST_PROXY`를 프록시 개수(보통 `1`)나 프록시 주소로 설정하세요. 설정하지 않으면 로그인 지연에서 모든 클라이언트가 프록시 주소 하나를 공유합니다. `true`는 프록시가 `X-Forwarded-For`를 덮어쓸 때만 안전합니다([`docs/ko/deploy.md`](docs/ko/deploy.md#보안) 참고).
+- `CHIRP_ADMIN_PASSWORD`는 계정이 생긴 뒤에도 환경 변수에 평문으로 남습니다. 첫 기동 후 지우고 대시보드에서 비밀번호를 바꾸세요.
 - 로그인 세션은 HttpOnly, SameSite=Strict 쿠키(12시간 무활동, 최대 7일)이고, 로그인 실패는 지수적으로 지연됩니다. API 키로는 키나 계정을 조회·변경할 수 없습니다.
 - `POST /api/v1/refresh`는 30초 쿨다운이 있으며 서버는 잠든 디스크를 깨우지 않습니다.
 

@@ -51,7 +51,7 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible. To create the admin account without the browser, add `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10+ characters>` (used only while no admin exists). See [`docs/deploy.md`](docs/deploy.md).
+Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible. To create the admin account without the browser, add `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10+ characters>` (used only while no admin exists; the password then stays visible in `docker inspect`, so remove both variables after the first start and change the password in the dashboard). See [`docs/deploy.md`](docs/deploy.md).
 
 ### From the release tarball
 
@@ -67,7 +67,7 @@ Requires Node.js 24 and `smartmontools`. The `.sha256` asset verifies download i
 1. Open `http://<chirp address>/`. While no admin account exists, the dashboard shows **Create the admin account**: pick a username and enter the password twice (at least 10 characters). You are signed in right away.
    **Do this immediately after installing:** until an admin exists, *whoever opens the dashboard first* becomes the admin. (Docker/automation: set `CHIRP_ADMIN_USER` and `CHIRP_ADMIN_PASSWORD` instead.)
 2. Go to **Settings -> API key**, click **Copy** and paste the key into Home Assistant (see below).
-3. Forgot the password? On the server: `node apps/server/dist/cli.js admin reset-password` (Proxmox: `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`). It prints a new random password and signs out every session.
+3. Forgot the password? Proxmox (on the host): `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`; Docker: `docker exec chirp node apps/server/dist/cli.js admin reset-password`. It prints a new random password and signs out every session. (The CLI reads `/etc/chirp/chirp.env` when present; elsewhere pass `--env-file <path>` if your settings live in a file.)
 
 ## API key
 
@@ -92,7 +92,9 @@ Install [`hass-chirp`](https://github.com/eigger/hass-chirp), add the integratio
 
 - The Proxmox script creates a **privileged LXC** container so `smartctl` can reach the host's block devices. A compromised privileged container is close to a compromised host — keep it on a trusted network. The device rules allow `rw` on the selected disks' majors (see [`docs/deploy.md`](docs/deploy.md#disk-passthrough-and-its-permissions) for why not exact minors).
 - **Create the admin account right after installing.** Until it exists, anyone who can reach the dashboard can create it (first-run registration). The server log warns about this on every start.
-- Traffic is **plain HTTP**. The admin password (when signing in), the session cookie and the API key cross the network in clear text; put chirp behind a TLS reverse proxy (or Tailscale) if the network is not trusted, and set `CHIRP_TRUST_PROXY=true` only behind a proxy you control (it also gives the session cookie its `Secure` flag).
+- Traffic is **plain HTTP**. The admin password (when signing in), the session cookie and the API key cross the network in clear text; put chirp behind a TLS reverse proxy (or Tailscale) if the network is not trusted.
+- Behind a proxy set `CHIRP_TRUST_PROXY` to the number of proxies (usually `1`) or their addresses; without it every client shares the proxy's address for the login backoff. `true` is only safe if the proxy overwrites `X-Forwarded-For` (see [`docs/deploy.md`](docs/deploy.md#security)).
+- `CHIRP_ADMIN_PASSWORD` stays in plain text in the environment after the account exists; remove it after the first start and change the password in the dashboard.
 - Sign-in sessions are HttpOnly, SameSite=Strict cookies (12 h idle, 7 days max); failed logins back off exponentially. The API key cannot be used to read or change the key or the account.
 - `POST /api/v1/refresh` has a 30 s cooldown; the server never spins up sleeping disks.
 

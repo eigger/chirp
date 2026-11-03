@@ -22,11 +22,22 @@ There is one key. It is `CHIRP_API_KEY` (at least 16 characters) when set, other
 
 ### Session cookie
 
-`chirp_session=<random 256-bit token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`, plus `Secure` when the request came over HTTPS (`CHIRP_COOKIE_SECURE=auto`, the default; `X-Forwarded-Proto` counts only with `CHIRP_TRUST_PROXY=true`) or when `CHIRP_COOKIE_SECURE=true`. Sessions live in server memory (a restart signs everyone out), end after **12 h without a request** (sliding) and after **7 days** in any case, and all of them end when the password changes (in the dashboard or with `cli.js admin reset-password`).
+`chirp_session=<random 256-bit token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`, plus `Secure` when the request came over HTTPS (`CHIRP_COOKIE_SECURE=auto`, the default; `X-Forwarded-Proto` counts only when `CHIRP_TRUST_PROXY` trusts the proxy) or when `CHIRP_COOKIE_SECURE=true`. Sessions live in server memory (a restart signs everyone out), end after **12 h without a request** (sliding) and after **7 days** in any case, and all of them end when the password changes (in the dashboard or with `cli.js admin reset-password`).
 
 ### Login rate limiting
 
-Failed credential checks (login, current password on a password change) are counted per client IP and per username. After 5 failures the next attempt must wait 1 s, then 2 s, 4 s, ... (capped at 15 min per IP and 60 s per username, so nobody can lock the admin out for long); while waiting, the password is not even checked: `429 {"error":"rate_limited","retryAfter":<s>}` with `Retry-After`. Failures are forgotten after 15 min or on success. Unknown user and wrong password give the same `401` and take the same time.
+Failed credential checks (login, current password on a password change) are counted under two keys, *before* the password is checked (so parallel guesses count too). While a key is backing off, the password is not even checked: `429 {"error":"rate_limited","retryAfter":<s>}` with `Retry-After`.
+
+| Key | Free failures | Then waits | Cap | Purpose |
+|---|---|---|---|---|
+| client address (IPv4, or the IPv6 **/64**) | 5 | 1 s, 2 s, 4 s, ... doubling | **15 min** | stops guessing from one source |
+| username | 5 | 1 s, 2 s, 4 s | **5 s** | bounds guessing one name from many sources to about one password per 5 s |
+
+The username cap is deliberately short: an attacker who keeps failing on the admin's name from many addresses can make the real admin wait **at most 5 s** before the next try; they cannot lock the admin out. A key's failures are forgotten after 15 min without a new one, or on success. Unknown user and wrong password give the same `401` and take the same time.
+
+The client address is the TCP peer unless `CHIRP_TRUST_PROXY` says which proxies to believe (see [`deploy.md`](deploy.md#security)); behind an untrusted-for proxy all clients share the proxy's address and therefore one backoff.
+
+Password hashing (scrypt) runs at most 2 at a time with up to 16 waiting; beyond that, login/bootstrap/password requests are answered at once with `429 {"error":"rate_limited","retryAfter":1}`, so a flood cannot tie up the server.
 
 ### First-run registration
 

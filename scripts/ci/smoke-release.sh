@@ -67,6 +67,7 @@ res = await fetch(`${base}/api/v1/bootstrap/admin`, {
   method: "POST", headers: csrf, body: JSON.stringify({ username: "admin", password, passwordConfirm: password + "x" }),
 });
 expect(res, 400, "bootstrap with a mismatched confirmation");
+if ((await res.json()).error !== "password_mismatch") fail("mismatched confirmation must be error=password_mismatch");
 res = await fetch(`${base}/api/v1/bootstrap/admin`, {
   method: "POST", headers: csrf, body: JSON.stringify({ username: "admin", password, passwordConfirm: password }),
 });

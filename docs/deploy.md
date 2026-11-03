@@ -43,6 +43,7 @@ docker run -d --name chirp \
 ```
 
 - **Admin account:** open `http://<host>/` right after the first start and create it (until then anyone who can reach the port can). For unattended setups add `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10+ characters>`: the account is created on start when none exists (the variables are ignored afterwards and never overwrite a changed password). Reset: `docker exec chirp node apps/server/dist/cli.js admin reset-password`.
+- **`CHIRP_ADMIN_PASSWORD` stays visible** in `docker inspect` and your compose file after the account exists: remove both variables after the first start and change the password in the dashboard.
 - Instead of `--privileged` you can combine `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` with `--device`.
 - Mount `/sys` read-only so the host's CPU sensors (hwmon) are visible; it also lets chirp derive stable disk IDs from sysfs without waking disks.
 - The `chirp-data` volume stores the API key (`api-key`), the admin account (`admin.json`), `instance-id` and `disk-ids.json` (pinned disk IDs). Losing the volume changes the key and instance ID, so Home Assistant creates new entities, and you register the admin again.
@@ -84,7 +85,7 @@ Run `update` inside the container (`pct exec <CTID> -- update`). It downloads th
 
 ## Environment variables
 
-See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least 16 characters, read-only in the dashboard) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD` (seed the admin), `CHIRP_COOKIE_SECURE` (`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. Invalid values stop the server with a message such as `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")`.
+See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least 16 characters, read-only in the dashboard) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD` (seed the admin), `CHIRP_COOKIE_SECURE` (`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY` (`false`, a hop count such as `1`, proxy IPs/CIDRs, or `true`; see Security), `CHIRP_CORS_ORIGINS`. Invalid values stop the server with a message such as `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")`.
 
 ## Release procedure
 
@@ -95,6 +96,9 @@ See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least
 ## Security
 
 - **First-run registration window.** Until the admin account exists, whoever opens the dashboard first can create it. Create it right after installing, or seed it with `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`. The server log warns on every start while no admin exists.
-- **Plain HTTP exposes credentials.** Without TLS the admin password (at login), the session cookie and the API key cross the network in clear text. On anything but a trusted LAN put chirp behind a TLS reverse proxy (Caddy, nginx, Traefik) or Tailscale. Behind a proxy set `CHIRP_TRUST_PROXY=true` so the session cookie gets its `Secure` flag automatically (or force it with `CHIRP_COOKIE_SECURE=true`).
+- **Plain HTTP exposes credentials.** Without TLS the admin password (at login), the session cookie and the API key cross the network in clear text. On anything but a trusted LAN put chirp behind a TLS reverse proxy (Caddy, nginx, Traefik) or Tailscale. Force the cookie's `Secure` flag with `CHIRP_COOKIE_SECURE=true` if chirp cannot tell the request came over HTTPS.
+- **Behind a reverse proxy, configure `CHIRP_TRUST_PROXY`.** Without it chirp sees every client as the proxy's address: the login backoff then treats all users as one client (one attacker's failed logins make everyone wait, up to 15 min), and the session cookie gets no automatic `Secure` flag. Set it to the **number of proxies** in front of chirp (usually `1`) or to the **proxy addresses** (`10.0.0.5` or `10.0.0.0/24,fd00::/64`). `true` trusts every `X-Forwarded-For` entry, including ones the client sends itself, so it is only safe when your proxy *overwrites* that header (nginx `proxy_set_header X-Forwarded-For $remote_addr;`); otherwise anyone can pick their own address and dodge the per-address backoff.
+- **`CHIRP_ADMIN_PASSWORD` stays readable in plain text** in the environment (`docker inspect`, compose files, `/proc/<pid>/environ`) even after the account exists. After the first start remove `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD` and change the password in the dashboard (Settings -> Change password).
+- **The CLI reads the service settings.** `cli.js` loads `/etc/chirp/chirp.env` when it exists (or `--env-file <path>` / `CHIRP_ENV_FILE`), so `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password` uses the same data directory as the service.
 - Sessions: HttpOnly + SameSite=Strict cookie, 12 h idle / 7 days max, kept in memory (a restart signs everyone out), all ended by a password change. Failed logins back off exponentially per IP and username.
 - A privileged container is assumed; its root is effectively host root (see above).

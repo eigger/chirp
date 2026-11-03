@@ -43,6 +43,7 @@ docker run -d --name chirp \
 ```
 
 - **관리자 계정:** 처음 시작한 직후 `http://<호스트>/`를 열어 만든다(그 전까지는 포트에 접근할 수 있는 누구나 만들 수 있다). 자동화 환경이면 `-e CHIRP_ADMIN_USER=admin -e CHIRP_ADMIN_PASSWORD=<10자 이상>`을 추가한다. 관리자가 없을 때만 시작 시 계정을 만들며, 이후에는 무시되어 바꾼 비밀번호를 덮어쓰지 않는다. 재설정: `docker exec chirp node apps/server/dist/cli.js admin reset-password`.
+- **`CHIRP_ADMIN_PASSWORD`는 계정이 생긴 뒤에도** `docker inspect`와 compose 파일에 그대로 보인다. 첫 기동 후 두 변수를 지우고 대시보드에서 비밀번호를 바꾼다.
 - `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
 - `/sys`를 읽기 전용으로 마운트해야 호스트 CPU 센서(hwmon)가 보인다. 디스크를 깨우지 않고 sysfs에서 안정적인 디스크 ID를 도출하는 데도 쓰인다.
 - `chirp-data` 볼륨에 API 키(`api-key`), 관리자 계정(`admin.json`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생기고, 관리자도 다시 등록해야 한다.
@@ -84,7 +85,7 @@ Restart=on-failure
 
 ## 환경 변수
 
-[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상, 대시보드에서는 읽기 전용) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD`(관리자 시드), `CHIRP_COOKIE_SECURE`(`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상, 대시보드에서는 읽기 전용) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD`(관리자 시드), `CHIRP_COOKIE_SECURE`(`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`(`false`, `1` 같은 프록시 개수, 프록시 IP/CIDR, 또는 `true`; 보안 절 참고), `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
 
 ## 릴리스 절차
 
@@ -95,6 +96,9 @@ Restart=on-failure
 ## 보안
 
 - **최초 등록 창.** 관리자 계정이 생기기 전까지는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
-- **HTTP 평문이면 자격 증명이 노출된다.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다. 신뢰하는 LAN이 아니라면 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 둔다. 프록시 뒤에서는 `CHIRP_TRUST_PROXY=true`로 두면 세션 쿠키에 `Secure`가 자동으로 붙는다(`CHIRP_COOKIE_SECURE=true`로 강제 가능).
+- **HTTP 평문이면 자격 증명이 노출된다.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다. 신뢰하는 LAN이 아니라면 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 둔다. chirp가 HTTPS 요청임을 알 수 없으면 `CHIRP_COOKIE_SECURE=true`로 쿠키의 `Secure`를 강제한다.
+- **역프록시 뒤라면 `CHIRP_TRUST_PROXY`를 설정한다.** 설정하지 않으면 chirp는 모든 클라이언트를 프록시 주소로 본다. 그러면 로그인 지연이 모든 사용자를 한 클라이언트로 취급해 공격자 한 명의 실패가 모두를 최대 15분까지 기다리게 하고, 세션 쿠키에 `Secure`도 자동으로 붙지 않는다. chirp 앞에 있는 **프록시 개수**(보통 `1`)나 **프록시 주소**(`10.0.0.5` 또는 `10.0.0.0/24,fd00::/64`)로 설정한다. `true`는 클라이언트가 직접 보낸 것까지 `X-Forwarded-For`의 모든 항목을 믿으므로, 프록시가 그 헤더를 *덮어쓸* 때만 안전하다(nginx `proxy_set_header X-Forwarded-For $remote_addr;`). 아니면 누구나 주소를 마음대로 정해 주소별 지연을 피할 수 있다.
+- **`CHIRP_ADMIN_PASSWORD`는 계정이 생긴 뒤에도 환경 변수에 평문으로 남는다**(`docker inspect`, compose 파일, `/proc/<pid>/environ`). 첫 기동 후 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`를 지우고 대시보드(설정 -> 비밀번호 변경)에서 비밀번호를 바꾼다.
+- **CLI는 서비스 설정을 읽는다.** `cli.js`는 `/etc/chirp/chirp.env`가 있으면 읽으므로(또는 `--env-file <경로>` / `CHIRP_ENV_FILE`), `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`가 서비스와 같은 데이터 디렉터리를 쓴다.
 - 세션: HttpOnly + SameSite=Strict 쿠키, 12시간 무활동 / 최대 7일, 메모리 보관(재시작하면 모두 로그아웃), 비밀번호를 바꾸면 모두 종료. 로그인 실패는 IP·사용자별로 지수적으로 지연된다.
 - privileged 컨테이너 전제이며, 그 root는 사실상 호스트 root다(위 참고).
