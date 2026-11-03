@@ -3,9 +3,13 @@ import { AdminStore, InvalidUsernameError, WeakPasswordError } from "./admin.js"
 import { resolveApiKey, rotateApiKey } from "./apiKey.js";
 import { adminFile } from "./auth.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
+import { cliEnvironment } from "./envFile.js";
 import { generatePassword } from "./password.js";
 
-const USAGE = `usage: node apps/server/dist/cli.js <command>
+const USAGE = `usage: node apps/server/dist/cli.js [--env-file <path>] <command>
+
+Settings come from the environment plus an env file: --env-file, else CHIRP_ENV_FILE,
+else /etc/chirp/chirp.env when it exists (variables in the real environment win).
 
   admin reset-password [--password-stdin]
                                  set a new admin password (random and printed unless --password-stdin);
@@ -22,15 +26,22 @@ function fail(msg: string, code = 1): never {
   process.exit(code);
 }
 
+let env: ReturnType<typeof cliEnvironment>;
+try {
+  env = cliEnvironment(process.argv.slice(2), process.env);
+} catch (err) {
+  fail(`chirp: ${(err as Error).message}`, 2);
+}
+
 let config: Config;
 try {
-  config = loadConfig();
+  config = loadConfig(env.env);
 } catch (err) {
   if (err instanceof ConfigError) fail(`chirp: invalid configuration: ${err.message}`);
   throw err;
 }
 
-const [group, action, ...rest] = process.argv.slice(2);
+const [group, action, ...rest] = env.args;
 
 function flag(name: string): boolean {
   return rest.includes(name);
