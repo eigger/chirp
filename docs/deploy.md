@@ -47,7 +47,7 @@ docker run -d --name chirp \
 - Mount `/sys` read-only so the host's CPU sensors (hwmon) are visible; it also lets chirp derive stable disk IDs from sysfs without waking disks.
 - The `chirp-data` volume stores the API key (`api-key`), the admin account (`admin.json`), `instance-id` and `disk-ids.json` (pinned disk IDs). Losing the volume changes the key and instance ID, so Home Assistant creates new entities, and you register the admin again.
 - **API key:** sign in and open **Settings -> API key** (show, copy, regenerate). It is not printed to the container log; on the host you can also run `docker exec chirp node apps/server/dist/cli.js key show` (or start once with `-e CHIRP_PRINT_KEY=true` if you really want it in the log).
-- If device names can change, use `/dev/disk/by-id/...` paths in `CHIRP_DEVICES`. RAID controllers/USB bridges: `CHIRP_DEVICE_TYPES=/dev/sda=sat`.
+- If device names can change, use `/dev/disk/by-id/...` paths in `CHIRP_DEVICES`. RAID controllers/USB bridges: `CHIRP_DEVICE_TYPES=/dev/sda=sat`. When no type is set and smartctl reports `Unable to detect device type` (typical for by-id nodes bind-mounted into an LXC), chirp retries with `-d sat`, then `-d scsi`, and remembers the type that worked; set `CHIRP_DEVICE_TYPES` to skip the detection.
 - The image's `HEALTHCHECK` probes the address that `CHIRP_HOST`/`CHIRP_PORT` bind (loopback for `0.0.0.0`/`::`).
 
 ## 3. Release tarball
