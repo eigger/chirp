@@ -46,7 +46,7 @@ docker run -d --name chirp \
 - **API 키:** 컨테이너 로그에는 출력되지 않는다. 다음으로 확인한다.
   `docker exec chirp node apps/server/dist/cli.js key show`
   (로그에 꼭 남기고 싶다면 한 번만 `-e CHIRP_PRINT_KEY=true`로 시작)
-- 장치 이름이 달라질 수 있는 환경이면 `CHIRP_DEVICES`에 `/dev/disk/by-id/...` 경로를 쓴다. RAID 컨트롤러/USB 브리지는 `CHIRP_DEVICE_TYPES=/dev/sda=sat`.
+- 장치 이름이 달라질 수 있는 환경이면 `CHIRP_DEVICES`에 `/dev/disk/by-id/...` 경로를 쓴다. RAID 컨트롤러/USB 브리지는 `CHIRP_DEVICE_TYPES=/dev/sda=sat`. 종류를 지정하지 않았는데 smartctl이 `Unable to detect device type`을 내면(LXC에 bind mount된 by-id 장치에서 흔함) chirp가 `-d sat`, 이어서 `-d scsi`로 재시도하고 성공한 종류를 기억한다. 감지 과정을 건너뛰려면 `CHIRP_DEVICE_TYPES`를 지정한다.
 - 이미지의 `HEALTHCHECK`는 `CHIRP_HOST`/`CHIRP_PORT`가 실제로 바인드하는 주소를 확인한다(`0.0.0.0`/`::`이면 루프백).
 
 ## 3. 릴리스 tarball
