@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Fan, Load, Memory, Network, Power, Voltage } from "@chirp/shared";
@@ -284,15 +284,15 @@ describe("power, fans, voltages", () => {
   it("hwmon fans/voltages/power with labels and units", () => {
     const x = readHwmonExtras(sys(0));
     expect(x.fans).toEqual([
-      { chip: "nct6798", label: "CPU Fan", rpm: 1200 },
-      { chip: "nct6798", label: "fan2", rpm: 0 },
-      { chip: "nct6798", label: "CPU Fan", rpm: 900 },
+      { id: expect.any(String), chip: "nct6798", label: "CPU Fan", rpm: 1200 },
+      { id: expect.any(String), chip: "nct6798", label: "fan2", rpm: 0 },
+      { id: expect.any(String), chip: "nct6798", label: "CPU Fan", rpm: 900 },
     ]);
     expect(x.voltages).toEqual([
-      { chip: "nct6798", label: "in0", volts: 1.032 },
-      { chip: "nct6798", label: "+3.3V", volts: 3.344 },
+      { id: expect.any(String), chip: "nct6798", label: "in0", volts: 1.032 },
+      { id: expect.any(String), chip: "nct6798", label: "+3.3V", volts: 3.344 },
     ]);
-    expect(x.power).toEqual([{ chip: "amdgpu", label: "power1", watts: 25 }]);
+    expect(x.power).toEqual([{ id: expect.any(String), chip: "amdgpu", label: "power1", watts: 25 }]);
     expect(readHwmonExtras(tree({}))).toEqual({ power: [], fans: [], voltages: [] });
   });
 
@@ -310,10 +310,10 @@ describe("power, fans, voltages", () => {
     expect(second.power?.sources).toEqual([
       { id: "rapl_package_0", label: "package-0", watts: 10 },
       { id: "rapl_package_0_core", label: "package-0 core", watts: 5 },
-      { id: "amdgpu_power1", label: "amdgpu power1", watts: 25 },
+      { id: expect.stringMatching(/^amdgpu_power1_[a-f0-9]{16}$/), label: "amdgpu power1", watts: 25 },
     ]);
-    expect(second.fans.map((f) => f.id)).toEqual(["nct6798_cpu_fan", "nct6798_fan2", "nct6798_cpu_fan_2"]);
-    expect(second.voltages.map((v) => v.id)).toEqual(["nct6798_in0", "nct6798_3_3v"]);
+    expect(second.fans.map((f) => f.id)).toEqual([expect.stringMatching(/^nct6798_cpu_fan_[a-f0-9]{16}$/), expect.stringMatching(/^nct6798_fan2_[a-f0-9]{16}$/), expect.stringMatching(/^nct6798_cpu_fan_[a-f0-9]{16}$/)]);
+    expect(second.voltages.map((v) => v.id)).toEqual([expect.stringMatching(/^nct6798_in0_[a-f0-9]{16}$/), expect.stringMatching(/^nct6798_3_3v_[a-f0-9]{16}$/)]);
     for (const f of second.fans) Fan.parse(f);
     for (const v of second.voltages) Voltage.parse(v);
     // no /proc data at all -> sections are null, not objects of nulls
@@ -352,7 +352,7 @@ describe("power, fans, voltages", () => {
     });
     const p = hm.sample(0).power;
     expect(p?.packageSource).toBeNull();
-    expect(p?.sources.map((s) => s.id)).toEqual(["amdgpu_power1"]);
+    expect(p?.sources.map((s) => s.id)).toEqual([expect.stringMatching(/^amdgpu_power1_[a-f0-9]{16}$/)]);
     expect(warnings).toEqual([]);
   });
 });
@@ -445,6 +445,51 @@ describe("HostMetrics end to end", () => {
 });
 
 describe("review fixes", () => {
+  it("prefers host PID 1 counters to the container's sysfs", () => {
+    const host = tree({
+      "proc/1/net/dev": "Inter-| Receive | Transmit\n eno1: 5000 1 0 0 0 0 0 0 7000 1 0 0 0 0 0 0\n",
+    });
+    const local = tree(under("sys", nic("eth0")));
+    const r = readInterfaces(rootsFor(host, local));
+    expect(r?.scope).toBe("host");
+    expect(r?.value.map((i) => i.name)).toEqual(["eno1"]);
+    expect(r?.value[0].rxBytes).toBe(5000);
+  });
+
+  it("keeps sensor identities after a peer disappears, hwmon renumbering and restart", () => {
+    const root = tree({});
+    const base = join(root, "class/hwmon");
+    mkdirSync(base, { recursive: true });
+    for (const [index, address] of [[0, "0000:01:00.0"], [1, "0000:02:00.0"]] as const) {
+      const device = join(root, "devices", address, "hwmon", `hwmon${index}`);
+      mkdirSync(device, { recursive: true });
+      for (const [file, value] of Object.entries({ name: "amdgpu", fan1_input: `${900 + index * 600}`, in0_input: "800", power1_average: "25000000" })) {
+        writeFileSync(join(device, file), value);
+      }
+      symlinkSync(device, join(base, `hwmon${index}`), "junction");
+    }
+    const roots = { hostProc: root, hostSys: root, proc: root, sys: root, inContainer: false };
+    const options = { roots, sysfsRoot: root, netFilter: { include: [], exclude: [] } };
+    const hm = new HostMetrics(options);
+    const first = hm.sample(0);
+    expect(new Set(first.fans.map((f) => f.id)).size).toBe(2);
+    expect(new Set(first.voltages.map((v) => v.id)).size).toBe(2);
+    expect(new Set(first.power!.sources.map((p) => p.id)).size).toBe(2);
+    unlinkSync(join(base, "hwmon0"));
+    const surviving = hm.sample(10_000);
+    expect(surviving.fans).toEqual([first.fans[1]]);
+    expect(surviving.voltages).toEqual([first.voltages[1]]);
+    expect(surviving.power?.sources).toEqual([first.power!.sources[1]]);
+    const device = join(root, "devices/0000:02:00.0/hwmon");
+    unlinkSync(join(base, "hwmon1"));
+    renameSync(join(device, "hwmon1"), join(device, "hwmon7"));
+    symlinkSync(join(device, "hwmon7"), join(base, "hwmon7"), "junction");
+    const restarted = new HostMetrics(options).sample(0);
+    expect(restarted.fans).toEqual(surviving.fans);
+    expect(restarted.voltages).toEqual(surviving.voltages);
+    expect(restarted.power?.sources).toEqual(surviving.power?.sources);
+  });
+
   it("glob matching has no catastrophic backtracking; pattern count/length are capped", () => {
     expect(globMatch("*", "")).toBe(true);
     expect(globMatch("a*b*c", "axxbyyc")).toBe(true);
@@ -564,12 +609,12 @@ describe("review fixes", () => {
       "class/hwmon/hwmon1/fan1_input": "1200\n",
     });
     const x = readHwmonExtras(root);
-    expect(x.power).toEqual([{ chip: "amdgpu", label: "power1", watts: null }]);
+    expect(x.power).toEqual([{ id: expect.any(String), chip: "amdgpu", label: "power1", watts: null }]);
     expect(x.fans).toEqual([
-      { chip: "amdgpu", label: "fan1", rpm: null },
-      { chip: "nct6798", label: "fan1", rpm: 1200 },
+      { id: expect.any(String), chip: "amdgpu", label: "fan1", rpm: null },
+      { id: expect.any(String), chip: "nct6798", label: "fan1", rpm: 1200 },
     ]);
-    expect(x.voltages).toEqual([{ chip: "amdgpu", label: "in0", volts: null }]);
+    expect(x.voltages).toEqual([{ id: expect.any(String), chip: "amdgpu", label: "in0", volts: null }]);
   });
 
   it("never skips CPU chips or non-GPU devices that report suspended (runtime PM auto)", () => {
@@ -587,10 +632,10 @@ describe("review fixes", () => {
     // a GPU recognised by its driver link rather than the hwmon name
     symlinkSync("../../../../bus/pci/drivers/nouveau", join(root, "class/hwmon/hwmon2/device/driver"));
     const x = readHwmonExtras(root);
-    expect(x.power).toEqual([{ chip: "zenpower", label: "power1", watts: 40 }]);
+    expect(x.power).toEqual([{ id: expect.any(String), chip: "zenpower", label: "power1", watts: 40 }]);
     expect(x.fans).toEqual([
-      { chip: "gpu_sensor", label: "fan1", rpm: null },
-      { chip: "nct6798", label: "fan1", rpm: 1200 },
+      { id: expect.any(String), chip: "gpu_sensor", label: "fan1", rpm: null },
+      { id: expect.any(String), chip: "nct6798", label: "fan1", rpm: 1200 },
     ]);
     const empty = tree({});
     const hm = new HostMetrics({

@@ -266,6 +266,42 @@ echo "[11] CHIRP_DEV_PERM overrides the default rw"
 eq "rwm override" "lxc.cgroup2.devices.allow: b 8:* rwm" \
   "$(CHIRP_DEV_PERM=rwm; chirp_render_block <<<"$SEL_SDB" | grep cgroup2)"
 
+echo "[12] removed disks retain rule ownership without by-id links"
+printf 'arch: amd64\nlxc.cgroup2.devices.allow: c 10:200 rwm\n' >"$TMP/gone.conf"
+chirp_render_block <<<"$SEL_ALL" >"$TMP/gone.block"
+chirp_apply_conf "$TMP/gone.conf" "$TMP/gone.block"
+eq "records both owned majors" $'8\n259' "$(cat "$TMP/gone.conf.chirp-majors" | sort -n)"
+# Simulate physically unplugging every disk after the first successful run.
+chirp_byid_major() { return 0; }
+: >"$TMP/gone.block"
+chirp_apply_conf "$TMP/gone.conf" "$TMP/gone.block"; eq "removed disks -> rc 0" "0" "$?"
+eq "removed disks: wildcard block rules gone" "0" "$(grep -c '^lxc.cgroup2.devices.allow: b ' "$TMP/gone.conf")"
+eq "removed disks: unrelated rule kept" "1" "$(grep -c '^lxc.cgroup2.devices.allow: c 10:200 rwm$' "$TMP/gone.conf")"
+eq "removed disks: ownership cleared" "" "$(cat "$TMP/gone.conf.chirp-majors")"
+# A legacy config has no ownership record. Do not silently discard a mount
+# while leaving an unidentifiable allow rule behind.
+printf 'arch: amd64\nlxc.cgroup2.devices.allow: b 259:* rw\nlxc.mount.entry: /dev/disk/by-id/nvme-gone dev/disk/by-id/nvme-gone none bind,optional,create=file\n' >"$TMP/legacy-gone.conf"
+cp "$TMP/legacy-gone.conf" "$TMP/legacy-gone.orig"
+chirp_apply_conf "$TMP/legacy-gone.conf" "$TMP/gone.block" 2>/dev/null; eq "missing legacy disk without state -> rc 1" "1" "$?"
+eq "ambiguous legacy config unchanged" "$(cat "$TMP/legacy-gone.orig")" "$(cat "$TMP/legacy-gone.conf")"
+# Proxmox snapshots restore the CT config but not the host-side ownership file.
+printf '8\n' >"$TMP/legacy-gone.conf.chirp-majors"
+chirp_render_block <<<"$SEL_SDB" >"$TMP/restored.block"
+chirp_apply_conf "$TMP/legacy-gone.conf" "$TMP/restored.block" 2>/dev/null; eq "snapshot with mismatched state -> rc 1" "1" "$?"
+eq "snapshot mismatch: config unchanged" "$(cat "$TMP/legacy-gone.orig")" "$(cat "$TMP/legacy-gone.conf")"
+eq "snapshot mismatch: state unchanged" "8" "$(cat "$TMP/legacy-gone.conf.chirp-majors")"
+# Adopting an unchanged config must record ownership too.
+chirp_byid_major() { case "$1" in wwn-*|ata-*) echo 8 ;; nvme-*) echo 259 ;; esac; }
+printf 'arch: amd64\n' >"$TMP/adopt.conf"
+chirp_render_block <<<"$SEL_ALL" >"$TMP/adopt.block"
+cat "$TMP/adopt.block" >>"$TMP/adopt.conf"
+chirp_apply_conf "$TMP/adopt.conf" "$TMP/adopt.block"
+eq "unchanged legacy config adopted" $'8\n259' "$(cat "$TMP/adopt.conf.chirp-majors" | sort -n)"
+printf 'corrupt\n' >"$TMP/adopt.conf.chirp-majors"
+cp "$TMP/adopt.conf" "$TMP/adopt.orig"
+chirp_apply_conf "$TMP/adopt.conf" "$TMP/gone.block" 2>/dev/null; eq "invalid ownership state -> rc 1" "1" "$?"
+eq "invalid state: config untouched" "$(cat "$TMP/adopt.orig")" "$(cat "$TMP/adopt.conf")"
+
 echo
 echo "passed=${PASS} failed=${FAILS}"
 [[ "$FAILS" -eq 0 ]]

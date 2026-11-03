@@ -2,7 +2,7 @@ import type { Fan, Load, MetricScope, Memory, Network, Power, PowerSource, Volta
 import { readProc, type HostRoots } from "./hostPaths.js";
 import { uniqueIds } from "./ids.js";
 import { MAX_GLOB_LENGTH, MAX_GLOBS, NetMatcher, readInterfaces, type NetFilter } from "./netdev.js";
-import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones } from "./power.js";
+import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones, type HwmonPower } from "./power.js";
 import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
 
 export interface HostSample {
@@ -82,22 +82,8 @@ export class HostMetrics {
       load: this.guard("load", () => this.load(), null),
       network: this.guard("network", () => this.network(nowMs), null),
       power: this.guard("power", () => this.power(nowMs, extras.power), null),
-      fans: this.guard(
-        "fans",
-        () => {
-          const ids = uniqueIds(extras.fans.map((f) => `${f.chip}_${f.label}`), "fan");
-          return extras.fans.map((f, i) => ({ id: ids[i], ...f }));
-        },
-        [],
-      ),
-      voltages: this.guard(
-        "voltages",
-        () => {
-          const ids = uniqueIds(extras.voltages.map((v) => `${v.chip}_${v.label}`), "in");
-          return extras.voltages.map((v, i) => ({ id: ids[i], ...v }));
-        },
-        [],
-      ),
+      fans: extras.fans,
+      voltages: extras.voltages,
     };
   }
 
@@ -199,7 +185,7 @@ export class HostMetrics {
     return { scope: r.scope, interfaces };
   }
 
-  private power(nowMs: number, hwmon: { chip: string; label: string; watts: number | null }[]): Power | null {
+  private power(nowMs: number, hwmon: HwmonPower[]): Power | null {
     const zones = readRaplZones(this.opts.sysfsRoot).filter((z) => z.energyUj !== null);
     const prev = this.prevRapl;
     const dt = prev ? (nowMs - prev.at) / 1000 : 0;
@@ -213,13 +199,9 @@ export class HostMetrics {
     if (!raplSources.length && !hwmon.length) return null;
 
     const raplIds = uniqueIds(raplSources.map((s) => `rapl_${s.label}`), "rapl");
-    const hwmonIds = uniqueIds(
-      [...raplIds, ...hwmon.map((h) => `${h.chip}_${h.label}`)],
-      "power",
-    ).slice(raplIds.length);
     const sources: PowerSource[] = [
       ...raplSources.map((s, i) => ({ id: raplIds[i], label: s.label, watts: s.watts })),
-      ...hwmon.map((h, i) => ({ id: hwmonIds[i], label: `${h.chip} ${h.label}`, watts: h.watts })),
+      ...hwmon.map((h) => ({ id: h.id, label: `${h.chip} ${h.label}`, watts: h.watts })),
     ];
 
     let packageWatts: number | null = null;

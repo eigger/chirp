@@ -65,7 +65,7 @@ chirp normally runs in a privileged LXC. hwmon and powercap are host sysfs, so C
 - **ZFS.** The ARC is not in `MemAvailable`, so `usedPercent` includes it (same basis as the Proxmox GUI); subtracting reclaimable ARC from `arcstats` is a possible future improvement.
 - **Power priority.** `packageWatts` = sum of RAPL `package-N` zones (Intel, and AMD Zen via the same powercap driver); without RAPL the sum of a CPU hwmon chip's power readings (`zenpower`, `fam15h_power`, ...). Other hwmon power readings (GPUs, PSUs) only appear in `sources[]`.
 - **Isolation.** Each section is read in its own `try`; a failure makes that section `null`/empty, is logged once until it recovers and never affects the CPU or SMART collection. Missing or unreadable files are not failures (no log). GET never triggers a read.
-- **IDs.** Interface IDs are slugs of the name; fan/voltage IDs are chip+label slugs with `_2`, `_3` for duplicates; hwmon chips are ordered by name and device path so the suffixes do not follow `hwmonN` renumbering.
+- **IDs.** Interface IDs are slugs of the name; hwmon power/fan/voltage IDs are chip+label slugs followed by a device-path/channel hash, independent of other sensors and `hwmonN` renumbering.
 
 ## Disk IDs and standby
 

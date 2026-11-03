@@ -231,9 +231,8 @@ function fromNetDev(counters: Map<string, NetDevCounters>, keep: (name: string) 
 /**
  * Interfaces with their scope. Sources, in order:
  * 1. `<host sys>/class/net` (the host's /sys bind-mounted: shows the host's network namespace);
- * 2. the local `/sys/class/net`;
- * 3. `/proc/net/dev` without operstate/speed: `<host proc>/1/net/dev` (PID 1's
- *    namespace when the whole host /proc is mounted), then the local one.
+ * 2. `<host proc>/1/net/dev` (PID 1's namespace when the whole host /proc is mounted);
+ * 3. the local `/sys/class/net`, then `/proc/net/dev` without operstate/speed.
  * /proc/net is per network namespace, so `<host proc>/net/dev` is never used.
  *
  * `keep` pre-filters by name (NetMatcher.byName); the result can still hold
@@ -244,7 +243,8 @@ export function readInterfaces(
   keep: (name: string) => boolean = () => true,
   io: SysIo = defaultSysIo,
 ): Scoped<RawInterface[]> | null {
-  for (const { base, scope } of sysCandidates(roots)) {
+  const candidates = sysCandidates(roots);
+  for (const { base, scope } of candidates.filter((c) => c.scope === "host")) {
     const list = readSysNet(base, keep, io);
     if (list) return { value: list, scope };
   }
@@ -256,6 +256,10 @@ export function readInterfaces(
     const host = readText(join(roots.hostProc, "1", "net", "dev"));
     const list = host === null ? null : parse(host);
     if (list) return { value: list, scope: "host" };
+  }
+  for (const { base, scope } of candidates.filter((c) => c.scope !== "host")) {
+    const list = readSysNet(base, keep, io);
+    if (list) return { value: list, scope };
   }
   return readProc({ ...roots, hostProc: roots.proc }, join("net", "dev"), parse);
 }

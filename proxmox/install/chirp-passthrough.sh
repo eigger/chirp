@@ -298,13 +298,15 @@ CHIRP_CONF_AWK='
   END { if (mode == "rewrite") emit() }
 '
 
-# $1: conf file, $2: file with the freshly rendered chirp lines (empty = only remove them).
+# $1: conf file, $2: file with freshly rendered lines, $3: owned-major state file.
+# Tests default the state file beside their temporary config; production supplies
+# /var/lib/chirp-passthrough/<CTID>.majors (outside pmxcfs).
 # Removes every chirp-managed line from the main section wherever it is (Proxmox may have
 # reordered the file) and writes the new set once, before the first `[section]` (appended
 # after it, it would become part of a snapshot's config). Idempotent; never touches
 # snapshot/pending sections or other lxc.* lines; leaves the file unchanged on any doubt.
 chirp_apply_conf() {
-  local conf="$1" blockfile="$2" tmp majors byid m
+  local conf="$1" blockfile="$2" state="${3:-$1.chirp-majors}" tmp majors byid m recorded="" newmajors state_tmp missing=0
   if [[ ! -s "$conf" ]]; then
     _cp_err "${conf} is missing or empty."
     return 1
@@ -317,14 +319,48 @@ chirp_apply_conf() {
     _cp_err "${conf} has Windows (CRLF) line endings; Proxmox does not write those. Fix it by hand. Leaving it unchanged."
     return 1
   fi
-  # Device rules chirp owns: the majors it adds now plus those of the disk mounts it removes.
-  majors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
+  # Retain ownership independently of /dev: a removed disk no longer has a by-id link.
+  if [[ -e "$state" ]]; then
+    if [[ ! -r "$state" ]] || grep -qvE '^[0-9]+$' "$state"; then
+      _cp_err "Cannot read valid owned-major state: ${state}. Leaving ${conf} unchanged."
+      return 1
+    fi
+    recorded="$(cat "$state")"
+  fi
+  newmajors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
+  majors="$newmajors"$'\n'"$recorded"
   while IFS= read -r byid; do
     [[ -n "$byid" ]] || continue
     m="$(chirp_byid_major "$byid")"
+    [[ -n "$m" ]] || missing=1
+    if [[ -z "$m" && -z "$recorded" ]]; then
+      _cp_err "Cannot identify the old rule for missing disk ${byid}. Remove its stale cgroup rule and mount manually before retrying; leaving ${conf} unchanged."
+      return 1
+    fi
     [[ -n "$m" ]] && majors+=$'\n'"$m"
   done < <(awk -v mode=list -v majors="" "$CHIRP_CONF_AWK" "$conf")
   majors="$(printf '%s\n' "$majors" | sed '/^$/d' | sort -n -u | paste -sd, -)"
+  # A CT snapshot can restore old rules without restoring this host-side state.
+  # With missing disks we cannot attribute an unrecorded wildcard rule safely.
+  if ((missing)); then
+    while IFS= read -r m; do
+      case ",$majors," in
+        *",$m,"*) ;;
+        *)
+          _cp_err "Missing disks and unrecorded block major ${m}: CT configuration and ownership state may differ. Reconcile the stale rules before retrying; leaving ${conf} unchanged."
+          return 1
+          ;;
+      esac
+    done < <(awk '
+      /^\[/ {exit}
+      {
+        line = $0
+        if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ /^b[ \t]+[0-9]+:\*[ \t]+/) {
+          split(line, f, /[ \t]+/); sub(/:\*$/, "", f[2]); print f[2]
+        }
+      }
+    ' "$conf")
+  fi
   tmp="$(mktemp)" || return 1
   if ! awk -v mode=rewrite -v majors="$majors" \
       -v bf="$blockfile" "$CHIRP_CONF_AWK" "$conf" >"$tmp"; then
@@ -338,17 +374,24 @@ chirp_apply_conf() {
     rm -f "$tmp"
     return 1
   fi
-  if cmp -s "$tmp" "$conf"; then
-    rm -f "$tmp"
-    return 0
+  # Write the union first: interruption during the config write must not lose ownership.
+  state_tmp="$(mktemp "${state}.XXXXXX")" || { rm -f "$tmp"; return 1; }
+  if ! { tr ',' '\n' <<<"$majors" | sed '/^$/d' >"$state_tmp" && mv -f "$state_tmp" "$state"; }; then
+    rm -f "$tmp" "$state_tmp"
+    return 1
   fi
   # On pmxcfs (/etc/pve) overwrite in place rather than rename (keeps mode/ownership).
-  if ! cat "$tmp" >"$conf"; then
+  if ! cmp -s "$tmp" "$conf" && ! cat "$tmp" >"$conf"; then
     _cp_err "Failed to write ${conf}."
     rm -f "$tmp"
     return 1
   fi
   rm -f "$tmp"
+  state_tmp="$(mktemp "${state}.XXXXXX")" || return 1
+  if ! { printf '%s\n' "$newmajors" | sed '/^$/d' >"$state_tmp" && mv -f "$state_tmp" "$state"; }; then
+    rm -f "$state_tmp"
+    return 1
+  fi
 }
 
 # stdin: selected TSV -> stdout: CHIRP_DEVICES value (comma-separated full paths).
@@ -562,7 +605,11 @@ chirp_passthrough_run() {
 
   blockfile="$(mktemp)"
   chirp_render_block <<<"$sel_tsv" >"$blockfile"
-  if ! chirp_apply_conf "$conf" "$blockfile"; then
+  if ! mkdir -p /var/lib/chirp-passthrough || ! chmod 700 /var/lib/chirp-passthrough; then
+    rm -f "$blockfile"
+    return 1
+  fi
+  if ! chirp_apply_conf "$conf" "$blockfile" "/var/lib/chirp-passthrough/${ctid}.majors"; then
     rm -f "$blockfile"
     return 1
   fi

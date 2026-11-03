@@ -1,6 +1,8 @@
-import { readdirSync, readlinkSync } from "node:fs";
-import { basename, join } from "node:path";
+import { createHash } from "node:crypto";
+import { readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 import { readText } from "./hostPaths.js";
+import { slug } from "./diskIdentity.js";
 
 /** One RAPL powercap zone (`/sys/class/powercap/intel-rapl:N[:M]`; AMD Zen uses the same driver). */
 export interface RaplZone {
@@ -15,18 +17,21 @@ export interface RaplZone {
 }
 
 export interface HwmonPower {
+  id: string;
   chip: string;
   label: string;
   watts: number | null;
 }
 
 export interface HwmonFan {
+  id: string;
   chip: string;
   label: string;
   rpm: number | null;
 }
 
 export interface HwmonVoltage {
+  id: string;
   chip: string;
   label: string;
   volts: number | null;
@@ -131,16 +136,31 @@ function isGpu(path: string, name: string): boolean {
 function hwmonChips(sysRoot: string): ChipDir[] {
   const base = join(sysRoot, "class", "hwmon");
   const chips: ChipDir[] = [];
+  let rootPath: string;
+  try {
+    rootPath = realpathSync(sysRoot);
+  } catch {
+    return chips;
+  }
   for (const dir of listDir(base)) {
     const path = join(base, dir);
     const name = readText(join(path, "name"))?.trim();
     if (!name) continue;
-    let key = dir;
+    let devicePath: string;
     try {
-      key = readlinkSync(join(path, "device"));
+      devicePath = realpathSync(join(path, "device"));
     } catch {
-      /* no device link (virtual chip): keep the directory name */
+      try {
+        devicePath = realpathSync(path);
+      } catch {
+        // Hot-unplug or driver reset after reading name: only skip this chip.
+        continue;
+      }
     }
+    // The device path survives hwmonN renumbering. Keep it relative to the
+    // mounted sysfs root so /sys and /host/sys produce identical identities.
+    const relativePath = relative(rootPath, devicePath).replace(/\\/g, "/");
+    const key = relativePath.startsWith("devices/") ? relativePath.replace(/(?:\/hwmon)?\/hwmon\d+$/, "") : relativePath;
     const suspended = isGpu(path, name) && readText(join(path, "device", "power", "runtime_status"))?.trim() === "suspended";
     chips.push({ path, name, key, suspended });
   }
@@ -165,18 +185,23 @@ export function readHwmonExtras(sysRoot: string): HwmonExtras {
     const files = listDir(chip.path);
     const value = (file: string) => (chip.suspended ? null : readNum(join(chip.path, file)));
     const label = (prefix: string, i: number) => readText(join(chip.path, `${prefix}${i}_label`))?.trim() || `${prefix}${i}`;
+    const id = (prefix: string, i: number, display: string) =>
+      `${slug(`${chip.name}_${display}`) || prefix}_${createHash("sha256").update(`${chip.key}/${prefix}${i}`).digest("hex").slice(0, 16)}`;
 
     for (const i of indexed(files, /^power(\d+)_(?:input|average)$/)) {
       const uw = value(`power${i}_input`) ?? value(`power${i}_average`);
-      out.power.push({ chip: chip.name, label: label("power", i), watts: uw === null ? null : round(uw / 1e6, 1) });
+      const display = label("power", i);
+      out.power.push({ id: id("power", i, display), chip: chip.name, label: display, watts: uw === null ? null : round(uw / 1e6, 1) });
     }
     for (const i of indexed(files, /^fan(\d+)_input$/)) {
       const rpm = value(`fan${i}_input`);
-      out.fans.push({ chip: chip.name, label: label("fan", i), rpm: rpm === null ? null : Math.round(rpm) });
+      const display = label("fan", i);
+      out.fans.push({ id: id("fan", i, display), chip: chip.name, label: display, rpm: rpm === null ? null : Math.round(rpm) });
     }
     for (const i of indexed(files, /^in(\d+)_input$/)) {
       const mv = value(`in${i}_input`);
-      out.voltages.push({ chip: chip.name, label: label("in", i), volts: mv === null ? null : round(mv / 1000, 3) });
+      const display = label("in", i);
+      out.voltages.push({ id: id("in", i, display), chip: chip.name, label: display, volts: mv === null ? null : round(mv / 1000, 3) });
     }
   }
   return out;

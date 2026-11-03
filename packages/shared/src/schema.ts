@@ -204,7 +204,7 @@ export const Network = z.object({
 export type Network = z.infer<typeof Network>;
 
 export const PowerSource = z.object({
-  /** Stable slug: `rapl_<zone>` or `<chip>_<label>`. */
+  /** Stable slug: `rapl_<zone>` or `<chip>_<label>_<device/channel hash>`. */
   id: z.string().regex(/^[a-z0-9_]+$/),
   label: z.string(),
   /** null until two energy samples exist (RAPL) or when unreadable. */
@@ -229,7 +229,7 @@ export const Power = z.object({
 export type Power = z.infer<typeof Power>;
 
 export const Fan = z.object({
-  /** Stable slug of chip + label (`_2`, `_3` ... suffix on duplicates). */
+  /** Chip + label slug with a device-path/channel hash; stable when peer sensors disappear. */
   id: z.string().regex(/^[a-z0-9_]+$/),
   chip: z.string(),
   label: z.string(),
@@ -238,7 +238,7 @@ export const Fan = z.object({
 export type Fan = z.infer<typeof Fan>;
 
 export const Voltage = z.object({
-  /** Stable slug of chip + label (`_2`, `_3` ... suffix on duplicates). */
+  /** Chip + label slug with a device-path/channel hash; stable when peer sensors disappear. */
   id: z.string().regex(/^[a-z0-9_]+$/),
   chip: z.string(),
   /** The chip's label, or `inN` when it has none (exposed as is; may be cryptic). */
