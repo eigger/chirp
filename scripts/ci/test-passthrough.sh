@@ -78,19 +78,33 @@ lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-e
 lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
-lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0
 # chirp-passthrough:end'
 eq "block content" "$EXPECTED_BLOCK" "$BLOCK"
 EXPECTED_HOST_ONLY='# chirp-passthrough:start
 lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
 lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
-lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0
 # chirp-passthrough:end'
 eq "empty selection -> host metric mounts only" "$EXPECTED_HOST_ONLY" "$(chirp_render_block <<<"")"
 eq "empty selection + CHIRP_HOST_MOUNTS=0 -> no block" "" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"")"
 eq "CHIRP_HOST_MOUNTS=0 -> no host mounts" "0" "$(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"$SEL_ALL" | grep -c ' host/')"
-eq "host mounts are read-only" "4" "$(chirp_render_host_mounts | grep -c 'bind,ro,optional')"
+eq "host mounts are read-only" "4" "$(chirp_render_host_mounts | grep -c 'bind,ro,')"
+eq "host /sys is nosuid,nodev,noexec" "1" "$(chirp_render_host_mounts | grep -c 'host/sys none bind,ro,nosuid,nodev,noexec,optional')"
+EXPECTED_PROC_ONLY='lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0'
+eq "CHIRP_HOST_MOUNTS=proc -> /proc files only" "$EXPECTED_PROC_ONLY" "$(CHIRP_HOST_MOUNTS=proc; chirp_render_host_mounts)"
+eq "CHIRP_HOST_MOUNTS=proc -> no /sys" "0" "$(CHIRP_HOST_MOUNTS=proc; chirp_render_block <<<"$SEL_ALL" | grep -c 'host/sys')"
+for v in all ALL 1 ""; do
+  eq "mode '${v}' -> all" "all" "$(CHIRP_HOST_MOUNTS="$v"; chirp_host_mounts_mode)"
+done
+for v in 0 none; do
+  eq "mode '${v}' -> none" "none" "$(CHIRP_HOST_MOUNTS="$v"; chirp_host_mounts_mode)"
+done
+(CHIRP_HOST_MOUNTS=bogus; chirp_host_mounts_mode >/dev/null); eq "unknown mode -> rc 1" "1" "$?"
+(CHIRP_HOST_MOUNTS=bogus; chirp_render_block <<<"$SEL_ALL" >/dev/null); eq "unknown mode -> no block (rc 1)" "1" "$?"
 eq "no /proc/net mount (per network namespace)" "0" "$(chirp_render_host_mounts | grep -c '/proc/net')"
 eq "CHIRP_DEVICES value" "/dev/disk/by-id/wwn-0x5002538e40000001,/dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234,/dev/disk/by-id/nvme-eui.0025385b21400001" \
   "$(chirp_devices_value <<<"$SEL_ALL")"
@@ -118,6 +132,18 @@ eq "old block: no host mounts" "0" "$(grep -c ' host/' "$CONF")"
 chirp_apply_conf "$CONF" "$TMP/b2"
 eq "re-run adds host mounts" "4" "$(grep -c ' host/' "$CONF")"
 eq "re-run keeps a single block" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
+# Switching modes rewrites the block in place.
+(CHIRP_HOST_MOUNTS=proc; chirp_render_block <<<"$SEL_SDB") >"$TMP/bp"
+chirp_apply_conf "$CONF" "$TMP/bp"
+eq "all -> proc: 3 host mounts" "3" "$(grep -c ' host/' "$CONF")"
+eq "all -> proc: no /sys" "0" "$(grep -c 'host/sys' "$CONF")"
+(CHIRP_HOST_MOUNTS=0; chirp_render_block <<<"$SEL_SDB") >"$TMP/bn"
+chirp_apply_conf "$CONF" "$TMP/bn"
+eq "proc -> 0: no host mounts" "0" "$(grep -c ' host/' "$CONF")"
+eq "proc -> 0: disk kept" "1" "$(grep -c '^lxc.mount.entry: /dev/disk' "$CONF")"
+chirp_apply_conf "$CONF" "$TMP/b2"
+eq "0 -> all: 4 host mounts" "4" "$(grep -c ' host/' "$CONF")"
+eq "mode switches keep a single block" "1" "$(grep -c '^# chirp-passthrough:start$' "$CONF")"
 eq "replaced: no 259 rule" "0" "$(grep -c '259:' "$CONF")"
 : >"$TMP/b3"
 chirp_apply_conf "$CONF" "$TMP/b3"
@@ -145,7 +171,11 @@ chirp_memtotal_matches $'MemTotal:       65536000 kB\nMemFree: 1 kB' $'MemTotal:
 chirp_memtotal_matches $'MemTotal:       65536000 kB' $'MemTotal:         524288 kB'; eq "lxcfs MemTotal differs" "1" "$?"
 chirp_memtotal_matches $'MemTotal:       65536000 kB' ""; eq "missing mount" "1" "$?"
 
-echo "[10] CHIRP_DEV_PERM overrides the default rw"
+echo "[10] host-only interface for the mount check"
+eq "skips lo/tap/veth/fw*/docker" "vmbr0" "$(printf 'docker0\nfwbr100i0\nlo\ntap100i0\nveth101i0\nvmbr0\neno1\n' | chirp_pick_host_iface)"
+printf 'lo\ntap100i0\n' | chirp_pick_host_iface >/dev/null; eq "none -> rc 1" "1" "$?"
+
+echo "[11] CHIRP_DEV_PERM overrides the default rw"
 eq "rwm override" "lxc.cgroup2.devices.allow: b 8:* rwm" \
   "$(CHIRP_DEV_PERM=rwm; chirp_render_block <<<"$SEL_SDB" | grep cgroup2)"
 

@@ -39,7 +39,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/prox
 
 It creates an LXC container, installs the latest release tarball, passes the selected disks through, and prints the dashboard URL and API key.
 
-**Host values from inside the LXC.** In a container `/proc/meminfo`, `/proc/stat` and `/proc/loadavg` can show the container's limits (lxcfs) and only the container's `eth0` is visible. The passthrough step therefore also bind-mounts the host's `/proc/meminfo`, `/proc/stat`, `/proc/loadavg` and `/sys` read-only under `/host/...` (re-run `chirp-passthrough.sh` to add them to an existing install). chirp reads those first and reports `scope: "host"`; without them the dashboard says "container view — host mounts missing". These mounts are new and not verified on every Proxmox setup — the installer compares them with the host, and [`docs/deploy.md`](docs/deploy.md#host-metrics-memory-load-network) shows how to check (`free` / `/proc/meminfo` on the host vs. `/host/proc/meminfo` in the container).
+**Host values from inside the LXC.** In a container `/proc/meminfo`, `/proc/stat` and `/proc/loadavg` can show the container's limits (lxcfs) and only the container's `eth0` is visible. The passthrough step therefore also bind-mounts the host's `/proc/meminfo`, `/proc/stat`, `/proc/loadavg` and `/sys` read-only under `/host/...` (re-run `chirp-passthrough.sh` to add them to an existing install; the disk selection of a re-run replaces the current one, so keep every disk you want, or pass the same `CHIRP_DISKS`). `CHIRP_HOST_MOUNTS=proc` mounts only the `/proc` files (no host sysfs in the container; network then shows the container view), `CHIRP_HOST_MOUNTS=0` none — see the exposure notes in [`docs/deploy.md`](docs/deploy.md#host-metrics-memory-load-network). chirp reads those first and reports `scope: "host"`; without them the dashboard says "container view — host mounts missing". These mounts are new and not verified on every Proxmox setup — the installer compares them with the host, and [`docs/deploy.md`](docs/deploy.md#host-metrics-memory-load-network) shows how to check (`free` / `/proc/meminfo` on the host vs. `/host/proc/meminfo` in the container).
 
 ### Docker
 
@@ -48,14 +48,15 @@ docker run -d --name chirp \
   --privileged \
   -p 80:80 \
   -v /sys:/sys:ro \
-  -v /proc:/host/proc:ro -v /sys:/host/sys:ro \
+  -v /proc/meminfo:/host/proc/meminfo:ro -v /proc/stat:/host/proc/stat:ro \
+  -v /proc/loadavg:/host/proc/loadavg:ro -v /sys:/host/sys:ro \
   -v chirp-data:/var/lib/chirp \
   --device /dev/sda --device /dev/sdb --device /dev/nvme0 \
   -e CHIRP_DEVICES=/dev/sda,/dev/sdb,/dev/nvme0 \
   ghcr.io/eigger/chirp:latest
 ```
 
-Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible; `/host/proc` and `/host/sys` give the host's memory, load and network interfaces (`scope: "host"`). Get the API key with `docker exec chirp node apps/server/dist/cli.js key show`. See [`docs/deploy.md`](docs/deploy.md).
+Instead of `--privileged` you can use `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` together with the `--device` flags. Mount `/sys` read-only so the CPU sensors of the **host** are visible; The `/host/proc/*` files give the host's memory and load, `/host/sys` the host's network interfaces (`scope: "host"`). On ZFS hosts the ARC counts as used memory (as in the Proxmox GUI). Get the API key with `docker exec chirp node apps/server/dist/cli.js key show`. See [`docs/deploy.md`](docs/deploy.md).
 
 ### From the release tarball
 

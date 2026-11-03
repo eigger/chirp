@@ -4,6 +4,8 @@
 # One-liner (re-run on the host after adding/replacing disks; idempotent):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
 #   Non-interactive: prefix with CHIRP_DISKS=all|none|<by-id,by-id,...>
+#   (the selection replaces the current one; non-interactive runs default to all)
+#   Host metric mounts: CHIRP_HOST_MOUNTS=all (default) | proc | 0 (see below)
 #
 # What it does: detect host disks -> pick them in a checklist -> (re)write the
 #   `# chirp-passthrough:start` ... `:end` block (disk rules + read-only host metric
@@ -15,14 +17,27 @@
 #  - root in a privileged LXC is effectively host root. Use it on trusted hosts only.
 #  - Do not use it for CTs managed by cluster HA (by-id disks exist on one node only).
 #  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
-#  - Host metric mounts (always written, opt out with CHIRP_HOST_MOUNTS=0): the host's
-#    /proc/meminfo, /proc/stat, /proc/loadavg and /sys are bind-mounted read-only under
-#    /host/proc and /host/sys in the container. Inside the container, /proc/meminfo etc. may
-#    be lxcfs views of the container's limits and /sys/class/net only shows the container's
-#    own network namespace; chirp reads the /host copies first and reports `scope: "host"`
-#    for them (`container` when they are missing). /proc/net/dev is not mounted: it is per
-#    network namespace, so network counters come from the host's /sys/class/net instead.
-#    The smoke test compares MemTotal and the interface list between host and container.
+#  - Host metric mounts, CHIRP_HOST_MOUNTS=all|proc|0 (default all):
+#    * proc: the host's /proc/meminfo, /proc/stat, /proc/loadavg -> /host/proc (read-only
+#      files). Inside the container these may be lxcfs views of the container's limits.
+#    * all:  proc + the host's /sys -> /host/sys (read-only, nosuid,nodev,noexec, not
+#      recursive). /sys/class/net (and /proc/net) only show the container's own network
+#      namespace; the host's sysfs mount keeps the host's, so chirp can list the host's
+#      NICs/bridges/bonds with operstate, speed and counters.
+#    * 0:    no host mounts; memory/load/network are reported with scope "container".
+#    Exposure of `all`: the whole host sysfs becomes visible at /host/sys. The mount is
+#    read-only, but the CT's AppArmor rules that deny writes to /sys are path based
+#    (/sys/**) and do not cover /host/sys, so a root process in the CT that can remount
+#    could make it writable and change host network knobs (MTU, bridge/bond settings).
+#    That is no new capability for a privileged CT (its root already has raw access to
+#    the passed-through disks and is effectively host root), but choose `proc` if you do
+#    not want host sysfs in the CT; the network section then shows the CT's own view.
+#    It cannot be narrowed to /sys/class/net: its entries are symlinks into
+#    /sys/devices/..., and mounting /sys/devices would expose nearly all of sysfs anyway.
+#    /proc/net/dev is never mounted: /proc/net follows the reading process's namespace.
+#    chirp reads /host first and reports `scope: "host"`; the smoke test compares MemTotal
+#    and checks that a host-only interface is visible under /host/sys/class/net.
+#    Re-running with another mode rewrites the block.
 #  - Device cgroup rules: `b <major>:* rw` for the majors of the selected disks.
 #    * rw, not rwm: the disks are bind-mounted (no mknod needed), and smartctl
 #      opens SCSI/SAT devices O_RDWR for SG_IO. Override with CHIRP_DEV_PERM.
@@ -38,7 +53,7 @@
 CHIRP_MARK_START="# chirp-passthrough:start"
 CHIRP_MARK_END="# chirp-passthrough:end"
 CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"
-CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-1}"
+CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-all}"
 # Host files bind-mounted read-only for the host metrics (source -> <rootfs>/host/<source>).
 CHIRP_HOST_PROC_FILES=(/proc/meminfo /proc/stat /proc/loadavg)
 
@@ -161,16 +176,28 @@ chirp_majors() {
   awk -F'\t' 'NF && $2 ~ /^[0-9]+:/ {split($2,a,":"); print a[1]}' | sort -n -u
 }
 
-# stdout: the read-only host metric mounts (nothing with CHIRP_HOST_MOUNTS=0).
+# CHIRP_HOST_MOUNTS -> all | proc | none (stdout). Returns 1 for an unknown value.
+chirp_host_mounts_mode() {
+  case "$(printf '%s' "$CHIRP_HOST_MOUNTS" | tr '[:upper:]' '[:lower:]')" in
+    all|1|yes|true|"") echo all ;;
+    proc) echo proc ;;
+    0|none|no|false) echo none ;;
+    *) return 1 ;;
+  esac
+}
+
+# stdout: the read-only host metric mounts for the CHIRP_HOST_MOUNTS mode.
 # `optional`: a missing source never stops the container from starting; chirp then
 # falls back to the container's own view and reports scope "container".
 chirp_render_host_mounts() {
-  local f
-  [[ "$CHIRP_HOST_MOUNTS" == "0" ]] && return 0
+  local f mode
+  mode="$(chirp_host_mounts_mode)" || return 1
+  [[ "$mode" == "none" ]] && return 0
   for f in "${CHIRP_HOST_PROC_FILES[@]}"; do
     echo "lxc.mount.entry: ${f} host${f} none bind,ro,optional,create=file 0 0"
   done
-  echo "lxc.mount.entry: /sys host/sys none bind,ro,optional,create=dir 0 0"
+  [[ "$mode" == "all" ]] || return 0
+  echo "lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0"
 }
 
 # stdin: selected TSV -> stdout: marker block (disk rules + host metric mounts;
@@ -178,7 +205,7 @@ chirp_render_host_mounts() {
 chirp_render_block() {
   local tsv majors m byid host
   tsv="$(cat)"
-  host="$(chirp_render_host_mounts)"
+  host="$(chirp_render_host_mounts)" || return 1
   [[ -n "$tsv" || -n "$host" ]] || return 0
   echo "$CHIRP_MARK_START"
   if [[ -n "$tsv" ]]; then
@@ -340,6 +367,9 @@ chirp_smoke_and_report() {
   echo " After adding/replacing disks (or to add the host metric mounts to an"
   echo " older install), re-run on the host:"
   echo "   bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)\" _ ${ctid}"
+  echo " The selection replaces the current one: pick every disk to keep (non-interactive"
+  echo " runs default to CHIRP_DISKS=all; CHIRP_DISKS=none removes all disks)."
+  echo " Host metric mounts: CHIRP_HOST_MOUNTS=all (default) | proc | 0"
   echo " Update the container: pct exec ${ctid} -- update"
   echo "=============================================="
 }
@@ -352,10 +382,25 @@ chirp_memtotal_matches() {
   [[ -n "$h" && "$h" == "$c" ]]
 }
 
+# stdin: interface names (one per line). stdout: the first one that only exists on the
+# host side (bridges, bonds, NICs), skipping loopback and per-guest/container devices.
+chirp_pick_host_iface() {
+  local n
+  while IFS= read -r n; do
+    case "$n" in
+      ""|lo|veth*|tap*|fwbr*|fwpr*|fwln*|docker*|br-*) continue ;;
+    esac
+    printf '%s\n' "$n"
+    return 0
+  done
+  return 1
+}
+
 # Verify that the host metric mounts show the host's values (not the container's).
 chirp_check_host_mounts() {
-  local ctid="$1" host_mem ct_mem host_if ct_if
-  [[ "$CHIRP_HOST_MOUNTS" == "0" ]] && return 0
+  local ctid="$1" host_mem ct_mem iface mode
+  mode="$(chirp_host_mounts_mode)" || return 0
+  [[ "$mode" == "none" ]] && return 0
   host_mem="$(cat /proc/meminfo 2>/dev/null)"
   ct_mem="$(pct exec "$ctid" -- cat /host/proc/meminfo 2>/dev/null || true)"
   if chirp_memtotal_matches "$host_mem" "$ct_mem"; then
@@ -363,12 +408,16 @@ chirp_check_host_mounts() {
   else
     _cp_warn "Host metric mounts: /host/proc/meminfo does not match the host; memory/load will show the container view."
   fi
-  host_if="$(ls /sys/class/net 2>/dev/null | sort | paste -sd, -)"
-  ct_if="$(pct exec "$ctid" -- sh -c 'ls /host/sys/class/net 2>/dev/null' | sort | paste -sd, - || true)"
-  if [[ -n "$host_if" && "$host_if" == "$ct_if" ]]; then
-    echo "Host metric mounts: /host/sys/class/net lists the host interfaces: OK"
+  [[ "$mode" == "all" ]] || return 0
+  # Guests start and stop, so do not compare whole lists: one host-only interface must be there.
+  if ! iface="$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | chirp_pick_host_iface)"; then
+    _cp_warn "Host metric mounts: no host interface to check against; skipping the network check."
+    return 0
+  fi
+  if pct exec "$ctid" -- test -e "/host/sys/class/net/${iface}"; then
+    echo "Host metric mounts: /host/sys/class/net shows the host interface ${iface}: OK"
   else
-    _cp_warn "Host metric mounts: /host/sys/class/net differs from the host (${ct_if:-empty}); network will show the container view."
+    _cp_warn "Host metric mounts: ${iface} is missing under /host/sys/class/net; network will show the container view."
   fi
 }
 
@@ -376,6 +425,10 @@ chirp_passthrough_run() {
   local ctid="${1:-}" conf detected selection="" sel_tsv listing lsblk_text blockfile ip devices
   if [[ -z "$ctid" || ! "$ctid" =~ ^[0-9]+$ ]]; then
     _cp_err "Usage: chirp-passthrough.sh <CTID>"
+    return 1
+  fi
+  if ! chirp_host_mounts_mode >/dev/null; then
+    _cp_err "CHIRP_HOST_MOUNTS must be all, proc or 0 (got \"${CHIRP_HOST_MOUNTS}\")."
     return 1
   fi
   if ! command -v pveversion >/dev/null 2>&1; then
@@ -423,13 +476,16 @@ chirp_passthrough_run() {
     return 1
   fi
   if [[ -s "$blockfile" ]]; then
-    _cp_msg "Applied the passthrough block to ${conf}:"
+    if [[ -n "$sel_tsv" ]]; then
+      _cp_msg "Applied the passthrough block to ${conf}:"
+    else
+      _cp_msg "No disks selected; applied the host metric mounts to ${conf}:"
+    fi
     sed -n "/^${CHIRP_MARK_START}\$/,/^${CHIRP_MARK_END}\$/p" "$conf"
   else
     _cp_msg "No disks selected and CHIRP_HOST_MOUNTS=0; removed the passthrough block."
   fi
   rm -f "$blockfile"
-  [[ -n "$sel_tsv" ]] || _cp_msg "No disks selected."
 
   devices="$(chirp_devices_value <<<"$sel_tsv")"
   if [[ "$(pct status "$ctid" | awk '{print $2}')" != "running" ]]; then
