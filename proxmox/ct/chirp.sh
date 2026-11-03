@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# shellcheck source=/dev/null
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
 
-# Redirect the install-script download from community-scripts to the chirp repository.
-function curl() {
-  if [[ "$*" == *"community-scripts/ProxmoxVE/main/install/chirp-install.sh"* ]]; then
-    command curl -fsSL "https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-install.sh"
-  else
-    command curl "$@"
-  fi
-}
-export -f curl
+# The community-scripts engine lives in community-scripts/core. The ct/ and install/
+# scripts are resolved against COMMUNITY_SCRIPTS_URL, so point that at this repository's
+# proxmox/ directory: install/chirp-install.sh is then fetched from here, not upstream.
+export COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/eigger/chirp/master/proxmox}"
+COMMUNITY_SCRIPTS_CORE_URL="${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}"
+export COMMUNITY_SCRIPTS_CORE_URL
+
+# `source <(curl ...)` would ignore a failed download and keep going with every function
+# undefined, so fetch first and stop on failure.
+if ! _chirp_build_func="$(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL}/core/build.func")" || [[ -z "$_chirp_build_func" ]]; then
+  echo "chirp: could not download the community-scripts engine from ${COMMUNITY_SCRIPTS_CORE_URL}/core/build.func" >&2
+  exit 1
+fi
+# Source through a pipe like upstream does: the engine treats a regular-file BASH_SOURCE as a
+# local checkout.
+# shellcheck source=/dev/null
+source <(printf '%s\n' "$_chirp_build_func")
+unset _chirp_build_func
 
 # chirp: one-shot Proxmox VE LXC install (from the host's root shell):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
@@ -64,6 +71,11 @@ function update_script() {
 start
 build_container
 description
+
+if [[ -z "${CTID:-}" ]]; then
+  msg_error "The container was not created (CTID is empty); aborting."
+  exit 1
+fi
 
 # --- Host-side post-install: disk passthrough (after build_container, while the CT runs) ---
 CHIRP_RAW_BASE="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/eigger/chirp/master}"

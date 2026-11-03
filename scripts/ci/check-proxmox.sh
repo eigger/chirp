@@ -56,6 +56,14 @@ grep -q 'health_host' "$UPD" || fail "update.sh probes /health without honouring
 grep -q 'rm -f "$CURRENT_LINK"' "$UPD" || fail "update.sh can leave a dangling current link after a failed first install"
 echo "update.sh checks passed"
 
+step "ct/chirp.sh: community-scripts engine bootstrap"
+CT="$REPO_ROOT/proxmox/ct/chirp.sh"
+grep -q 'misc/build.func' "$CT" && fail "ct/chirp.sh uses the removed ProxmoxVE misc/build.func (the engine moved to community-scripts/core)"
+grep -q 'community-scripts/core' "$CT" || fail "ct/chirp.sh does not load the engine from community-scripts/core"
+grep -q 'COMMUNITY_SCRIPTS_URL' "$CT" || fail "ct/chirp.sh does not point COMMUNITY_SCRIPTS_URL at this repository (install/chirp-install.sh would be looked up upstream)"
+grep -q '|| \[\[ -z "\$_chirp_build_func" \]\]' "$CT" || fail "ct/chirp.sh does not stop when the engine download fails"
+grep -q 'CTID:-' "$CT" || fail "ct/chirp.sh does not guard against an empty CTID before the passthrough step"
+
 step "chirp-install.sh: chirp.env template variables must be known to the server"
 INST="$REPO_ROOT/proxmox/install/chirp-install.sh"
 CFG="$REPO_ROOT/apps/server/src/config.ts"
