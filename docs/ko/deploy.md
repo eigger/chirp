@@ -48,7 +48,7 @@ lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=
 
 기존 설치에 마운트를 추가하거나 모드를 바꾸려면 스크립트를 다시 실행한다(예: `CHIRP_HOST_MOUNTS=proc CHIRP_DISKS=<현재 디스크> bash -c "$(curl ...)" _ <CTID>`). 블록은 다시 쓰일 뿐 중복되지 않는다. **재실행 시 디스크 선택은 기존 선택을 대체한다.** 체크리스트에서는 유지할 디스크를 모두 고르고, 비대화식으로는 이전과 같은 `CHIRP_DISKS`를 준다(터미널 없이 실행하면 기본값이 `all`이고, `none`은 passthrough된 디스크를 모두 제거한다).
 
-chirp은 `/host/proc`, `/host/sys`를 먼저 읽고 `scope: "host"`로 보고한다. 없으면 컨테이너 자신의 파일로 대체하고 `scope: "container"`로 보고하며, 대시보드에는 "컨테이너 관점 — 호스트 마운트 없음"이 표시된다. `optional`이므로 마운트가 실패해도 컨테이너는 정상 시작한다. `/proc/net`은 읽는 프로세스의 네트워크 네임스페이스를 따르므로 `/proc/net/dev`는 일부러 마운트하지 않는다.
+chirp은 `/host/proc`, `/host/sys`를 먼저 읽고 `scope: "host"`로 보고한다. 없으면 컨테이너 자신의 파일로 대체하고 `scope: "container"`로 보고하며, 대시보드에는 "컨테이너 관점"(툴팁: 호스트가 아닌 컨테이너 값)이 표시된다. `optional`이므로 마운트가 실패해도 컨테이너는 정상 시작한다. `/proc/net`은 읽는 프로세스의 네트워크 네임스페이스를 따르므로 `/proc/net/dev`는 일부러 마운트하지 않는다.
 
 **`all`이 노출하는 것.** 호스트 sysfs 전체가 `/host/sys`에서 읽힌다. 읽기 전용·`nosuid,nodev,noexec`·비재귀(cgroup, debugfs 등 하위 마운트 제외)로 마운트하지만, 컨테이너의 AppArmor 프로필은 `/sys/**` 쓰기를 *경로 기준*으로 막기 때문에 `/host/sys`는 막지 못한다. 따라서 다시 마운트할 수 있는 컨테이너 root 프로세스는 이를 쓰기 가능하게 만들어 호스트 네트워크 설정(MTU, 브리지·본딩 파라미터)을 바꿀 수 있다. privileged 컨테이너의 root는 이미 passthrough된 디스크에 원시 읽기·쓰기 권한이 있고 사실상 호스트 root이므로 새 권한은 아니지만, 호스트 sysfs를 컨테이너에 두고 싶지 않다면 `CHIRP_HOST_MOUNTS=proc`을 쓴다. `/sys/class/net`만으로 좁힐 수는 없다. 그 항목들은 `/sys/devices/...`를 가리키는 심볼릭 링크이고, `/sys/devices`를 마운트하면 어차피 sysfs 대부분이 노출된다.
 
@@ -73,17 +73,22 @@ curl -s -H "Authorization: Bearer $KEY" http://<ip>/api/v1/status | jq '{m: .mem
 ```bash
 docker run -d --name chirp \
   --privileged -p 80:80 \
-  -v /sys:/sys:ro -v chirp-data:/var/lib/chirp \
+  -v /sys:/host/sys:ro -e CHIRP_SYSFS_ROOT=/host/sys \
   -v /proc/meminfo:/host/proc/meminfo:ro -v /proc/stat:/host/proc/stat:ro \
-  -v /proc/loadavg:/host/proc/loadavg:ro -v /sys:/host/sys:ro \
+  -v /proc/loadavg:/host/proc/loadavg:ro \
+  -v chirp-data:/var/lib/chirp \
   --device /dev/sda --device /dev/nvme0 \
   -e CHIRP_DEVICES=/dev/sda,/dev/nvme0 \
   ghcr.io/eigger/chirp:latest
 ```
 
 - `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
-- `/sys`를 읽기 전용으로 마운트해야 호스트 CPU 센서(hwmon)가 보인다. 디스크를 깨우지 않고 sysfs에서 안정적인 디스크 ID를 도출하는 데도 쓰인다.
-- `/proc` 파일 3개 마운트로 호스트의 메모리·부하를 `scope: "host"`로 보고한다(필요한 것은 이 파일들뿐이다. `/proc` 전체를 `/host/proc`에 마운트해도 동작하며, 그 경우 네트워크 카운터는 PID 1의 `/host/proc/1/net/dev`에서 읽는다). `-v /sys:/host/sys:ro`는 호스트 네트워크 인터페이스를 준다(컨테이너 자신의 `/sys/class/net`은 자기 네트워크 네임스페이스만 보인다). 위 `all`과 같은 주의 사항이 있다(호스트 sysfs 전체가 읽기 전용으로 privileged 컨테이너에 보임). 네트워크 섹션이 필요 없으면 빼거나, `--network host`로 실행한다. 이 경우 컨테이너가 이미 호스트 인터페이스를 보지만 chirp은 구분할 수 없어 `scope: "container"`로 보고한다. `/proc` 마운트가 없으면 메모리·부하는 `scope: "container"`(Docker는 `/proc/meminfo`를 가상화하지 않으므로 값 자체는 대개 호스트와 같다).
+- **읽기 전용 호스트 sysfs 마운트 하나(`-v /sys:/host/sys:ro` + `CHIRP_SYSFS_ROOT=/host/sys`)**로 sysfs에서 오는 것을 모두 처리한다. CPU 센서(hwmon), RAPL 전력, 디스크를 깨우지 않는 안정적인 디스크 ID, 그리고 호스트 네트워크 인터페이스(`scope: "host"`)다. 호스트 sysfs를 bind mount하면 호스트의 네트워크 네임스페이스가 유지되므로 `/host/sys/class/net`에 `vmbr0`, `eno1` 등이 보인다. 주의: 호스트 sysfs 전체가 privileged 컨테이너에 보인다. 읽기 전용이지만 privileged 컨테이너는 다시 마운트할 수 있다(위 `CHIRP_HOST_MOUNTS=all`과 같은 절충).
+- **다른 sysfs 구성:**
+  - 대신 `-v /sys:/sys:ro`(이전 예시): 센서와 디스크 ID는 동작하고 `/sys/class/net`에도 호스트 인터페이스가 보이지만, chirp은 이를 컨테이너 자신의 `/sys`와 구분할 수 없어 네트워크 섹션을 `scope: "container"`로 보고한다. 호스트 라벨을 얻으려면 `/host/sys`를 쓴다.
+  - `--network host`: 컨테이너 자신의 `/sys/class/net`이 호스트 네임스페이스다. 역시 `/host/sys`가 없으면 호스트 데이터가 `scope: "container"`로 보고된다.
+  - 호스트 sysfs 없이 기본 브리지 네트워크: 컨테이너의 `eth0`만 보이고(`scope: "container"`), 호스트 CPU 센서도 없다.
+- `/proc` 파일 3개 마운트로 호스트의 메모리·부하를 `scope: "host"`로 보고한다. 필요한 것은 이 파일들뿐이다. `/proc` 전체를 `/host/proc`에 마운트해도 동작한다(호스트 sysfs가 없으면 네트워크 카운터를 PID 1의 `/host/proc/1/net/dev`에서 읽을 수 있다). 없으면 메모리·부하는 `scope: "container"`(Docker는 `/proc/meminfo`를 가상화하지 않으므로 값 자체는 대개 호스트와 같다).
 - `chirp-data` 볼륨에 API 키(`api-key`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생긴다.
 - **API 키:** 컨테이너 로그에는 출력되지 않는다. 다음으로 확인한다.
   `docker exec chirp node apps/server/dist/cli.js key show`

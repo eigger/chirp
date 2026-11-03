@@ -59,7 +59,8 @@ describe("host metric cards", () => {
     await screen.findByTestId("mem-used");
     // memory, load and network are container scope
     expect(screen.getAllByTestId("scope-container")).toHaveLength(3);
-    expect(screen.getAllByText("container view — host mounts missing").length).toBe(3);
+    expect(screen.getAllByText("container view").length).toBe(3);
+    expect(screen.getAllByTestId("scope-container")[0]).toHaveAttribute("title", expect.stringContaining("container's own"));
     expect(screen.getByTestId("load-cpu")).toHaveTextContent("—");
     expect(screen.getByTestId("power-package")).toHaveTextContent("—");
   });
@@ -84,7 +85,7 @@ describe("host metric cards", () => {
     render(<App />);
     await screen.findByTestId("mem-used");
     expect(screen.getByRole("heading", { name: "메모리" })).toBeInTheDocument();
-    expect(screen.getAllByText("컨테이너 관점 — 호스트 마운트 없음").length).toBe(3);
+    expect(screen.getAllByText("컨테이너 관점").length).toBe(3);
   });
 });
 
@@ -98,6 +99,19 @@ describe("review fixes", () => {
     expect(within(row).getByText("Up")).toBeInTheDocument();
     expect(within(row).getByTestId("operstate-eno1")).toHaveTextContent("unknown");
     expect(screen.queryByTestId("operstate-enp3s0")).toBeNull();
+  });
+
+  it("shows a neutral badge when the state is unknown (/proc/net/dev fallback)", async () => {
+    const status = fixture("status.sample.json");
+    status.network.interfaces[1] = { ...status.network.interfaces[1], up: false, operState: null };
+    serve(status);
+    render(<App />);
+    const row = await screen.findByTestId("net-eno1");
+    const badge = within(row).getByTestId("state-unknown-eno1");
+    expect(badge).toHaveTextContent("—");
+    expect(badge).toHaveAttribute("title", "state unknown");
+    expect(within(row).queryByText("Down")).toBeNull();
+    expect(within(screen.getByTestId("net-enp3s0")).getByText("Down")).toBeInTheDocument();
   });
 
   it("drops the CPU usage history when the server stops sending load", async () => {

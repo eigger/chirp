@@ -18,7 +18,7 @@ export function ScopeNote({ scope }: { scope: MetricScope }) {
   const t = useT();
   if (scope !== "container") return null;
   return (
-    <span className="scope-note" data-testid="scope-container">
+    <span className="scope-note" data-testid="scope-container" title={t("scope.containerHint")}>
       {t("scope.container")}
     </span>
   );
@@ -139,7 +139,13 @@ export function NetworkTable({ network }: { network: Network }) {
                     <td>{i.name}</td>
                     <td>{t(`net.kind.${i.kind}`)}</td>
                     <td>
-                      <span className={`badge badge-${i.up ? "ok" : "unknown"}`}>{i.up ? t("net.up") : t("net.down")}</span>
+                      {i.operState === null ? (
+                        <span className="badge badge-unknown" title={t("net.unknownHint")} data-testid={`state-unknown-${i.id}`}>
+                          {t("net.unknown")}
+                        </span>
+                      ) : (
+                        <span className={`badge badge-${i.up ? "ok" : "unknown"}`}>{i.up ? t("net.up") : t("net.down")}</span>
+                      )}
                       {i.operState && i.operState !== "up" && i.operState !== "down" && (
                         <span className="muted small" data-testid={`operstate-${i.id}`}>
                           {" "}

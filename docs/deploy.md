@@ -48,7 +48,7 @@ lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=
 
 Re-run the script to add the mounts to an existing install or to switch modes (e.g. `CHIRP_HOST_MOUNTS=proc CHIRP_DISKS=<your current disks> bash -c "$(curl ...)" _ <CTID>`); the block is rewritten, never duplicated. **The disk selection of a re-run replaces the current one**: in the checklist keep every disk you want, and non-interactively pass the same `CHIRP_DISKS` as before (a run without a terminal defaults to `all`; `none` removes every passed-through disk).
 
-chirp reads `/host/proc` and `/host/sys` first and reports `scope: "host"`; without them it falls back to the container's own files and reports `scope: "container"`, and the dashboard shows "container view — host mounts missing". `optional` means a mount that fails never stops the container from starting. `/proc/net/dev` is deliberately not mounted: `/proc/net` follows the reader's network namespace.
+chirp reads `/host/proc` and `/host/sys` first and reports `scope: "host"`; without them it falls back to the container's own files and reports `scope: "container"`, and the dashboard shows "container view" (its tooltip explains that the values come from the container, not the host). `optional` means a mount that fails never stops the container from starting. `/proc/net/dev` is deliberately not mounted: `/proc/net` follows the reader's network namespace.
 
 **What `all` exposes.** The host's whole sysfs becomes readable at `/host/sys`. It is mounted read-only, `nosuid,nodev,noexec` and non-recursively (no cgroup, debugfs or other submounts), but the container's AppArmor profile denies writes to `/sys/**` *by path* and does not cover `/host/sys`. A root process in the container that can remount could therefore make it writable and change host network settings (MTU, bridge or bond parameters). That is not a new capability for a privileged container, whose root already has raw read-write access to the passed-through disks and is effectively host root, but if you do not want the host's sysfs in the container use `CHIRP_HOST_MOUNTS=proc`. It cannot be narrowed to `/sys/class/net`: its entries are symlinks into `/sys/devices/...`, and mounting `/sys/devices` would expose nearly all of sysfs anyway.
 
@@ -73,17 +73,22 @@ curl -s -H "Authorization: Bearer $KEY" http://<ip>/api/v1/status | jq '{m: .mem
 ```bash
 docker run -d --name chirp \
   --privileged -p 80:80 \
-  -v /sys:/sys:ro -v chirp-data:/var/lib/chirp \
+  -v /sys:/host/sys:ro -e CHIRP_SYSFS_ROOT=/host/sys \
   -v /proc/meminfo:/host/proc/meminfo:ro -v /proc/stat:/host/proc/stat:ro \
-  -v /proc/loadavg:/host/proc/loadavg:ro -v /sys:/host/sys:ro \
+  -v /proc/loadavg:/host/proc/loadavg:ro \
+  -v chirp-data:/var/lib/chirp \
   --device /dev/sda --device /dev/nvme0 \
   -e CHIRP_DEVICES=/dev/sda,/dev/nvme0 \
   ghcr.io/eigger/chirp:latest
 ```
 
 - Instead of `--privileged` you can combine `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` with `--device`.
-- Mount `/sys` read-only so the host's CPU sensors (hwmon) are visible; it also lets chirp derive stable disk IDs from sysfs without waking disks.
-- The three `/proc` file mounts give the host's memory and load with `scope: "host"` (only these files are needed; mounting all of `/proc` at `/host/proc` also works, and then the host's network counters are read from PID 1's `/host/proc/1/net/dev`). `-v /sys:/host/sys:ro` gives the host's network interfaces (a container's own `/sys/class/net` only shows its network namespace); it has the same caveat as `all` above (the whole host sysfs, read-only, visible to a privileged container). Leave it out if you do not need the network section, or run with `--network host`, where the container already sees the host's interfaces but chirp reports them as `scope: "container"` because it cannot tell. Without the `/proc` mounts memory/load are reported as `scope: "container"` (Docker does not virtualise `/proc/meminfo`, so the values are usually the host's anyway).
+- **One read-only host sysfs mount, `-v /sys:/host/sys:ro` with `CHIRP_SYSFS_ROOT=/host/sys`,** serves everything that comes from sysfs: CPU sensors (hwmon), RAPL power, stable disk IDs derived without waking disks, and the host's network interfaces with `scope: "host"`. A bind mount of the host's sysfs keeps the host's network namespace, so `/host/sys/class/net` lists `vmbr0`, `eno1`, ... Caveat: the whole host sysfs is visible to a privileged container; it is read-only, but a privileged container could remount it (the same trade-off as `CHIRP_HOST_MOUNTS=all` above).
+- **Other sysfs setups:**
+  - `-v /sys:/sys:ro` instead (older examples): sensors and disk IDs work, and `/sys/class/net` then also shows the host's interfaces, but chirp cannot tell that apart from a container's own `/sys` and reports the network section as `scope: "container"`. Use `/host/sys` to get the host label.
+  - `--network host`: the container's own `/sys/class/net` is the host's namespace; again host data labelled `scope: "container"` unless `/host/sys` is mounted.
+  - No host sysfs and the default bridge network: only the container's `eth0` (`scope: "container"`), and no host CPU sensors.
+- The three `/proc` file mounts give the host's memory and load with `scope: "host"`; only these files are needed. Mounting all of `/proc` at `/host/proc` also works (then the host's network counters can come from PID 1's `/host/proc/1/net/dev` when there is no host sysfs). Without them memory/load are reported as `scope: "container"` (Docker does not virtualise `/proc/meminfo`, so the values are usually the host's anyway).
 - The `chirp-data` volume stores the API key (`api-key`), `instance-id` and `disk-ids.json` (pinned disk IDs). Losing the volume changes the key and instance ID, so Home Assistant creates new entities.
 - **API key:** it is not printed to the container log. Read it with
   `docker exec chirp node apps/server/dist/cli.js key show`
