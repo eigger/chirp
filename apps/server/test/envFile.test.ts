@@ -20,8 +20,35 @@ describe("CLI env file", () => {
       CHIRP_DATA_DIR: "/srv/chirp-data",
       CHIRP_API_KEY_FILE: "/srv/chirp-data/key file",
       CHIRP_DISPLAY_NAME: "pve # one",
-      CHIRP_DEVICES: "/dev/sda",
+      CHIRP_DEVICES: "/dev/sda   # trailing comment", // systemd keeps it: no inline comments
       CHIRP_EMPTY: "",
+    });
+  });
+
+  it("follows systemd EnvironmentFile semantics", () => {
+    const text = [
+      "; semicolon comment",
+      "# hash comment",
+      "UNQUOTED=a b # not a comment",
+      'DQ="say \\"hi\\" \\\\ back\\nslash"',
+      "SQ='literal \\n and \\\\'",
+      'AFTER="value" # dropped',
+      "SPACED = padded value  ",
+      "CONT=one\\",
+      "  two",
+      'MULTI="line one',
+      'line two"',
+      "export EXPORTED=yes",
+    ].join("\n");
+    expect(parseEnvFile(text)).toEqual({
+      UNQUOTED: "a b # not a comment",
+      DQ: 'say "hi" \\ back\nslash',
+      SQ: "literal \\n and \\\\",
+      AFTER: "value",
+      SPACED: "padded value",
+      CONT: "onetwo",
+      MULTI: "line one\nline two",
+      EXPORTED: "yes",
     });
   });
 

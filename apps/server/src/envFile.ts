@@ -5,25 +5,61 @@ export const DEFAULT_ENV_FILE = "/etc/chirp/chirp.env";
 
 type Env = Record<string, string | undefined>;
 
+const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', $: "$", "`": "`" };
+
 /**
- * Parse simple `KEY=VALUE` lines (the subset systemd EnvironmentFile and
- * docker --env-file share): blank lines and `#` comments are skipped, an
- * optional `export ` prefix is dropped, and a value wrapped in single or double
- * quotes is unwrapped. Unquoted values lose surrounding whitespace and an
- * inline ` #comment`.
+ * Parse an env file the way systemd's EnvironmentFile= reads chirp.env:
+ * - blank lines and lines starting with `#` or `;` are comments;
+ * - `KEY=VALUE` with an optional `export ` prefix and spaces around `=`;
+ * - unquoted values are taken literally up to the end of the line (a `#`
+ *   inside them is part of the value) with surrounding whitespace removed, and
+ *   a trailing backslash continues the value on the next line;
+ * - "double quotes" process backslash escapes (`\"`, `\\`, `\n`, `\t`, ...),
+ *   'single quotes' are literal; both may span lines, and anything after the
+ *   closing quote (such as a `# comment`) is ignored.
  */
 export function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
     const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
     if (!m) continue;
-    let value = m[2];
-    const quoted = /^(["'])(.*)\1$/.exec(value);
-    if (quoted) value = quoted[2];
-    else value = value.replace(/\s+#.*$/, "").trim();
-    out[m[1]] = value;
+    let rest = m[2];
+    const quote = rest[0];
+    if (quote === '"' || quote === "'") {
+      let value = "";
+      let pos = 1;
+      let closed = false;
+      for (;;) {
+        while (pos < rest.length) {
+          const c = rest[pos];
+          if (c === quote) {
+            closed = true;
+            break;
+          }
+          if (quote === '"' && c === "\\" && pos + 1 < rest.length) {
+            const next = rest[pos + 1];
+            value += ESCAPES[next] ?? `\\${next}`;
+            pos += 2;
+            continue;
+          }
+          value += c;
+          pos += 1;
+        }
+        if (closed || i + 1 >= lines.length) break;
+        // The quoted value continues on the next line.
+        value += "\n";
+        rest = lines[++i];
+        pos = 0;
+      }
+      out[m[1]] = value;
+      continue;
+    }
+    let value = rest;
+    while (value.endsWith("\\") && i + 1 < lines.length) value = `${value.slice(0, -1)}${lines[++i].trim()}`;
+    out[m[1]] = value.trim();
   }
   return out;
 }
