@@ -1,7 +1,7 @@
 import type { Fan, Load, MetricScope, Memory, Network, Power, PowerSource, Voltage } from "@chirp/shared";
 import { readProc, type HostRoots } from "./hostPaths.js";
 import { uniqueIds } from "./ids.js";
-import { isShown, readInterfaces, type NetFilter } from "./netdev.js";
+import { NetMatcher, readInterfaces, type NetFilter } from "./netdev.js";
 import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones } from "./power.js";
 import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
 
@@ -33,16 +33,39 @@ const pct = (part: number, total: number) => Math.round((part / total) * 1000) /
  * is logged once until it recovers; the others are unaffected. Missing or
  * unreadable files are not errors (null, no log).
  */
+/** Samples closer together than this reuse the previous sample (no new rates from tiny intervals). */
+export const MIN_SAMPLE_INTERVAL_MS = 2000;
+
 export class HostMetrics {
+  private last: { at: number; sample: HostSample } | null = null;
+  private readonly matcher: NetMatcher;
   private prevStat: { scope: MetricScope; times: CpuTimes } | null = null;
-  private prevNet: { scope: MetricScope; at: number; counters: Map<string, { rx: number | null; tx: number | null }> } | null =
-    null;
+  private prevNet: {
+    scope: MetricScope;
+    at: number;
+    counters: Map<string, { rx: number | null; tx: number | null; ifindex: number | null }>;
+  } | null = null;
   private prevRapl: { at: number; energy: Map<string, number | null> } | null = null;
   private failing = new Map<string, string>();
 
-  constructor(private readonly opts: HostMetricsOptions) {}
+  constructor(private readonly opts: HostMetricsOptions) {
+    this.matcher = new NetMatcher(opts.netFilter);
+  }
 
+  /**
+   * `nowMs` must come from a monotonic clock (rates are deltas; a wall-clock
+   * step would distort them). A call within MIN_SAMPLE_INTERVAL_MS of the
+   * previous sample (e.g. POST /refresh right after a scheduled tick) returns
+   * that sample unchanged.
+   */
   sample(nowMs: number): HostSample {
+    if (this.last && nowMs >= this.last.at && nowMs - this.last.at < MIN_SAMPLE_INTERVAL_MS) return this.last.sample;
+    const sample = this.read(nowMs);
+    this.last = { at: nowMs, sample };
+    return sample;
+  }
+
+  private read(nowMs: number): HostSample {
     const extras = this.guard("hwmon", () => readHwmonExtras(this.opts.sysfsRoot), { power: [], fans: [], voltages: [] });
     return {
       memory: this.guard("memory", () => this.memory(), null),
@@ -129,24 +152,27 @@ export class HostMetrics {
   }
 
   private network(nowMs: number): Network | null {
-    const r = readInterfaces(this.opts.roots);
+    // Name-only pre-filter: hidden guest devices (tap*, veth*, fw*) are never read.
+    const r = readInterfaces(this.opts.roots, (name) => this.matcher.byName(name) !== false);
     if (!r) {
       this.prevNet = null;
       return null;
     }
     const prev = this.prevNet && this.prevNet.scope === r.scope ? this.prevNet : null;
     const dt = prev ? (nowMs - prev.at) / 1000 : 0;
-    const counters = new Map<string, { rx: number | null; tx: number | null }>();
-    const shown = r.value.filter((i) => isShown(i.name, i.kind, this.opts.netFilter, r.scope));
+    const counters = new Map<string, { rx: number | null; tx: number | null; ifindex: number | null }>();
+    const shown = r.value.filter((i) => this.matcher.isShown(i.name, i.kind, r.scope));
     const ids = uniqueIds(shown.map((i) => i.name), "if");
     const interfaces = shown.map((i, idx) => {
-      counters.set(i.name, { rx: i.rxBytes, tx: i.txBytes });
-      const p = prev?.counters.get(i.name);
+      counters.set(i.name, { rx: i.rxBytes, tx: i.txBytes, ifindex: i.ifindex });
+      const old = prev?.counters.get(i.name);
+      // A different ifindex means the interface was re-created: its counters restarted.
+      const p = old && old.ifindex === i.ifindex ? old : undefined;
       return {
         id: ids[idx],
         name: i.name,
         kind: i.kind,
-        up: i.operState === "up",
+        up: i.up,
         operState: i.operState,
         speedMbps: i.speedMbps,
         rxBytes: i.rxBytes,

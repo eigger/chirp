@@ -146,6 +146,22 @@ describe("collector + host metrics", () => {
     expect(snap.memory?.usedPercent).toBe(61);
   });
 
+  it("host rates use the monotonic clock, not the wall clock", () => {
+    const seen: number[] = [];
+    let mono = 1000;
+    const c = collector({
+      monotonicMs: () => mono,
+      sampleHost: (t) => {
+        seen.push(t);
+        return sample(1);
+      },
+    });
+    c.collectSensors();
+    mono = 11_000;
+    c.collectSensors();
+    expect(seen).toEqual([1000, 11_000]);
+  });
+
   it("a failing CPU sensor read does not stop host metrics", () => {
     const c = collector({
       readSensors: () => {

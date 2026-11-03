@@ -119,21 +119,16 @@ export function parseNetDev(text: string): Map<string, NetDevCounters> | null {
   return sawHeader || out.size ? out : null;
 }
 
-const U32 = 2 ** 32;
-
 /**
  * Rate between two cumulative counter samples (per second).
  * - first sample (no prev) or dt <= 0 -> null
- * - counter went down: a 32-bit wrap when the previous value was in the upper
- *   half of the 32-bit range (old drivers with 32-bit counters), otherwise a
- *   reset (interface re-created, driver reload) -> null for this sample.
+ * - counter went down -> a reset (interface re-created, driver reload) -> null
+ *   for this sample. /proc/net/dev and sysfs statistics are 64-bit on 64-bit
+ *   kernels, so a decrease is never treated as a wrap.
  */
 export function counterRate(prev: number | null | undefined, cur: number | null, dtSec: number): number | null {
   if (prev === null || prev === undefined || cur === null || !(dtSec > 0)) return null;
-  let delta = cur - prev;
-  if (delta < 0) {
-    if (prev < U32 && prev >= U32 / 2) delta = U32 - prev + cur;
-    else return null;
-  }
+  const delta = cur - prev;
+  if (delta < 0) return null;
   return Math.round((delta / dtSec) * 10) / 10;
 }

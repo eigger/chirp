@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { Fan, Load, Memory, Network, Power, Voltage } from "@chirp/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { detectContainer, readProc, type HostRoots } from "../src/hostPaths.js";
-import { HostMetrics } from "../src/hostMetrics.js";
-import { globToRegExp, isShown, kindFromName, readInterfaces } from "../src/netdev.js";
+import { HostMetrics, MIN_SAMPLE_INTERVAL_MS } from "../src/hostMetrics.js";
+import { defaultSysIo, globMatch, isShown, kindFromName, MAX_GLOBS, NetMatcher, readInterfaces, readSysNet, type SysIo } from "../src/netdev.js";
 import { energyWatts, readHwmonExtras, readRaplZones } from "../src/power.js";
 import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseNetDev, parseProcStat } from "../src/procfs.js";
 
@@ -109,10 +109,12 @@ describe("procfs parsers", () => {
     expect(m?.get("eth0")).toMatchObject({ rxBytes: 5000, rxErrors: 1, rxDropped: 2, txBytes: 7000, txErrors: 3, txDropped: 4 });
   });
 
-  it("counter rate: first sample, normal, 32-bit wrap, reset", () => {
+  it("counter rate: first sample, normal, any decrease is a reset (no 32-bit wrap guess)", () => {
     expect(counterRate(undefined, 100, 10)).toBeNull();
     expect(counterRate(100, 1100, 10)).toBe(100);
-    expect(counterRate(2 ** 32 - 1000, 1000, 10)).toBe(200);
+    // a 64-bit counter reset from the upper half of the 32-bit range is not a wrap
+    expect(counterRate(3_000_000_000, 1000, 10)).toBeNull();
+    expect(counterRate(2 ** 32 - 1000, 1000, 10)).toBeNull();
     expect(counterRate(5_000_000, 100, 10)).toBeNull();
     expect(counterRate(2 ** 40, 100, 10)).toBeNull();
     expect(counterRate(100, 200, 0)).toBeNull();
@@ -209,8 +211,8 @@ describe("network interfaces", () => {
     // container view: the container's own veth eth0 is shown
     expect(isShown("eth0", "virtual", { include: [], exclude: [] }, "container")).toBe(true);
     expect(isShown("lo", "virtual", { include: [], exclude: [] }, "container")).toBe(false);
-    expect(globToRegExp("vmbr0.1?").test("vmbr0.10")).toBe(true);
-    expect(globToRegExp("vmbr0.1?").test("vmbr0x10")).toBe(false);
+    expect(globMatch("vmbr0.1?", "vmbr0.10")).toBe(true);
+    expect(globMatch("vmbr0.1?", "vmbr0x10")).toBe(false);
   });
 
   it("falls back to the local sysfs, then /proc/net/dev", () => {
@@ -439,5 +441,114 @@ describe("HostMetrics end to end", () => {
     expect(a.network).toBeNull();
     expect(a.memory?.usedPercent).toBe(75);
     expect(warnings).toEqual(["host metrics: reading network failed: boom"]);
+  });
+});
+
+describe("review fixes", () => {
+  it("glob matching has no catastrophic backtracking; pattern count/length are capped", () => {
+    expect(globMatch("*", "")).toBe(true);
+    expect(globMatch("a*b*c", "axxbyyc")).toBe(true);
+    expect(globMatch("a*b*c", "axxbyy")).toBe(false);
+    expect(globMatch("**a", "bba")).toBe(true);
+    expect(globMatch("t?p*", "tap101i0")).toBe(true);
+    const evil = "*a".repeat(20) + "*b";
+    const start = performance.now();
+    expect(globMatch(evil, "a".repeat(40))).toBe(false);
+    expect(performance.now() - start).toBeLessThan(50);
+    const many = Array.from({ length: MAX_GLOBS + 5 }, (_, i) => `x${i}`);
+    const m = new NetMatcher({ include: [], exclude: [...many, "eno1"] });
+    // the 70th entry is beyond the cap and ignored
+    expect(m.byName("eno1")).toBeNull();
+    expect(new NetMatcher({ include: [], exclude: ["e".repeat(65) + "*"] }).byName("e".repeat(70))).toBeNull();
+  });
+
+  it("hidden interfaces are skipped by name before any file of theirs is read", () => {
+    const files: Record<string, string> = { ...nic("eno1", { device: "" }) };
+    for (let i = 0; i < 50; i++) Object.assign(files, nic(`tap${i}i0`), nic(`fwbr${i}i0`, { bridge: "" }));
+    const root = tree(files);
+    const touched: string[] = [];
+    const io: SysIo = {
+      readText: (p) => (touched.push(p), defaultSysIo.readText(p)),
+      exists: (p) => (touched.push(p), defaultSysIo.exists(p)),
+      readdir: defaultSysIo.readdir,
+    };
+    const m = new NetMatcher({ include: [], exclude: [] });
+    const list = readSysNet(root, (n) => m.byName(n) !== false, io);
+    expect(list?.map((i) => i.name)).toEqual(["eno1"]);
+    expect(touched.some((p) => /tap|fwbr/.test(p))).toBe(false);
+    expect(touched.every((p) => p.includes("/eno1/"))).toBe(true);
+  });
+
+  it("Open vSwitch bridge/bond without sysfs markers are refined by name (never to physical)", () => {
+    const root = tree({ ...nic("vmbr1"), ...nic("bond1"), ...nic("vmbr1.20"), ...nic("eth9") });
+    const list = readSysNet(root)!;
+    expect(list.map((i) => [i.name, i.kind])).toEqual([
+      ["bond1", "bond"],
+      ["eth9", "virtual"],
+      ["vmbr1", "bridge"],
+      ["vmbr1.20", "vlan"],
+    ]);
+    const m = new NetMatcher({ include: [], exclude: [] });
+    expect(list.filter((i) => m.isShown(i.name, i.kind, "host")).map((i) => i.name)).toEqual(["bond1", "vmbr1", "vmbr1.20"]);
+  });
+
+  it("up: operstate up, or unknown with carrier 1; speed only read while up", () => {
+    const root = tree({
+      ...nic("eno1", { device: "", operstate: "unknown\n", carrier: "1\n", speed: "1000\n" }),
+      ...nic("eno2", { device: "", operstate: "unknown\n", carrier: "0\n", speed: "1000\n" }),
+      ...nic("eno3", { device: "", operstate: "dormant\n", speed: "1000\n" }),
+    });
+    const list = readSysNet(root)!;
+    expect(list.map((i) => [i.name, i.up, i.operState, i.speedMbps])).toEqual([
+      ["eno1", true, "unknown", 1000],
+      ["eno2", false, "unknown", null],
+      ["eno3", false, "dormant", null],
+    ]);
+  });
+
+  it("an ifindex change resets the rate even when the counter grew", () => {
+    const host = tree(under("sys", nic("eno1", { device: "", ifindex: "2\n" }, { rx_bytes: 1000 })));
+    const hm = new HostMetrics({ roots: rootsFor(host, tree({})), sysfsRoot: tree({}), netFilter: { include: [], exclude: [] } });
+    hm.sample(0);
+    writeFileSync(join(host, "sys/class/net/eno1/statistics/rx_bytes"), "5000\n");
+    writeFileSync(join(host, "sys/class/net/eno1/ifindex"), "7\n");
+    expect(hm.sample(10_000).network!.interfaces[0].rxBytesPerSec).toBeNull();
+    writeFileSync(join(host, "sys/class/net/eno1/statistics/rx_bytes"), "6000\n");
+    expect(hm.sample(20_000).network!.interfaces[0].rxBytesPerSec).toBe(100);
+  });
+
+  it("samples closer than MIN_SAMPLE_INTERVAL_MS reuse the previous sample", () => {
+    const host = tree({ "proc/stat": STAT(100, 900), ...under("sys", nic("eno1", { device: "" }, { rx_bytes: 1000 })) });
+    const hm = new HostMetrics({ roots: rootsFor(host, tree({})), sysfsRoot: tree({}), netFilter: { include: [], exclude: [] } });
+    hm.sample(0);
+    writeFileSync(join(host, "proc/stat"), STAT(150, 950));
+    writeFileSync(join(host, "sys/class/net/eno1/statistics/rx_bytes"), "2000\n");
+    const b = hm.sample(10_000);
+    expect(b.load?.cpuUsagePercent).toBe(50);
+    writeFileSync(join(host, "proc/stat"), STAT(160, 950)); // 100 % busy over a tiny interval
+    const c = hm.sample(10_000 + MIN_SAMPLE_INTERVAL_MS - 1);
+    expect(c).toBe(b);
+    const d = hm.sample(10_000 + MIN_SAMPLE_INTERVAL_MS);
+    expect(d.load?.cpuUsagePercent).toBe(100);
+  });
+
+  it("does not read sensor inputs of a runtime-suspended device (ids stay)", () => {
+    const root = tree({
+      "class/hwmon/hwmon0/name": "amdgpu\n",
+      "class/hwmon/hwmon0/device/power/runtime_status": "suspended\n",
+      "class/hwmon/hwmon0/power1_average": "25000000\n",
+      "class/hwmon/hwmon0/fan1_input": "900\n",
+      "class/hwmon/hwmon0/in0_input": "800\n",
+      "class/hwmon/hwmon1/name": "nct6798\n",
+      "class/hwmon/hwmon1/device/power/runtime_status": "active\n",
+      "class/hwmon/hwmon1/fan1_input": "1200\n",
+    });
+    const x = readHwmonExtras(root);
+    expect(x.power).toEqual([{ chip: "amdgpu", label: "power1", watts: null }]);
+    expect(x.fans).toEqual([
+      { chip: "amdgpu", label: "fan1", rpm: null },
+      { chip: "nct6798", label: "fan1", rpm: 1200 },
+    ]);
+    expect(x.voltages).toEqual([{ chip: "amdgpu", label: "in0", volts: null }]);
   });
 });

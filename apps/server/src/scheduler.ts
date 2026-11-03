@@ -28,7 +28,9 @@ export interface CollectorDeps {
    * Memory/load/network/power/fans/voltages, sampled on the sensor interval.
    * Without it the snapshot carries none of these (optional) sections.
    */
-  sampleHost?: (nowMs: number) => HostSample;
+  sampleHost?: (monotonicMs: number) => HostSample;
+  /** Monotonic clock for host metric rates (default `performance.now()`); wall-clock steps must not distort rates. */
+  monotonicMs?: () => number;
 }
 
 export interface CollectorOptions {
@@ -53,7 +55,7 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
     warn,
   });
   return {
-    sampleHost: (nowMs) => host.sample(nowMs),
+    sampleHost: (monotonicMs) => host.sample(monotonicMs),
     readSensors: () => readSensors(config.sysfsRoot),
     readCpuModel: () => readCpuModel(),
     discoverDevices: () => discoverDevices(config),
@@ -147,7 +149,7 @@ export class Collector {
     if (!this.deps.sampleHost) return;
     try {
       const at = this.deps.now().getTime();
-      const next = this.deps.sampleHost(at);
+      const next = this.deps.sampleHost((this.deps.monotonicMs ?? (() => performance.now()))());
       const ids = new Set(next.network?.interfaces.map((i) => i.id) ?? []);
       for (const old of this.host?.network?.interfaces ?? []) {
         if (!ids.has(old.id)) this.history.forget(`network.${old.id}.`);

@@ -174,7 +174,7 @@ export const NetInterface = z.object({
   /** Kernel interface name (display). */
   name: z.string(),
   kind: NetInterfaceKind,
-  /** operstate is `up`. */
+  /** operstate is `up`, or `unknown` with carrier 1 (drivers that do not report operstate). */
   up: z.boolean(),
   /** Raw operstate (`up`, `down`, `unknown`, `dormant`, ...); null if unreadable. */
   operState: z.string().nullable(),
@@ -183,7 +183,10 @@ export const NetInterface = z.object({
   /** Cumulative counters since the interface was created. */
   rxBytes: num,
   txBytes: num,
-  /** Rate between the last two samples; null on the first sample and after a counter reset. */
+  /**
+   * Rate between the last two samples; null on the first sample and after a
+   * counter reset (a counter that went down, or the interface was re-created).
+   */
   rxBytesPerSec: num,
   txBytesPerSec: num,
   rxErrors: num,

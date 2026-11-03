@@ -101,6 +101,12 @@ interface ChipDir {
   name: string;
   /** Sort key that survives hwmonN renumbering: the device link target. */
   key: string;
+  /**
+   * The parent device is runtime-suspended (e.g. an idle discrete GPU). Its
+   * sensor inputs are not read (that could wake it); entries are listed with
+   * null values so IDs stay stable.
+   */
+  suspended: boolean;
 }
 
 function hwmonChips(sysRoot: string): ChipDir[] {
@@ -116,7 +122,8 @@ function hwmonChips(sysRoot: string): ChipDir[] {
     } catch {
       /* no device link (virtual chip): keep the directory name */
     }
-    chips.push({ path, name, key });
+    const suspended = readText(join(path, "device", "power", "runtime_status"))?.trim() === "suspended";
+    chips.push({ path, name, key, suspended });
   }
   return chips.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key) || a.path.localeCompare(b.path));
 }
@@ -137,18 +144,19 @@ export function readHwmonExtras(sysRoot: string): HwmonExtras {
   const out: HwmonExtras = { power: [], fans: [], voltages: [] };
   for (const chip of hwmonChips(sysRoot)) {
     const files = listDir(chip.path);
+    const value = (file: string) => (chip.suspended ? null : readNum(join(chip.path, file)));
     const label = (prefix: string, i: number) => readText(join(chip.path, `${prefix}${i}_label`))?.trim() || `${prefix}${i}`;
 
     for (const i of indexed(files, /^power(\d+)_(?:input|average)$/)) {
-      const uw = readNum(join(chip.path, `power${i}_input`)) ?? readNum(join(chip.path, `power${i}_average`));
+      const uw = value(`power${i}_input`) ?? value(`power${i}_average`);
       out.power.push({ chip: chip.name, label: label("power", i), watts: uw === null ? null : round(uw / 1e6, 1) });
     }
     for (const i of indexed(files, /^fan(\d+)_input$/)) {
-      const rpm = readNum(join(chip.path, `fan${i}_input`));
+      const rpm = value(`fan${i}_input`);
       out.fans.push({ chip: chip.name, label: label("fan", i), rpm: rpm === null ? null : Math.round(rpm) });
     }
     for (const i of indexed(files, /^in(\d+)_input$/)) {
-      const mv = readNum(join(chip.path, `in${i}_input`));
+      const mv = value(`in${i}_input`);
       out.voltages.push({ chip: chip.name, label: label("in", i), volts: mv === null ? null : round(mv / 1000, 3) });
     }
   }
