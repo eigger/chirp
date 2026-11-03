@@ -57,7 +57,14 @@ export const NvmeInfo = z.object({
 });
 
 export const Disk = z.object({
-  /** Stable slug (wwn, else model+serial). Never `/dev/sdX`. */
+  /**
+   * Stable slug: `wwn_<hex>`, else a model+serial slug. Never `/dev/sdX`.
+   * Once assigned it does not change (it is derived without waking the disk
+   * and pinned on the server). The only exception is a provisional
+   * `dev_<name>` ID with `lastReadAt === null`: a disk that has never been read
+   * and whose identity could not be derived; it is replaced on the first read.
+   * A `dev_` ID with a non-null `lastReadAt` is permanent (the disk reports no identity).
+   */
   id: z.string().regex(/^[a-z0-9_]+$/),
   devicePath: z.string(),
   /** Display only; may change across reboots. */
@@ -142,12 +149,25 @@ export const HistoryResponse = z.object({
 
 /** POST /api/v1/refresh -> 202 */
 export const RefreshResponse = z.object({ queued: z.literal(true) });
-/** 429 */
+
+/** Every error body is `{"error": <code>}` (429 adds `retryAfter`). */
+export const ErrorCode = z.enum(["bad_request", "unauthorized", "not_found", "cooldown", "internal_error"]);
+export type ErrorCode = z.infer<typeof ErrorCode>;
+export const ErrorResponse = z.object({ error: ErrorCode });
+export type ErrorResponse = z.infer<typeof ErrorResponse>;
+
+/** 400: bad query parameters, malformed URL encoding, unparsable request body. */
+export const BadRequestResponse = z.object({ error: z.literal("bad_request") });
+/** 401: missing or wrong API key (`WWW-Authenticate: Bearer`). */
+export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") });
+/** 404: unknown disk id, unknown history metric, unknown /api or /health path. */
+export const NotFoundResponse = z.object({ error: z.literal("not_found") });
+/** 429: POST /refresh within the cooldown (`Retry-After` header carries the same seconds). */
 export const CooldownResponse = z.object({
   error: z.literal("cooldown"),
   retryAfter: z.number(),
 });
-/** 401 */
-export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") });
+/** 5xx: unexpected server error (details are only logged). */
+export const InternalErrorResponse = z.object({ error: z.literal("internal_error") });
 
 export const API_KEY_PREFIX = "chp_";

@@ -5,8 +5,8 @@ set -euo pipefail
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Chassis derived from https://github.com/eigger/kibble
 #
-# 컨테이너 안에서 실행되는 chirp 설치 스크립트.
-# 앱 본체(릴리스 tarball)는 update.sh 가 내려받아 설치한다 (설치와 업데이트가 같은 경로).
+# chirp install script, run inside the container.
+# The app itself (release tarball) is installed by update.sh (install and update share one path).
 
 export DEBIAN_FRONTEND=noninteractive
 APT_QUIET_FLAGS=(-y -qq -o=Dpkg::Use-Pty=0)
@@ -80,14 +80,14 @@ CHIRP_HOST=0.0.0.0
 CHIRP_DATA_DIR=/var/lib/chirp
 CHIRP_WEB_DIR=/opt/chirp/current/apps/web/dist
 
-# passthrough 된 디스크 (쉼표 구분 /dev/disk/by-id/... 경로).
-# 호스트에서 chirp-passthrough.sh 가 자동으로 채운다.
+# Passed-through disks (comma-separated /dev/disk/by-id/... paths).
+# Filled in automatically by chirp-passthrough.sh on the host.
 CHIRP_DEVICES=
 
-# USB/HBA 뒤 디스크처럼 자동 판별이 안 되는 경우 smartctl -d 타입을 지정한다.
-# 예: /dev/disk/by-id/usb-X=sat,/dev/disk/by-id/scsi-Y=megaraid,0
+# smartctl -d type for disks that are not auto-detected (USB bridges, HBAs).
+# Example: /dev/disk/by-id/usb-X=sat,/dev/disk/by-id/scsi-Y=megaraid,0
 # CHIRP_DEVICE_TYPES=
-# 그 밖의 옵션은 README / .env.example 을 참고해 주석을 해제한다.
+# For other options see README / .env.example and uncomment as needed.
 # CHIRP_SMART_INTERVAL=300
 # CHIRP_SENSOR_INTERVAL=10
 EOF2
@@ -98,7 +98,7 @@ systemctl daemon-reload
 systemctl enable -q chirp.service
 
 echo "[chirp-install] Installing latest release"
-# 첫 설치도 update.sh 경로를 탄다: tarball + sha256 검증 → 심볼릭 링크 → 서비스 시작 → /health 확인.
+# The first install also goes through update.sh: tarball + sha256 check -> symlink -> start service -> /health check.
 CHIRP_REF="$CHIRP_REF" CHIRP_REPO="$CHIRP_REPO" /usr/bin/update --force
 
 echo "[chirp-install] Setting up console auto-login for root"

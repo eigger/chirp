@@ -10,6 +10,8 @@ export interface TempWarn {
 
 export interface Config {
   port: number;
+  /** Print a newly generated API key to the log (CHIRP_PRINT_KEY, opt-in). */
+  printKey: boolean;
   host: string;
   apiKey: string | null;
   apiKeyFile: string;
@@ -18,6 +20,10 @@ export interface Config {
   deviceTypes: Record<string, string>;
   smartIntervalSec: number;
   sensorIntervalSec: number;
+  /** Device discovery when CHIRP_DEVICES is empty: `--scan` (never opens devices) or `--scan-open`. */
+  scanMode: "scan" | "scan-open";
+  /** Re-discover devices this often (seconds); also at start and on POST /refresh. */
+  rescanIntervalSec: number;
   smartctl: string;
   sysfsRoot: string;
   tempWarn: TempWarn;
@@ -30,6 +36,47 @@ export interface Config {
 }
 
 type Env = Record<string, string | undefined>;
+
+/** Minimum length of a CHIRP_API_KEY supplied by the operator. */
+export const MIN_API_KEY_LENGTH = 16;
+
+/** Invalid configuration: the server refuses to start with a clear message. */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
+
+function port(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 80;
+  const v = value.trim();
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new ConfigError(`CHIRP_PORT must be an integer between 1 and 65535 (got "${value}")`);
+  }
+  return n;
+}
+
+function apiKey(value: string | undefined): string | null {
+  const v = value?.trim();
+  if (!v) return null;
+  if (/\s/.test(v)) throw new ConfigError("CHIRP_API_KEY must not contain whitespace");
+  if (v.length < MIN_API_KEY_LENGTH) {
+    throw new ConfigError(
+      `CHIRP_API_KEY is too short (${v.length} characters, minimum ${MIN_API_KEY_LENGTH}); ` +
+        "unset it to use a generated key, or generate one with: node apps/server/dist/cli.js key rotate",
+    );
+  }
+  return v;
+}
+
+function scanMode(value: string | undefined): Config["scanMode"] {
+  const v = (value ?? "").trim().toLowerCase();
+  if (v === "" || v === "scan") return "scan";
+  if (v === "scan-open") return "scan-open";
+  throw new ConfigError(`CHIRP_SCAN_MODE must be "scan" or "scan-open" (got "${value}")`);
+}
 
 function num(value: string | undefined, fallback: number, min = 0): number {
   if (value === undefined || value.trim() === "") return fallback;
@@ -103,15 +150,18 @@ export function loadConfig(env: Env = process.env): Config {
   }
   const dataDir = env.CHIRP_DATA_DIR?.trim() || "/var/lib/chirp";
   return {
-    port: num(env.CHIRP_PORT, 80, 0),
+    port: port(env.CHIRP_PORT),
+    printKey: bool(env.CHIRP_PRINT_KEY),
     host: env.CHIRP_HOST?.trim() || "0.0.0.0",
-    apiKey: env.CHIRP_API_KEY?.trim() || null,
+    apiKey: apiKey(env.CHIRP_API_KEY),
     apiKeyFile: env.CHIRP_API_KEY_FILE?.trim() || resolve(dataDir, "api-key"),
     dataDir,
     devices,
     deviceTypes,
     smartIntervalSec: num(env.CHIRP_SMART_INTERVAL, 300, 1),
     sensorIntervalSec: num(env.CHIRP_SENSOR_INTERVAL, 10, 1),
+    scanMode: scanMode(env.CHIRP_SCAN_MODE),
+    rescanIntervalSec: num(env.CHIRP_RESCAN_INTERVAL, 3600, 60),
     smartctl: env.CHIRP_SMARTCTL?.trim() || "smartctl",
     sysfsRoot: env.CHIRP_SYSFS_ROOT?.trim() || "/sys",
     tempWarn: {

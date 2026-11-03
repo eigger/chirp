@@ -1,10 +1,18 @@
 import type { Disk } from "@chirp/shared";
+import type { TempWarn } from "./config.js";
 
 type DiskHealth = Disk["health"];
 type HealthReason = DiskHealth["reasons"][number];
-import type { TempWarn } from "./config.js";
 
 export const DEFAULT_TEMP_WARN: TempWarn = { hdd: 55, ssd: 70, nvme: 75 };
+
+/**
+ * NVMe SMART/Health log "Critical Warning" bits that mean failing:
+ *  bit0 available spare below threshold, bit2 NVM subsystem reliability degraded,
+ *  bit3 media placed in read-only mode, bit4 volatile memory backup device failed.
+ * bit1 (temperature) is covered by temperature_high; bit5 (PMR read-only) is ignored.
+ */
+export const NVME_CRITICAL_FAILING_BITS = 0b11101;
 
 /** percentage_used at or above this is a warning. */
 export const WEAR_WARN_PERCENT = 90;
@@ -13,7 +21,7 @@ type HealthInput = Pick<Disk, "kind" | "temperature" | "smartPassed" | "ata" | "
 
 /**
  * The single place where disk health is decided.
- *  failing: SMART self-assessment failed, NVMe critical_warning bit0/2/3, spare below threshold
+ *  failing: SMART self-assessment failed, NVMe critical_warning bit0/2/3/4, spare below threshold
  *  warning: reallocated/pending/uncorrectable > 0, media errors > 0, wear >= 90 %, temperature >= limit
  *  unknown: the disk could not be read
  */
@@ -31,7 +39,7 @@ export function computeHealth(disk: HealthInput, tempWarn: TempWarn = DEFAULT_TE
   const nvme = disk.nvme;
   if (nvme) {
     const cw = nvme.criticalWarning;
-    if (cw !== null && (cw & 0b1101) !== 0) failing.push({ code: "nvme_critical_warning", value: cw });
+    if (cw !== null && (cw & NVME_CRITICAL_FAILING_BITS) !== 0) failing.push({ code: "nvme_critical_warning", value: cw });
     if (
       nvme.availableSpare !== null &&
       nvme.availableSpareThreshold !== null &&

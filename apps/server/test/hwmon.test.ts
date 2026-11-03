@@ -9,11 +9,11 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
-function fakeSys(chips: Record<string, Record<string, string>>): string {
+function fakeSys(chips: Record<string, Record<string, string>> | [string, Record<string, string>][]): string {
   const root = mkdtempSync(join(tmpdir(), "chirp-sys-"));
   roots.push(root);
   let i = 0;
-  for (const [name, files] of Object.entries(chips)) {
+  for (const [name, files] of Array.isArray(chips) ? chips : Object.entries(chips)) {
     const dir = join(root, "class", "hwmon", `hwmon${i++}`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "name"), `${name}\n`);
@@ -91,5 +91,49 @@ describe("readSensors", () => {
     expect(cpu.packageTemp).toBeNull();
     expect(cpu.source).toBeNull();
     expect(sensors).toEqual([]);
+  });
+
+  it("multi-socket coretemp: hottest package, all cores prefixed by package, lowest limits", () => {
+    const root = fakeSys([
+      // hwmon order does not have to match socket order
+      [
+        "coretemp",
+        {
+          temp1_label: "Package id 1",
+          temp1_input: "61000",
+          temp1_max: "82000",
+          temp1_crit: "102000",
+          temp2_label: "Core 0",
+          temp2_input: "64000",
+        },
+      ],
+      [
+        "coretemp",
+        {
+          temp1_label: "Package id 0",
+          temp1_input: "55000",
+          temp1_max: "80000",
+          temp1_crit: "100000",
+          temp2_label: "Core 0",
+          temp2_input: "50000",
+          temp3_label: "Core 1",
+          temp3_input: "52000",
+        },
+      ],
+      ["nvme", { temp1_label: "Composite", temp1_input: "40000" }],
+    ]);
+    const { cpu, sensors } = readSensors(root);
+    expect(cpu.source).toBe("coretemp");
+    expect(cpu.packageTemp).toBe(61);
+    expect(cpu.maxTemp).toBe(64);
+    expect(cpu.highTemp).toBe(80);
+    expect(cpu.critTemp).toBe(100);
+    expect(cpu.cores).toEqual([
+      { label: "Package 0 Core 0", temp: 50 },
+      { label: "Package 0 Core 1", temp: 52 },
+      { label: "Package 1 Core 0", temp: 64 },
+    ]);
+    // neither coretemp chip leaks into the generic sensor list
+    expect(sensors).toEqual([{ chip: "nvme", label: "Composite", temp: 40 }]);
   });
 });

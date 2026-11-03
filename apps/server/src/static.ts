@@ -29,12 +29,13 @@ function isFile(path: string): boolean {
 
 /**
  * Serve the dashboard (`/`, `/assets/*`, other root files) with an SPA fallback.
- * No-op when the directory has no index.html. Never touches /api or /health.
+ * Without an index.html only the JSON 404 handler is installed. /api and
+ * /health paths always get `{"error":"not_found"}`.
  */
 export function registerStatic(app: FastifyInstance, webDir: string): boolean {
   const root = normalize(webDir);
   const indexPath = join(root, "index.html");
-  if (!existsSync(indexPath)) return false;
+  const hasDashboard = existsSync(indexPath);
 
   const send = (reply: import("fastify").FastifyReply, file: string, immutable: boolean) => {
     const type = TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
@@ -55,7 +56,7 @@ export function registerStatic(app: FastifyInstance, webDir: string): boolean {
     }
     if (path.includes("\0")) return reply.code(404).send({ error: "not_found" });
     const isApi = path === "/health" || path.startsWith("/api/");
-    if ((request.method !== "GET" && request.method !== "HEAD") || isApi) {
+    if ((request.method !== "GET" && request.method !== "HEAD") || isApi || !hasDashboard) {
       return reply.code(404).send({ error: "not_found" });
     }
     const target = normalize(join(root, path));
@@ -64,5 +65,5 @@ export function registerStatic(app: FastifyInstance, webDir: string): boolean {
     if (path.startsWith("/assets/")) return reply.code(404).send({ error: "not_found" });
     return send(reply, indexPath, false);
   });
-  return true;
+  return hasDashboard;
 }

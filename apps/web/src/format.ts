@@ -2,7 +2,7 @@ import type { Disk, HealthStatus } from "@chirp/shared";
 
 const SEVERITY: Record<HealthStatus, number> = { ok: 0, unknown: 1, warning: 2, failing: 3 };
 
-/** 최악 디스크 기준 전체 상태. 디스크가 없으면 unknown. */
+/** Overall status = the worst disk; unknown when there are no disks. */
 export function overallStatus(disks: Pick<Disk, "health">[]): HealthStatus {
   if (disks.length === 0) return "unknown";
   return disks.reduce<HealthStatus>(
@@ -11,7 +11,7 @@ export function overallStatus(disks: Pick<Disk, "health">[]): HealthStatus {
   );
 }
 
-/** 시리얼 앞 2자리 + **** */
+/** First two serial characters + "****". */
 export function maskSerial(serial: string | null): string {
   if (!serial) return "—";
   return serial.slice(0, 2) + "****";

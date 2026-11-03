@@ -1,6 +1,8 @@
 import { hostname, release, uptime } from "node:os";
 import { API_VERSION, type Disk, type StatusSnapshot } from "@chirp/shared";
+import { join } from "node:path";
 import type { Config } from "./config.js";
+import { DiskIdentity, provisionalId } from "./diskIdentity.js";
 import { History } from "./history.js";
 import { readCpuModel, readSensors, type SensorReadout } from "./hwmon.js";
 import {
@@ -18,6 +20,8 @@ export interface CollectorDeps {
   discoverDevices: () => Promise<DiscoveredDevice[]>;
   readDisk: (device: DiscoveredDevice) => Promise<DiskReading>;
   now: () => Date;
+  /** Stable IDs for disks that have not been read yet. Defaults to `DiskIdentity.none()`. */
+  identity?: DiskIdentity;
 }
 
 export interface CollectorOptions {
@@ -26,16 +30,26 @@ export interface CollectorOptions {
   displayName: string;
   sensorIntervalSec: number;
   smartIntervalSec: number;
+  /**
+   * How often the device list is re-discovered (seconds). Discovery also runs
+   * at start and on `refresh()`. With CHIRP_DEVICES set it is a no-op anyway.
+   */
+  rescanIntervalSec?: number;
   concurrency?: number;
 }
 
-export function defaultDeps(config: Config): CollectorDeps {
+export function defaultDeps(config: Config, warn: (msg: string) => void = () => {}): CollectorDeps {
   return {
     readSensors: () => readSensors(config.sysfsRoot),
     readCpuModel: () => readCpuModel(),
     discoverDevices: () => discoverDevices(config),
     readDisk: (d) => readDisk(config, d.path, d.type),
     now: () => new Date(),
+    identity: new DiskIdentity({
+      cacheFile: join(config.dataDir, "disk-ids.json"),
+      sysfsRoot: config.sysfsRoot,
+      warn,
+    }),
   };
 }
 
@@ -68,12 +82,17 @@ export class Collector {
   private sensorsAt: string | null = null;
   private timers: NodeJS.Timeout[] = [];
   private smartRunning: Promise<void> | null = null;
+  private devices: DiscoveredDevice[] | null = null;
+  private devicesAt = 0;
+  private rescanRequested = true;
+  private readonly identity: DiskIdentity;
 
   constructor(
     private readonly deps: CollectorDeps,
     private readonly opts: CollectorOptions,
   ) {
     this.cpuModel = deps.readCpuModel();
+    this.identity = deps.identity ?? DiskIdentity.none();
   }
 
   start(): void {
@@ -89,8 +108,9 @@ export class Collector {
     this.timers = [];
   }
 
-  /** Re-read everything now (does not wait). Concurrent runs are coalesced. */
+  /** Re-read everything now, re-discovering devices first (does not wait). Concurrent runs are coalesced. */
   refresh(): void {
+    this.rescanRequested = true;
     this.collectSensors();
     void this.collectSmart();
   }
@@ -113,13 +133,28 @@ export class Collector {
     return this.smartRunning;
   }
 
-  private async runSmart(): Promise<void> {
-    let devices: DiscoveredDevice[] = [];
+  /**
+   * The device list is cached: discovery (a smartctl scan when CHIRP_DEVICES
+   * is empty) runs at start, on refresh() and every rescanIntervalSec — not on
+   * every SMART cycle.
+   */
+  private async currentDevices(): Promise<DiscoveredDevice[] | null> {
+    const now = this.deps.now().getTime();
+    const maxAge = (this.opts.rescanIntervalSec ?? 3600) * 1000;
+    if (this.devices && !this.rescanRequested && now - this.devicesAt < maxAge) return this.devices;
     try {
-      devices = await this.deps.discoverDevices();
+      this.devices = await this.deps.discoverDevices();
+      this.devicesAt = now;
+      this.rescanRequested = false;
     } catch {
-      return;
+      /* keep the previous list (if any) and retry next cycle */
     }
+    return this.devices;
+  }
+
+  private async runSmart(): Promise<void> {
+    const devices = await this.currentDevices();
+    if (!devices) return;
     const seen = new Set(devices.map((d) => d.path));
     for (const [path, reading] of this.disks) {
       if (!seen.has(path)) {
@@ -142,10 +177,23 @@ export class Collector {
     const now = this.deps.now();
     let result: DiskReading;
     try {
-      result = applyStandby(prev, await this.deps.readDisk(device));
+      const next = await this.deps.readDisk(device);
+      result = applyStandby(prev, next);
+      if (!next.disk.standby) {
+        // A real read: its ID is authoritative unless one was already pinned for this disk.
+        result = { ...result, disk: { ...result.disk, id: this.identity.confirm(device.path, next.disk.id) } };
+      }
     } catch (err) {
       const code = err instanceof SmartctlError ? err.code : "parse_error";
       result = unreadHealth(prev, device.path, code, now);
+    }
+    if ((result.disk.standby || result.disk.error !== null) && result.disk.lastReadAt === null) {
+      // Never read yet (standby/unreadable since start): pinned or derived ID, never /dev/sdX.
+      result = { ...result, disk: { ...result.disk, id: this.identity.known(device.path) ?? provisionalId(device.path) } };
+    }
+    if (prev && prev.disk.id !== result.disk.id) {
+      // Only a provisional dev_ ID can be replaced; it never had history, but drop it to be safe.
+      this.history.forget(`disk.${prev.disk.id}.`);
     }
     this.disks.set(device.path, result);
     const d = result.disk;

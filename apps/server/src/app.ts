@@ -38,6 +38,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     await app.register(cors, { origin: config.corsOrigins, allowedHeaders: ["Authorization", "Content-Type"] });
   }
 
+  // Every error body follows the shared ErrorResponse schema: {"error": <code>}.
+  app.setErrorHandler((error: { statusCode?: number }, request, reply) => {
+    const status = typeof error.statusCode === "number" && error.statusCode >= 400 ? error.statusCode : 500;
+    if (status >= 500) {
+      request.log.error(error);
+      return reply.code(status).send({ error: "internal_error" });
+    }
+    return reply.code(status === 401 ? 401 : status === 404 ? 404 : 400).send({
+      error: status === 401 ? "unauthorized" : status === 404 ? "not_found" : "bad_request",
+    });
+  });
+
   app.get("/health", async () => ({ status: "ok" as const, version: VERSION }));
 
   await app.register(

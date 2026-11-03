@@ -2,7 +2,10 @@ import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import type { Disk } from "@chirp/shared";
 import { isSafeDevicePath, isSafeDeviceType, type Config, type TempWarn } from "./config.js";
+import { provisionalId, slug } from "./diskIdentity.js";
 import { computeHealth, DEFAULT_TEMP_WARN } from "./health.js";
+
+export { slug };
 
 type Json = Record<string, any>;
 
@@ -20,13 +23,6 @@ export interface ParseOptions {
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
 
-export function slug(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
 function wwnHex(wwn: Json | undefined): string | null {
   if (!wwn || num(wwn.naa) === null || num(wwn.oui) === null || num(wwn.id) === null) return null;
   const hex =
@@ -42,7 +38,7 @@ export function diskId(json: Json, devicePath: string): string {
   const model = str(json.model_name);
   const serial = str(json.serial_number);
   if (model || serial) return slug(`${model ?? ""}_${serial ?? ""}`) || "disk";
-  return `dev_${slug(basename(devicePath)) || "unknown"}`;
+  return provisionalId(devicePath);
 }
 
 function ataAttr(table: Json[], id: number): Json | undefined {
@@ -65,7 +61,7 @@ function baseDisk(devicePath: string, json: Json | null, now: Date): Disk {
   const j = json ?? {};
   const name = str(j.device?.name) ?? devicePath;
   return {
-    id: json ? diskId(j, devicePath) : `dev_${slug(basename(devicePath)) || "unknown"}`,
+    id: json ? diskId(j, devicePath) : provisionalId(devicePath),
     devicePath,
     name: basename(name),
     protocol: "ata",
@@ -189,18 +185,43 @@ export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
 }
 
 export class SmartctlError extends Error {
-  constructor(readonly code: NonNullable<Disk["error"]>) {
-    super(code);
+  constructor(
+    readonly code: NonNullable<Disk["error"]>,
+    readonly detail?: string,
+  ) {
+    super(detail ? `${code}: ${detail}` : code);
   }
 }
 
-function run(bin: string, args: string[], timeoutMs: number): Promise<{ stdout: string; timedOut: boolean; spawnFailed: boolean }> {
+/** execFile's error code when stdout/stderr exceed maxBuffer (the child is killed too). */
+const MAX_BUFFER_CODE = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+export const SMARTCTL_MAX_BUFFER = 16 * 1024 * 1024;
+
+export interface RunResult {
+  stdout: string;
+  /** Killed because it ran past the timeout. */
+  timedOut: boolean;
+  /** Killed because its output exceeded maxBuffer (not a timeout). */
+  overflow: boolean;
+  spawnFailed: boolean;
+}
+
+/** Classify an execFile callback error. Exported for tests. */
+export function classifyExecError(err: unknown): Omit<RunResult, "stdout"> {
+  const e = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
+  const overflow = !!e && e.code === MAX_BUFFER_CODE;
+  return {
+    overflow,
+    // execFile sets killed=true for both timeout and maxBuffer kills; only the former is a timeout.
+    timedOut: !!e && !overflow && e.killed === true,
+    spawnFailed: !!e && (e.code === "ENOENT" || e.code === "EACCES"),
+  };
+}
+
+function run(bin: string, args: string[], timeoutMs: number, maxBuffer = SMARTCTL_MAX_BUFFER): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" }, (err, stdout) => {
-      const e = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
-      const timedOut = !!e && e.killed === true;
-      const spawnFailed = !!e && (e.code === "ENOENT" || e.code === "EACCES");
-      resolve({ stdout: stdout ?? "", timedOut, spawnFailed });
+    execFile(bin, args, { timeout: timeoutMs, maxBuffer, encoding: "utf8" }, (err, stdout) => {
+      resolve({ stdout: stdout ?? "", ...classifyExecError(err) });
     });
   });
 }
@@ -210,6 +231,7 @@ export async function readDisk(
   devicePath: string,
   type?: string,
   timeoutMs = 20_000,
+  maxBuffer = SMARTCTL_MAX_BUFFER,
 ): Promise<DiskReading> {
   const t = type ?? config.deviceTypes[devicePath];
   // Defence in depth: never hand smartctl something it could parse as an option.
@@ -218,8 +240,10 @@ export async function readDisk(
   }
   const args = ["-j", "-a", "-n", "standby", ...(t ? ["-d", t] : []), devicePath];
   // smartctl exits non-zero (a bit mask) for many benign reasons, so only stdout matters.
-  const { stdout, timedOut, spawnFailed } = await run(config.smartctl, args, timeoutMs);
+  const { stdout, timedOut, overflow, spawnFailed } = await run(config.smartctl, args, timeoutMs, maxBuffer);
   if (timedOut) throw new SmartctlError("timeout");
+  // Truncated output is unusable JSON: report it as a parse error, with the real cause as detail.
+  if (overflow) throw new SmartctlError("parse_error", `smartctl output exceeded ${maxBuffer} bytes`);
   if (spawnFailed) throw new SmartctlError("open_failed");
   let json: unknown;
   try {
@@ -240,25 +264,41 @@ export interface DiscoveredDevice {
   type?: string;
 }
 
-export async function discoverDevices(
-  config: Pick<Config, "smartctl" | "devices" | "deviceTypes">,
-): Promise<DiscoveredDevice[]> {
-  if (config.devices.length) {
-    return config.devices.map((path) => ({ path, type: config.deviceTypes[path] }));
-  }
-  const { stdout } = await run(config.smartctl, ["--scan-open", "-j"], 20_000);
+export type ScanMode = "scan" | "scan-open";
+
+/**
+ * Parse `smartctl --scan[-open] -j`. Plain `--scan` only globs device names
+ * and never opens them, but reports a generic `-d scsi` for every /dev/sdX;
+ * passing that on would stop smartctl from auto-detecting SAT (ATA SMART
+ * attributes), so generic types are dropped and smartctl auto-detects per read.
+ */
+export function parseScan(stdout: string, deviceTypes: Record<string, string>, mode: ScanMode): DiscoveredDevice[] {
   try {
     const json = JSON.parse(stdout) as Json;
     const devices: Json[] = Array.isArray(json.devices) ? json.devices : [];
     return devices
       .filter((d) => typeof d.name === "string" && isSafeDevicePath(d.name))
-      .map((d) => ({
-        path: d.name as string,
-        type:
-          config.deviceTypes[d.name] ??
-          (typeof d.type === "string" && isSafeDeviceType(d.type) ? d.type : undefined),
-      }));
+      .map((d) => {
+        const scanned = typeof d.type === "string" && isSafeDeviceType(d.type) ? d.type : undefined;
+        const keep = scanned !== undefined && !(mode === "scan" && (scanned === "scsi" || scanned === "ata"));
+        return { path: d.name as string, type: deviceTypes[d.name] ?? (keep ? scanned : undefined) };
+      });
   } catch {
     return [];
   }
+}
+
+/**
+ * List devices: CHIRP_DEVICES verbatim, else a smartctl scan. Callers cache the
+ * result (see `Collector`); scanning is not part of every SMART cycle.
+ */
+export async function discoverDevices(
+  config: Pick<Config, "smartctl" | "devices" | "deviceTypes"> & { scanMode?: ScanMode },
+): Promise<DiscoveredDevice[]> {
+  if (config.devices.length) {
+    return config.devices.map((path) => ({ path, type: config.deviceTypes[path] }));
+  }
+  const mode = config.scanMode ?? "scan";
+  const { stdout } = await run(config.smartctl, [mode === "scan-open" ? "--scan-open" : "--scan", "-j"], 20_000);
+  return parseScan(stdout, config.deviceTypes, mode);
 }

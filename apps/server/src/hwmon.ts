@@ -102,41 +102,77 @@ function readThermalZone(sysfsRoot: string): SensorReadout["cpu"] | null {
   return null;
 }
 
-/** Parse /sys/class/hwmon (and thermal_zone as a fallback) into CPU + other sensors. */
+function minOf(values: (number | null)[]): number | null {
+  const nums = values.filter((v): v is number => v !== null);
+  return nums.length ? Math.min(...nums) : null;
+}
+
+interface ChipCpu {
+  /** Socket/package number ("Package id N"), else the chip's order. */
+  socket: number;
+  pkg: SensorEntry | undefined;
+  cores: SensorEntry[];
+  limits: SensorEntry | null;
+}
+
+function chipCpu(chip: HwmonChip, order: number): ChipCpu {
+  const entries = chip.entries;
+  const find = (re: RegExp) => entries.find((e) => re.test(e.label) && e.temp !== null);
+  const pkg = find(/^Package id \d+$/i) ?? find(/^Tdie$/i) ?? find(/^Tctl$/i) ?? find(/^Package/i);
+  const socketMatch = /^Package id (\d+)$/i.exec(pkg?.label ?? "");
+  return {
+    socket: socketMatch ? Number(socketMatch[1]) : order,
+    pkg,
+    cores: entries.filter((e) => e !== pkg && !/^(Package|Tctl|Tdie)/i.test(e.label)),
+    limits: pkg ?? entries.find((e) => e.max !== null || e.crit !== null) ?? null,
+  };
+}
+
+/**
+ * Parse /sys/class/hwmon (and thermal_zone as a fallback) into CPU + other sensors.
+ *
+ * Multi-socket hosts expose one CPU chip per package (e.g. two `coretemp`
+ * chips). All chips of the selected CPU driver are merged:
+ *  - packageTemp = hottest package sensor (else the hottest core)
+ *  - maxTemp     = hottest of all packages and cores
+ *  - highTemp / critTemp = the lowest (most conservative) limit across packages
+ *  - cores       = every chip's cores in socket order; with more than one chip
+ *                  each label gets a "Package N " prefix so labels stay unique.
+ * A single-socket host is reported exactly as before (no label prefix).
+ */
 export function readSensors(sysfsRoot: string): SensorReadout {
   const chips = readHwmonChips(sysfsRoot);
-  const cpuChip = CPU_CHIPS.map((n) => chips.find((c) => c.name === n)).find(Boolean) ?? null;
+  const cpuName = CPU_CHIPS.find((n) => chips.some((c) => c.name === n)) ?? null;
+  const cpuChips = cpuName ? chips.filter((c) => c.name === cpuName) : [];
 
   const sensors: SensorReadout["sensors"] = [];
   for (const chip of chips) {
-    if (chip === cpuChip) continue;
+    if (cpuChips.includes(chip)) continue;
     for (const e of chip.entries) sensors.push({ chip: chip.name, label: e.label, temp: round1(e.temp) });
   }
 
-  if (!cpuChip) {
+  if (!cpuName) {
     return { cpu: readThermalZone(sysfsRoot) ?? emptyCpu(), sensors };
   }
 
-  const entries = cpuChip.entries;
-  const find = (re: RegExp) => entries.find((e) => re.test(e.label) && e.temp !== null);
-  const pkgEntry = find(/^Package id 0$/i) ?? find(/^Tdie$/i) ?? find(/^Tctl$/i) ?? find(/^Package/i);
-
-  const cores = entries
-    .filter((e) => e !== pkgEntry && !/^(Package|Tctl|Tdie)/i.test(e.label))
-    .map((e) => ({ label: e.label, temp: round1(e.temp) }));
+  const parts = cpuChips.map(chipCpu).sort((a, b) => a.socket - b.socket);
+  const multi = parts.length > 1;
+  const cores = parts.flatMap((p) =>
+    p.cores.map((e) => ({ label: multi ? `Package ${p.socket} ${e.label}` : e.label, temp: round1(e.temp) })),
+  );
 
   const coreMax = maxOf(cores.map((c) => c.temp));
-  const packageTemp = pkgEntry?.temp ?? coreMax;
-  const withLimits = pkgEntry ?? entries.find((e) => e.max !== null || e.crit !== null) ?? null;
+  const pkgMax = maxOf(parts.map((p) => p.pkg?.temp ?? null));
+  const packageTemp = pkgMax ?? coreMax;
 
   return {
     cpu: {
       packageTemp: round1(packageTemp),
-      maxTemp: round1(maxOf([coreMax, pkgEntry?.temp ?? null])),
-      highTemp: round1(withLimits?.max ?? null),
-      critTemp: round1(withLimits?.crit ?? null),
+      maxTemp: round1(maxOf([coreMax, pkgMax])),
+      highTemp: round1(minOf(parts.map((p) => p.limits?.max ?? null))),
+      critTemp: round1(minOf(parts.map((p) => p.limits?.crit ?? null))),
       cores,
-      source: cpuChip.name as CpuSource,
+      source: cpuName,
     },
     sensors,
   };

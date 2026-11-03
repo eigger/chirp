@@ -1,8 +1,18 @@
 import { resolveApiKey, rotateApiKey } from "./apiKey.js";
-import { loadConfig } from "./config.js";
+import { ConfigError, loadConfig, type Config } from "./config.js";
 
 const [group, action] = process.argv.slice(2);
-const config = loadConfig();
+
+let config: Config;
+try {
+  config = loadConfig();
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`chirp: invalid configuration: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 
 if (group === "key" && action === "show") {
   console.log(resolveApiKey(config).key);

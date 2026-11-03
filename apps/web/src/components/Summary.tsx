@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { StatusSnapshot } from "@chirp/shared";
 import { ApiError, postRefresh } from "../api";
 import { formatTime, formatUptime, overallStatus } from "../format";
@@ -14,6 +14,9 @@ export function StatusBadge({ status, standby }: { status: "ok" | "warning" | "f
   );
 }
 
+/** Reload the snapshot this long after a queued refresh. */
+export const REFRESH_RELOAD_MS = 3000;
+
 interface Props {
   data: StatusSnapshot;
   apiKey: string;
@@ -26,7 +29,16 @@ export function Summary({ data, apiKey, lang, onRefreshed, onUnauthorized }: Pro
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { instance } = data;
+
+  // Cancel a pending reload when the summary unmounts (e.g. logout, key change).
+  useEffect(
+    () => () => {
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+    },
+    [],
+  );
 
   const refresh = async () => {
     setBusy(true);
@@ -34,7 +46,11 @@ export function Summary({ data, apiKey, lang, onRefreshed, onUnauthorized }: Pro
     try {
       await postRefresh(apiKey);
       setMsg(t("summary.queued"));
-      setTimeout(onRefreshed, 3000);
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      reloadTimer.current = setTimeout(() => {
+        reloadTimer.current = null;
+        onRefreshed();
+      }, REFRESH_RELOAD_MS);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else if (e instanceof ApiError && e.status === 429) setMsg(t("summary.cooldown", { n: e.retryAfter ?? "?" }));

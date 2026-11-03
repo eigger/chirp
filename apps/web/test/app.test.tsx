@@ -5,7 +5,8 @@ import { resolve } from "node:path";
 import { vi } from "vitest";
 import { App } from "../src/App";
 import { overallStatus, maskSerial } from "../src/format";
-import { messages } from "../src/i18n";
+import { detectLang, messages, translate } from "../src/i18n";
+import { REFRESH_RELOAD_MS, Summary } from "../src/components/Summary";
 
 const sample = JSON.parse(
   readFileSync(resolve(process.cwd(), "../../packages/shared/fixtures/status.sample.json"), "utf8"),
@@ -85,5 +86,58 @@ describe("helpers", () => {
   });
   it("has identical i18n keys in ko and en", () => {
     expect(Object.keys(messages.ko).sort()).toEqual(Object.keys(messages.en).sort());
+  });
+  it("uses the browser language and falls back to English", () => {
+    localStorage.removeItem("chirp.lang");
+    const spy = vi.spyOn(navigator, "language", "get");
+    spy.mockReturnValue("ko-KR");
+    expect(detectLang()).toBe("ko");
+    spy.mockReturnValue("de-DE");
+    expect(detectLang()).toBe("en");
+    spy.mockReturnValue("");
+    expect(detectLang()).toBe("en");
+    spy.mockRestore();
+  });
+  it("falls back to the English string for a missing translation", () => {
+    const ko = messages.ko as Record<string, string>;
+    const saved = ko["common.retry"];
+    delete ko["common.retry"];
+    expect(translate("ko", "common.retry")).toBe("Retry");
+    ko["common.retry"] = saved;
+  });
+});
+
+describe("Summary refresh timer", () => {
+  it("clears the pending reload when unmounted", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response('{"queued":true}', { status: 202 })));
+      const onRefreshed = vi.fn();
+      const view = render(
+        <Summary data={sample} apiKey="chp_good" lang="en" onRefreshed={onRefreshed} onUnauthorized={() => {}} />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Refresh SMART now" }));
+      expect(await screen.findByRole("status")).toHaveTextContent("Refresh requested");
+      view.unmount();
+      vi.advanceTimersByTime(REFRESH_RELOAD_MS * 2);
+      expect(onRefreshed).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reloads after the delay while mounted", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response('{"queued":true}', { status: 202 })));
+      const onRefreshed = vi.fn();
+      render(<Summary data={sample} apiKey="chp_good" lang="en" onRefreshed={onRefreshed} onUnauthorized={() => {}} />);
+      await userEvent.click(screen.getByRole("button", { name: "Refresh SMART now" }));
+      await screen.findByRole("status");
+      vi.advanceTimersByTime(REFRESH_RELOAD_MS);
+      expect(onRefreshed).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

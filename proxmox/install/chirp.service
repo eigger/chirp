@@ -12,7 +12,7 @@ ExecStart=/usr/bin/node /opt/chirp/current/apps/server/dist/index.js
 Restart=on-failure
 RestartSec=3
 
-# 하드닝: 디스크 조회(smartctl/nvme)에 필요한 권한만 남긴다.
+# Hardening: keep only what disk queries (smartctl/nvme) need.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/chirp
 ProtectHome=true

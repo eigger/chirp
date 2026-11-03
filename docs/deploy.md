@@ -1,18 +1,33 @@
-# chirp 배포 가이드
+# chirp deployment guide
 
-## 요구 사항
+[한국어](ko/deploy.md)
 
-- Linux 호스트(Proxmox VE 권장), Node.js 24, `smartmontools`
-- 포트 80 (변경: `CHIRP_PORT`)
-- 호스트의 블록 장치·`/sys` 접근 권한
+## Requirements
 
-## 1. Proxmox 원클릭
+- Linux host (Proxmox VE recommended), Node.js 24, `smartmontools`
+- Port 80 (change with `CHIRP_PORT`, an integer 1-65535)
+- Access to the host's block devices and `/sys`
+
+## 1. Proxmox one-liner
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-privileged LXC를 만들고 릴리스 tarball을 설치한다. 스크립트 상세는 `proxmox/` 참고.
+Creates a privileged LXC, installs the release tarball, passes the selected disks through and prints the dashboard URL and API key (read with `cli.js key show` inside the container). Script details are in `proxmox/`.
+
+### Disk passthrough and its permissions
+
+`proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) bind-mounts each selected disk's `/dev/disk/by-id/...` node into the container and adds one cgroup rule per device major:
+
+```
+lxc.cgroup2.devices.allow: b 8:* rw
+lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x5000c500a1b2c3d4 none bind,optional,create=file
+```
+
+- **`rw`, not `rwm`.** The disks are bind-mounted, so the container never needs `mknod`; smartctl opens SCSI/SAT devices read-write for SG_IO, so `r` alone is not enough. Override with `CHIRP_DEV_PERM` (e.g. `CHIRP_DEV_PERM=rwm`).
+- **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a rule for an exact minor would point at the wrong disk, or none, after a host reboot or hotplug. The by-id bind mounts are re-resolved on every container start; static cgroup rules are not, and Proxmox offers no hook that can rewrite them before the container starts.
+- **Risk:** root in the container can reach other block devices with the same major, including the host's boot disk if it is also `sd*`/NVMe. That is no worse than a privileged container already is (its root is effectively host root), but keep the container on a trusted network and do not run anything else in it.
 
 ## 2. Docker
 
@@ -25,15 +40,18 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-- `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
-- `/sys`를 읽기 전용으로 마운트해야 호스트 CPU 센서(hwmon)가 보인다.
-- `chirp-data` 볼륨에 API 키(`api-key`)와 `instance-id`가 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 HA 엔티티가 새로 생긴다.
-- 키 확인: `docker exec chirp node apps/server/dist/cli.js key show`
-- 장치 이름이 달라지는 환경이면 `CHIRP_DEVICES`에 `/dev/disk/by-id/...` 경로를 쓰는 것이 안전하다. RAID/USB 브리지는 `CHIRP_DEVICE_TYPES=/dev/sda=sat`.
+- Instead of `--privileged` you can combine `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` with `--device`.
+- Mount `/sys` read-only so the host's CPU sensors (hwmon) are visible; it also lets chirp derive stable disk IDs from sysfs without waking disks.
+- The `chirp-data` volume stores the API key (`api-key`), `instance-id` and `disk-ids.json` (pinned disk IDs). Losing the volume changes the key and instance ID, so Home Assistant creates new entities.
+- **API key:** it is not printed to the container log. Read it with
+  `docker exec chirp node apps/server/dist/cli.js key show`
+  (or start once with `-e CHIRP_PRINT_KEY=true` if you really want it in the log).
+- If device names can change, use `/dev/disk/by-id/...` paths in `CHIRP_DEVICES`. RAID controllers/USB bridges: `CHIRP_DEVICE_TYPES=/dev/sda=sat`.
+- The image's `HEALTHCHECK` probes the address that `CHIRP_HOST`/`CHIRP_PORT` bind (loopback for `0.0.0.0`/`::`).
 
-## 3. 릴리스 tarball
+## 3. Release tarball
 
-릴리스에는 `chirp-<version>.tar.gz`와 `.sha256`이 올라간다.
+Each release carries `chirp-<version>.tar.gz` and `.sha256`.
 
 ```bash
 sha256sum -c chirp-<version>.tar.gz.sha256
@@ -41,9 +59,11 @@ mkdir -p /opt/chirp && tar -xzf chirp-<version>.tar.gz -C /opt/chirp
 cd /opt/chirp && node apps/server/dist/index.js
 ```
 
-tarball 구조: `package.json`, `node_modules`(prod), `packages/shared/{package.json,dist}`, `apps/server/{package.json,dist}`, `apps/web/dist`. 순수 JS이므로 네이티브 빌드가 필요 없다.
+Tarball layout (built by `scripts/package-release.sh`): `package.json`, `node_modules` (production), any nested workspace `node_modules` (`apps/*/node_modules`, `packages/*/node_modules`), `packages/shared/{package.json,dist}`, `apps/server/{package.json,dist}`, `apps/web/dist`. Pure JavaScript, no native build needed. CI unpacks every tarball outside the checkout and starts it (`scripts/ci/smoke-release.sh`) so a missing dependency fails the release.
 
-systemd 예시:
+**The sha256 check is integrity only.** The `.sha256` file comes from the same GitHub release as the tarball, so it catches corrupted or truncated downloads, not a tampered release. Authenticity relies on HTTPS and the GitHub account; releases are not signed.
+
+systemd example:
 
 ```ini
 [Service]
@@ -53,16 +73,23 @@ ExecStart=/usr/bin/node apps/server/dist/index.js
 Restart=on-failure
 ```
 
-## 환경 변수
+## Updating the Proxmox container
 
-[`.env.example`](../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선) / `CHIRP_API_KEY_FILE`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`.
+Run `update` inside the container (`pct exec <CTID> -- update`). It downloads the release, checks the sha256, unpacks it into `/opt/chirp/releases/<version>`, switches `/opt/chirp/current` atomically and waits for `/health`:
 
-## 릴리스 절차
+- the probe uses `CHIRP_HOST`/`CHIRP_PORT` from `/etc/chirp/chirp.env` (`127.0.0.1` for `0.0.0.0`/`::`, otherwise the configured address);
+- if the health check fails, the previous release is restored; on a first install (nothing to roll back to) the service is stopped and the `current` link is removed instead of being left dangling.
 
-1. 루트·`packages/shared`·`apps/server`·`apps/web`의 `package.json` version을 모두 맞춘다(`release.yml`이 검사).
-2. GitHub Release를 `v<version>` 태그로 publish.
-3. `release.yml`이 태그·버전 일치를 검사하고 tarball + sha256을 업로드, `docker-release.yml`이 `ghcr.io/eigger/chirp`에 semver/latest를 푸시한다.
+## Environment variables
 
-## 보안
+See [`.env.example`](../.env.example). Key ones: `CHIRP_API_KEY` (wins, at least 16 characters) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. Invalid values stop the server with a message such as `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")`.
 
-HTTP 평문 + privileged 컨테이너 전제. 신뢰하지 않는 네트워크에서는 TLS 역프록시/Tailscale 뒤에 둘 것.
+## Release procedure
+
+1. Set the same `version` in the root, `packages/shared`, `apps/server` and `apps/web` `package.json` files (`release.yml` checks this).
+2. Publish a GitHub Release tagged `v<version>`.
+3. `release.yml` checks tag/version, builds, packages and smoke-tests the tarball, then uploads it with its sha256; `docker-release.yml` pushes semver/latest tags to `ghcr.io/eigger/chirp`.
+
+## Security
+
+Plain HTTP and a privileged container are assumed. On untrusted networks put chirp behind a TLS reverse proxy or Tailscale.

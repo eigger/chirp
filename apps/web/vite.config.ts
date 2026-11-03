@@ -18,7 +18,7 @@ export default defineConfig({
   },
   build: { outDir: "dist", sourcemap: false },
   test: {
-    // kibble 관례: 테스트는 shared 소스를 직접 본다 (dist 빌드 없이도 동작)
+    // Same as kibble: tests import the shared sources directly (works without a dist build)
     alias: {
       "@chirp/shared": path.resolve(root, "../../packages/shared/src/index.ts"),
     },

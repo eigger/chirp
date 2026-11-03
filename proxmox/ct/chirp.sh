@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck source=/dev/null
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
 
-# 설치 스크립트 다운로드를 community-scripts 대신 chirp 저장소로 돌린다.
+# Redirect the install-script download from community-scripts to the chirp repository.
 function curl() {
   if [[ "$*" == *"community-scripts/ProxmoxVE/main/install/chirp-install.sh"* ]]; then
     command curl -fsSL "https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-install.sh"
@@ -11,15 +12,15 @@ function curl() {
 }
 export -f curl
 
-# chirp — Proxmox VE 원클릭 LXC 설치 (호스트의 root 셸에서):
+# chirp: one-shot Proxmox VE LXC install (from the host's root shell):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 #
-# 비대화형 디스크 선택: CHIRP_DISKS=all|none|<by-id,...> 를 앞에 붙인다.
+# Non-interactive disk selection: prefix with CHIRP_DISKS=all|none|<by-id,...>
 #
-# 주의:
-#  - privileged LXC의 root는 사실상 호스트 root다. 신뢰 가능한 네트워크에서만 쓴다.
-#  - 클러스터 HA 마이그레이션 대상 CT에는 쓰지 말 것 (디스크가 노드에 묶여 있다).
-#  - USB/HBA 뒤 디스크는 컨테이너 안 /etc/chirp/chirp.env 에 CHIRP_DEVICE_TYPES 설정이 필요하다.
+# Notes:
+#  - root in a privileged LXC is effectively host root. Use it on trusted networks only.
+#  - Do not use it for CTs managed by cluster HA (the disks are tied to one node).
+#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
 #
 # Copyright (c) 2021-2026 community-scripts ORG
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -53,7 +54,7 @@ function update_script() {
   if command -v update >/dev/null 2>&1; then
     update || exit $?
   else
-    msg_error "'update' 명령이 없습니다. 설치가 불완전합니다."
+    msg_error "The 'update' command is missing; the installation is incomplete."
     exit 1
   fi
   msg_ok "Updated successfully!"
@@ -64,7 +65,7 @@ start
 build_container
 description
 
-# --- 호스트 쪽 후처리: 디스크 passthrough (build_container 이후, CT가 실행 중일 때) ---
+# --- Host-side post-install: disk passthrough (after build_container, while the CT runs) ---
 CHIRP_RAW_BASE="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/eigger/chirp/master}"
 PASSTHROUGH_TMP="$(mktemp)"
 if command curl -fsSL "${CHIRP_RAW_BASE}/proxmox/install/chirp-passthrough.sh" -o "$PASSTHROUGH_TMP" \
@@ -73,11 +74,11 @@ if command curl -fsSL "${CHIRP_RAW_BASE}/proxmox/install/chirp-passthrough.sh" -
   # shellcheck disable=SC1090
   source "$PASSTHROUGH_TMP"
   if ! chirp_passthrough_run "$CTID"; then
-    msg_error "디스크 passthrough 단계가 실패했습니다. 컨테이너는 설치되어 있습니다."
-    echo -e "${INFO}${YW}나중에 다시 실행: bash -c \"\$(curl -fsSL ${CHIRP_RAW_BASE}/proxmox/install/chirp-passthrough.sh)\" _ ${CTID}${CL}"
+    msg_error "The disk passthrough step failed. The container itself is installed."
+    echo -e "${INFO}${YW}Re-run later: bash -c \"\$(curl -fsSL ${CHIRP_RAW_BASE}/proxmox/install/chirp-passthrough.sh)\" _ ${CTID}${CL}"
   fi
 else
-  msg_error "chirp-passthrough.sh 를 받지 못했습니다. 디스크 passthrough를 건너뜁니다."
+  msg_error "Could not download chirp-passthrough.sh; skipping disk passthrough."
 fi
 rm -f "$PASSTHROUGH_TMP"
 

@@ -2,8 +2,90 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config.js";
-import { discoverDevices, readDisk, SmartctlError } from "../src/smartctl.js";
+import { ConfigError, loadConfig, MIN_API_KEY_LENGTH } from "../src/config.js";
+import { healthUrl } from "../src/healthcheck.js";
+import { newKeyLogMessage } from "../src/keyNotice.js";
+import { classifyExecError, discoverDevices, parseScan, readDisk, SmartctlError } from "../src/smartctl.js";
+
+describe("CHIRP_PORT / CHIRP_API_KEY / CHIRP_SCAN_MODE validation", () => {
+  it("accepts integer ports 1-65535 and defaults to 80", () => {
+    expect(loadConfig({}).port).toBe(80);
+    expect(loadConfig({ CHIRP_PORT: " 8080 " }).port).toBe(8080);
+    expect(loadConfig({ CHIRP_PORT: "65535" }).port).toBe(65535);
+  });
+
+  it.each(["0", "65536", "8080.5", "abc", "-1", "1e3", "80 81"])("rejects CHIRP_PORT=%s with a clear message", (v) => {
+    expect(() => loadConfig({ CHIRP_PORT: v })).toThrowError(ConfigError);
+    expect(() => loadConfig({ CHIRP_PORT: v })).toThrowError(/CHIRP_PORT must be an integer between 1 and 65535/);
+  });
+
+  it("rejects a CHIRP_API_KEY shorter than the minimum or containing whitespace", () => {
+    expect(() => loadConfig({ CHIRP_API_KEY: "short" })).toThrowError(/CHIRP_API_KEY is too short \(5 characters, minimum 16\)/);
+    expect(() => loadConfig({ CHIRP_API_KEY: "a".repeat(MIN_API_KEY_LENGTH - 1) })).toThrowError(ConfigError);
+    expect(() => loadConfig({ CHIRP_API_KEY: "chp_abc def ghijklmnopq" })).toThrowError(/whitespace/);
+    expect(loadConfig({ CHIRP_API_KEY: "a".repeat(MIN_API_KEY_LENGTH) }).apiKey).toBe("a".repeat(MIN_API_KEY_LENGTH));
+    expect(loadConfig({ CHIRP_API_KEY: "  " }).apiKey).toBeNull();
+  });
+
+  it("scan mode defaults to the non-opening --scan; rescan interval has a floor", () => {
+    expect(loadConfig({}).scanMode).toBe("scan");
+    expect(loadConfig({ CHIRP_SCAN_MODE: "scan-open" }).scanMode).toBe("scan-open");
+    expect(() => loadConfig({ CHIRP_SCAN_MODE: "open" })).toThrowError(/CHIRP_SCAN_MODE/);
+    expect(loadConfig({}).rescanIntervalSec).toBe(3600);
+    expect(loadConfig({ CHIRP_RESCAN_INTERVAL: "5" }).rescanIntervalSec).toBe(3600);
+    expect(loadConfig({ CHIRP_RESCAN_INTERVAL: "600" }).rescanIntervalSec).toBe(600);
+  });
+});
+
+describe("new API key log line", () => {
+  const key = "chp_" + "x".repeat(43);
+  it("names the key file and the CLI but not the key", () => {
+    const msg = newKeyLogMessage({ apiKeyFile: "/var/lib/chirp/api-key", printKey: false }, key);
+    expect(msg).not.toContain(key);
+    expect(msg).toContain("/var/lib/chirp/api-key");
+    expect(msg).toMatch(/cli\.js key show/);
+    expect(msg).toContain("CHIRP_PRINT_KEY=true");
+  });
+  it("prints the key only with CHIRP_PRINT_KEY=true", () => {
+    expect(loadConfig({ CHIRP_PRINT_KEY: "true" }).printKey).toBe(true);
+    expect(newKeyLogMessage({ apiKeyFile: "/k", printKey: true }, key)).toContain(key);
+  });
+});
+
+describe("health probe URL follows CHIRP_HOST", () => {
+  it.each([
+    ["0.0.0.0", "http://127.0.0.1:80/health"],
+    ["::", "http://127.0.0.1:80/health"],
+    ["192.168.1.5", "http://192.168.1.5:80/health"],
+    ["fd00::5", "http://[fd00::5]:80/health"],
+    ["[fd00::5]", "http://[fd00::5]:80/health"],
+    ["localhost", "http://localhost:80/health"],
+  ])("%s -> %s", (host, url) => {
+    expect(healthUrl({ host, port: 80 })).toBe(url);
+  });
+});
+
+describe("smartctl process errors", () => {
+  it("a maxBuffer kill is an overflow, not a timeout", () => {
+    const overflow = Object.assign(new Error("maxBuffer"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true });
+    expect(classifyExecError(overflow)).toEqual({ overflow: true, timedOut: false, spawnFailed: false });
+    const timeout = Object.assign(new Error("t"), { killed: true, signal: "SIGTERM" });
+    expect(classifyExecError(timeout)).toEqual({ overflow: false, timedOut: true, spawnFailed: false });
+    expect(classifyExecError(Object.assign(new Error("x"), { code: "ENOENT" })).spawnFailed).toBe(true);
+    expect(classifyExecError(null)).toEqual({ overflow: false, timedOut: false, spawnFailed: false });
+  });
+
+  it("--scan drops the generic scsi type so smartctl auto-detects SAT per read", () => {
+    const out = JSON.stringify({ devices: [{ name: "/dev/sda", type: "scsi" }, { name: "/dev/nvme0", type: "nvme" }] });
+    expect(parseScan(out, {}, "scan")).toEqual([
+      { path: "/dev/sda", type: undefined },
+      { path: "/dev/nvme0", type: "nvme" },
+    ]);
+    expect(parseScan(out, { "/dev/sda": "sat" }, "scan")[0].type).toBe("sat");
+    expect(parseScan(out, {}, "scan-open")[0].type).toBe("scsi");
+    expect(parseScan("not json", {}, "scan")).toEqual([]);
+  });
+});
 
 describe("CHIRP_DEVICES / CHIRP_DEVICE_TYPES validation", () => {
   it("keeps absolute device paths and well-formed -d types", () => {
@@ -42,7 +124,7 @@ describe("smartctl argv", () => {
     writeFileSync(
       bin,
       `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\n` +
-        `case "$1" in --scan-open) echo '{"devices":[{"name":"/dev/sda","type":"sat"},{"name":"-s","type":"x"},{"name":"/dev/sdb","type":"-t"}]}';;\n` +
+        `case "$1" in --scan|--scan-open) echo '{"devices":[{"name":"/dev/sda","type":"sat"},{"name":"-s","type":"x"},{"name":"/dev/sdb","type":"-t"}]}';;\n` +
         `*) echo '{"smartctl":{"exit_status":2,"messages":[{"string":"Device is in STANDBY mode, exit(2)"}]},"device":{"name":"/dev/sda"}}';; esac\n`,
     );
     chmodSync(bin, 0o755);
@@ -63,10 +145,24 @@ describe("smartctl argv", () => {
     expect(() => readFileSync(argsFile)).toThrow();
   });
 
-  it("discovery ignores option-like names/types from --scan-open", async () => {
+  it("discovery uses the non-opening --scan by default and ignores option-like names/types", async () => {
     expect(await discoverDevices(cfg())).toEqual([
       { path: "/dev/sda", type: "sat" },
       { path: "/dev/sdb", type: undefined },
     ]);
+    expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual(["--scan", "-j"]);
+  });
+
+  it("--scan-open only when configured", async () => {
+    await discoverDevices({ ...cfg(), scanMode: "scan-open" });
+    expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual(["--scan-open", "-j"]);
+  });
+
+  it("output larger than maxBuffer is a parse_error, not a timeout", async () => {
+    writeFileSync(bin, `#!/bin/sh\nhead -c 4096 /dev/zero | tr '\\0' 'x'\n`);
+    const err = await readDisk(cfg(), "/dev/sda", undefined, 20_000, 1024).catch((e) => e);
+    expect(err).toBeInstanceOf(SmartctlError);
+    expect(err.code).toBe("parse_error");
+    expect(err.detail).toMatch(/exceeded 1024 bytes/);
   });
 });

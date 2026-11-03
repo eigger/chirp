@@ -11,7 +11,7 @@
 
 **Proxmox 호스트**의 CPU 온도와 디스크 SMART 상태를 수집해 REST API와 대시보드로 보여주는 작은 모니터링 서버. 탄광의 카나리아처럼, 디스크가 죽기 전에 먼저 알려줍니다.
 
-문서: [`docs/PROJECT.md`](docs/PROJECT.md) · [`docs/api.md`](docs/api.md) · [`docs/deploy.md`](docs/deploy.md)
+문서: [`docs/PROJECT.md`](docs/PROJECT.md) · [`docs/api.md`](docs/api.md) · [`docs/ko/deploy.md`](docs/ko/deploy.md) (배포 가이드 한국어판; 그 밖의 문서는 영어)
 
 ---
 
@@ -19,9 +19,9 @@
 
 - **CPU 온도** — `/sys/class/hwmon`(coretemp, k10temp, zenpower, cpu_thermal) 직접 파싱: 패키지·코어별·경고/임계 온도·기타 센서
 - **디스크 SMART** — `smartctl -j`로 SATA HDD/SSD·NVMe 수집: 온도, 가동 시간, 재할당/대기 섹터, 마모, 누적 기록량
-- **잠든 디스크를 깨우지 않음** — `smartctl -n standby`; 스핀다운된 디스크는 마지막 값을 유지하고 `standby`로 표시
+- **잠든 디스크를 깨우지 않음** — `smartctl -n standby`, 장치 탐색은 장치를 열지 않는 `smartctl --scan`; 스핀다운된 디스크는 마지막 값을 유지하고 `standby`로 표시
 - **단일 건강 판정**(`ok` / `warning` / `failing` / `unknown`) + 기계가 읽을 수 있는 사유. 판정은 서버 한 곳에서만 수행
-- **안정적인 디스크 ID**(WWN, 없으면 모델+시리얼) — `/dev/sdX`는 쓰지 않음
+- **안정적인 디스크 ID**(WWN, 없으면 모델+시리얼) — `/dev/sdX`는 쓰지 않음. 디스크를 깨우지 않고 도출하며 재시작 후에도 고정
 - **24시간 온도 히스토리**(1분 해상도, 메모리)와 같은 프로세스가 서빙하는 웹 대시보드
 - **Bearer API 키 인증 REST API**, DB 없음, 순수 JavaScript(네이티브 의존성 없음)
 - **Home Assistant 연동** — [`hass-chirp`](https://github.com/eigger/hass-chirp) (통합 도메인 `chirp`)
@@ -36,7 +36,7 @@ Proxmox 호스트 셸에서 실행:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-LXC 컨테이너를 만들고 최신 릴리스 tarball을 설치한 뒤 대시보드 URL과 API 키를 출력합니다.
+LXC 컨테이너를 만들고 최신 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL과 API 키를 출력합니다.
 
 ### Docker
 
@@ -51,7 +51,7 @@ docker run -d --name chirp \
   ghcr.io/eigger/chirp:latest
 ```
 
-`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 호스트의 CPU 센서가 보이도록 `/sys`는 읽기 전용으로 마운트하세요. 자세한 내용은 [`docs/deploy.md`](docs/deploy.md).
+`--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN`과 `--device`를 함께 써도 됩니다. 호스트의 CPU 센서가 보이도록 `/sys`는 읽기 전용으로 마운트하세요. API 키는 `docker exec chirp node apps/server/dist/cli.js key show`로 확인합니다. 자세한 내용은 [`docs/ko/deploy.md`](docs/ko/deploy.md).
 
 ### 릴리스 tarball
 
@@ -60,22 +60,22 @@ tar -xzf chirp-<version>.tar.gz -C /opt/chirp
 cd /opt/chirp && CHIRP_PORT=8080 node apps/server/dist/index.js
 ```
 
-Node.js 24와 `smartmontools`가 필요합니다.
+Node.js 24와 `smartmontools`가 필요합니다. `.sha256` 자산은 다운로드 무결성만 확인합니다(진위 확인 아님, 릴리스 서명 없음).
 
 ## API 키
 
-첫 기동에 키(`chp_...`)를 생성해 `/var/lib/chirp/api-key`(권한 0600)에 저장하고 로그에 한 번 출력합니다. 모든 `/api/v1/*` 요청에는 `Authorization: Bearer <키>`가 필요합니다.
+첫 기동에 키(`chp_...`)를 생성해 `/var/lib/chirp/api-key`(권한 0600)에 저장합니다. 로그에는 파일 경로와 아래 명령만 남고, 키 자체는 `CHIRP_PRINT_KEY=true`일 때만 출력합니다. 모든 `/api/v1/*` 요청에는 `Authorization: Bearer <키>`가 필요합니다.
 
 ```bash
 node apps/server/dist/cli.js key show     # 키 출력
 node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 ```
 
-`CHIRP_API_KEY`가 있으면 키 파일보다 우선합니다. 대시보드 HTML/JS는 공개지만 데이터는 모두 키가 필요합니다.
+`CHIRP_API_KEY`가 있으면 키 파일보다 우선합니다(16자 이상). 대시보드 HTML/JS는 공개지만 데이터는 모두 키가 필요합니다.
 
 ## 설정
 
-모든 설정은 환경 변수입니다 — [`.env.example`](.env.example) 참고. 기본값: 포트 `80`, SMART `300`초, 센서 `10`초 주기.
+모든 설정은 환경 변수입니다 — [`.env.example`](.env.example) 참고. 기본값: 포트 `80`, SMART `300`초, 센서 `10`초, 장치 재탐색 `3600`초 주기. 잘못된 값(예: `CHIRP_PORT=abc`)이면 명확한 메시지를 내고 서버가 시작하지 않습니다.
 
 ## Home Assistant
 
@@ -83,7 +83,7 @@ node apps/server/dist/cli.js key rotate   # 새 키 발급 (즉시 적용)
 
 ## 보안 주의
 
-- Proxmox 스크립트는 `smartctl`이 호스트 블록 장치에 접근하도록 **privileged LXC** 컨테이너를 만듭니다. privileged 컨테이너가 뚫리면 호스트도 위험하므로 신뢰하는 네트워크에서만 쓰세요.
+- Proxmox 스크립트는 `smartctl`이 호스트 블록 장치에 접근하도록 **privileged LXC** 컨테이너를 만듭니다. privileged 컨테이너가 뚫리면 호스트도 위험하므로 신뢰하는 네트워크에서만 쓰세요. 장치 규칙은 선택한 디스크의 major에 `rw`만 허용합니다(정확한 minor를 쓰지 않는 이유는 [`docs/ko/deploy.md`](docs/ko/deploy.md#디스크-passthrough와-권한) 참고).
 - 통신은 **HTTP 평문**입니다. API 키가 그대로 전송되므로 신뢰할 수 없는 네트워크라면 TLS 역프록시(또는 Tailscale) 뒤에 두고, `CHIRP_TRUST_PROXY=true`는 직접 관리하는 프록시 뒤에서만 켜세요.
 - `POST /api/v1/refresh`는 30초 쿨다운이 있으며 서버는 잠든 디스크를 깨우지 않습니다.
 

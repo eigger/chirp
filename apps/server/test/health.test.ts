@@ -77,11 +77,14 @@ describe("computeHealth boundaries", () => {
     expect(computeHealth(nv({ nvme: nvme({ mediaErrors: 1 }) })).status).toBe("warning");
   });
 
-  it("NVMe critical_warning bits: 0,2,3 fail; 1 and 4 do not", () => {
-    for (const cw of [1, 4, 8]) {
+  it("NVMe critical_warning bits: 0,2,3,4 fail; 1 (temperature) and 5 (PMR) do not", () => {
+    for (const cw of [1, 4, 8, 16, 0b10010]) {
       expect(computeHealth(nv({ nvme: nvme({ criticalWarning: cw }) })).status).toBe("failing");
     }
-    for (const cw of [2, 16]) {
+    expect(computeHealth(nv({ nvme: nvme({ criticalWarning: 16 }) })).reasons).toEqual([
+      { code: "nvme_critical_warning", value: 16 },
+    ]);
+    for (const cw of [2, 32]) {
       expect(computeHealth(nv({ nvme: nvme({ criticalWarning: cw }) })).status).toBe("ok");
     }
   });

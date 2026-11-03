@@ -1,8 +1,9 @@
-# Dependabot — 주 1회 npm / Actions / Docker 베이스 이미지 업데이트
+# Dependabot: weekly npm / Actions / Docker base image updates.
 #
-# 정책: minor/patch는 그룹으로 자동 PR. **semver-major는 전부 수동 일괄**
-# (kibble 관례 — 메이저 PR을 쪼개면 호환 수정·검증이 분산되고,
-# “봇을 끄거나 한 번에 올리라”는 운영 부담이 생긴다).
+# Policy: minor/patch arrive as grouped PRs. **All semver-major bumps are done
+# manually, in one batch** (same as kibble: splitting major PRs scatters the
+# compatibility fixes and verification, and creates "turn the bot off or bump
+# everything at once" maintenance pressure).
 version: 2
 updates:
   - package-ecosystem: npm
@@ -25,10 +26,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
-      # 위 ignore는 security update에 걸리지 않는다 — "update-types only affects
-      # version updates, not security updates"(GitHub 문서). 그래서 권고가 뜰 때마다
-      # semver-major 단독 PR이 따로 열린다. 한 그룹으로 묶어서 "major는 한 브랜치에서
-      # 일괄"이라는 위 정책과 결이 맞게 배치로 받는다.
+      # The ignore above does not apply to security updates ("update-types only
+      # affects version updates, not security updates", GitHub docs), so every
+      # advisory would open its own semver-major PR. Group them so they arrive as
+      # one batch, in line with the "majors in one branch" policy above.
       security:
         applies-to: security-updates
         patterns:
@@ -48,9 +49,9 @@ updates:
         patterns:
           - "*"
 
-  # Docker는 태그만 따라가므로 LTS가 아닌 Current(홀수)로 major가 올라갈 수 있다.
-  # major(예: 24→25)는 수동 판단; minor/patch(보안·버그픽스)만 자동 제안.
-  # chirp는 단일 이미지라 루트 Dockerfile 하나만 본다 (kibble은 apps/api, apps/web 두 개).
+  # Docker only follows tags, so a major could jump to a Current (odd, non-LTS) line.
+  # Majors (e.g. 24 -> 25) are a manual decision; only minor/patch (security/bug fixes) are proposed.
+  # chirp has a single image, so only the root Dockerfile is watched (kibble has apps/api and apps/web).
   - package-ecosystem: docker
     directory: "/"
     schedule:

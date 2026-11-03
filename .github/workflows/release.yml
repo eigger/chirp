@@ -1,7 +1,7 @@
 name: Release
 
-# GitHub Release 가 published 되면 chirp-<version>.tar.gz(+ .sha256)을 빌드해 릴리스에 올린다.
-# Proxmox 설치/업데이트 스크립트가 이 자산을 받는다 (순수 JS, 네이티브 의존성 없음).
+# When a GitHub Release is published, build chirp-<version>.tar.gz (+ .sha256) and attach it.
+# The Proxmox install/update scripts download this asset (pure JS, no native dependencies).
 on:
   release:
     types: [published]
@@ -48,16 +48,17 @@ jobs:
       - name: Prune dev dependencies
         run: npm prune --omit=dev
 
+      # Includes nested workspace node_modules (apps/*/node_modules, packages/*/node_modules).
       - name: Create tarball
         run: |
-          tar -czf "chirp-${VERSION}.tar.gz" \
-            package.json \
-            node_modules \
-            packages/shared/package.json packages/shared/dist \
-            apps/server/package.json apps/server/dist \
-            apps/web/dist
+          bash scripts/package-release.sh "$RUNNER_TEMP/chirp"
+          tar -czf "chirp-${VERSION}.tar.gz" -C "$RUNNER_TEMP/chirp" .
           sha256sum "chirp-${VERSION}.tar.gz" > "chirp-${VERSION}.tar.gz.sha256"
           cat "chirp-${VERSION}.tar.gz.sha256"
+
+      # Unpack the tarball outside the checkout and start it: every import must resolve from the tarball alone.
+      - name: Smoke-test the tarball
+        run: bash scripts/ci/smoke-release.sh "chirp-${VERSION}.tar.gz"
 
       - name: Upload release assets
         env:

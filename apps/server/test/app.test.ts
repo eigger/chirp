@@ -1,7 +1,17 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StatusSnapshot, DiskDetail, HistoryResponse, HealthResponse, CooldownResponse, UnauthorizedResponse } from "@chirp/shared";
+import {
+  BadRequestResponse,
+  CooldownResponse,
+  DiskDetail,
+  ErrorResponse,
+  HealthResponse,
+  HistoryResponse,
+  NotFoundResponse,
+  StatusSnapshot,
+  UnauthorizedResponse,
+} from "@chirp/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ApiKeyStore, generateApiKey } from "../src/apiKey.js";
@@ -97,7 +107,9 @@ describe("api", () => {
     const res = await app.inject({ url: "/api/v1/disks/wwn_5000c500a1b2c3d4", headers: auth });
     expect(res.statusCode).toBe(200);
     expect(DiskDetail.parse(res.json()).raw).toBeTruthy();
-    expect((await app.inject({ url: "/api/v1/disks/nope", headers: auth })).statusCode).toBe(404);
+    const missing = await app.inject({ url: "/api/v1/disks/nope", headers: auth });
+    expect(missing.statusCode).toBe(404);
+    expect(NotFoundResponse.parse(missing.json())).toEqual({ error: "not_found" });
   });
 
   it("history for cpu and disk; bad input", async () => {
@@ -106,8 +118,28 @@ describe("api", () => {
     expect(HistoryResponse.parse(cpu.json()).points.length).toBeGreaterThan(0);
     const disk = await app.inject({ url: "/api/v1/history?metric=disk.wwn_5000c500a1b2c3d4.temperature", headers: auth });
     expect(disk.statusCode).toBe(200);
-    expect((await app.inject({ url: "/api/v1/history", headers: auth })).statusCode).toBe(400);
-    expect((await app.inject({ url: "/api/v1/history?metric=bogus", headers: auth })).statusCode).toBe(404);
+    const bad = await app.inject({ url: "/api/v1/history", headers: auth });
+    expect(bad.statusCode).toBe(400);
+    expect(BadRequestResponse.parse(bad.json())).toEqual({ error: "bad_request" });
+    expect((await app.inject({ url: "/api/v1/history?metric=cpu.packageTemp&range=2d", headers: auth })).statusCode).toBe(400);
+    const unknown = await app.inject({ url: "/api/v1/history?metric=bogus", headers: auth });
+    expect(unknown.statusCode).toBe(404);
+    expect(NotFoundResponse.parse(unknown.json())).toEqual({ error: "not_found" });
+  });
+
+  it("every error body matches the shared ErrorResponse schema", async () => {
+    // unparsable JSON body -> Fastify's own 400, mapped to {"error":"bad_request"}
+    const badJson = await app.inject({
+      method: "POST",
+      url: "/api/v1/refresh",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: "{not json",
+    });
+    expect(badJson.statusCode).toBe(400);
+    expect(BadRequestResponse.parse(badJson.json())).toEqual({ error: "bad_request" });
+    const unknownRoute = await app.inject({ url: "/api/v1/unknown", headers: auth });
+    expect(unknownRoute.statusCode).toBe(404);
+    expect(ErrorResponse.parse(unknownRoute.json()).error).toBe("not_found");
   });
 
   it("refresh: 202, then 429 within the cooldown, then 202 again", async () => {
@@ -149,7 +181,11 @@ describe("static dashboard", () => {
       collector,
       keys: new ApiKeyStore(KEY, null),
     });
-    expect((await bare.inject("/")).statusCode).toBe(404);
+    const root = await bare.inject("/");
+    expect(root.statusCode).toBe(404);
+    // still the JSON error contract, not Fastify's default 404 body
+    expect(NotFoundResponse.parse(root.json())).toEqual({ error: "not_found" });
+    expect(NotFoundResponse.parse((await bare.inject("/api/v1/nope")).json())).toEqual({ error: "not_found" });
     await bare.close();
   });
 });

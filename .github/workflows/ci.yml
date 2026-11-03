@@ -22,9 +22,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 루트 devDependencies는 제외한다. 워크스페이스의 devDependency라도 프로덕션
-      # 트리에서 닿는 것은 실제 tarball/이미지에 들어가므로 계속 잡힌다 —
-      # 그런 건 root package.json의 overrides로 패치 버전을 고정해서 해결한다.
+      # Root devDependencies are excluded. A workspace devDependency that is reachable
+      # from the production tree still ships in the tarball/image and is still flagged;
+      # fix those by pinning a patched version via overrides in the root package.json.
       - name: Audit dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
 
@@ -48,6 +48,14 @@ jobs:
 
       - name: Run Build
         run: npm run build
+
+      # Same packaging as release.yml, then start the server from the unpacked tarball.
+      - name: Package and smoke-test a release tarball
+        run: |
+          npm prune --omit=dev
+          bash scripts/package-release.sh "$RUNNER_TEMP/chirp"
+          tar -czf "$RUNNER_TEMP/chirp-ci.tar.gz" -C "$RUNNER_TEMP/chirp" .
+          bash scripts/ci/smoke-release.sh "$RUNNER_TEMP/chirp-ci.tar.gz"
 
   test:
     runs-on: ubuntu-latest
