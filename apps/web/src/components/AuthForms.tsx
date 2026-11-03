@@ -1,0 +1,133 @@
+import { useState, type FormEvent } from "react";
+import { ApiError, bootstrapAdmin, login, MIN_PASSWORD_LENGTH } from "../api";
+import { useT } from "../i18n";
+
+function errorText(t: ReturnType<typeof useT>, e: unknown, on401: string): string {
+  if (e instanceof ApiError && e.status === 401) return on401;
+  if (e instanceof ApiError && e.status === 429) return t("common.rateLimited", { n: e.retryAfter ?? "?" });
+  if (e instanceof ApiError && e.code === "weak_password") return t("password.weak", { n: MIN_PASSWORD_LENGTH });
+  if (e instanceof ApiError && e.code === "password_mismatch") return t("password.mismatch");
+  return t("common.failed");
+}
+
+export function LoginForm({
+  notice,
+  onLoggedIn,
+}: {
+  notice?: "expired" | "taken";
+  onLoggedIn: (username: string) => void;
+}) {
+  const t = useT();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const me = await login(username.trim(), password);
+      onLoggedIn(me.username);
+    } catch (err) {
+      setError(errorText(t, err, t("login.invalid")));
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="card gate" onSubmit={submit}>
+      <h1>{t("login.title")}</h1>
+      <p className="muted">{t("login.desc")}</p>
+      {notice && !error && <p className="muted">{t(notice === "expired" ? "login.expired" : "bootstrap.taken")}</p>}
+      <label htmlFor="login-username">{t("login.username")}</label>
+      <input id="login-username" autoComplete="username" autoFocus value={username} onChange={(e) => setUsername(e.target.value)} />
+      <label htmlFor="login-password">{t("login.password")}</label>
+      <input
+        id="login-password"
+        type="password"
+        autoComplete="current-password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+      <button type="submit" className="primary" disabled={busy || !username.trim() || !password}>
+        {busy ? t("login.busy") : t("login.submit")}
+      </button>
+      <p className="muted small">{t("login.forgot")}</p>
+    </form>
+  );
+}
+
+/** First-run registration: shown while the server has no admin account. */
+export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) => void; onTaken: () => void }) {
+  const t = useT();
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if ([...password].length < MIN_PASSWORD_LENGTH) return setError(t("password.weak", { n: MIN_PASSWORD_LENGTH }));
+    if (password !== confirm) return setError(t("password.mismatch"));
+    setBusy(true);
+    setError(null);
+    try {
+      const me = await bootstrapAdmin(username.trim(), password, confirm);
+      onDone(me.username);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) return onTaken();
+      setError(errorText(t, err, t("common.failed")));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="card gate" onSubmit={submit}>
+      <h1>{t("bootstrap.title")}</h1>
+      <p className="muted">{t("bootstrap.desc")}</p>
+      <label htmlFor="bootstrap-username">{t("login.username")}</label>
+      <input
+        id="bootstrap-username"
+        autoComplete="username"
+        autoFocus
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+      />
+      <label htmlFor="bootstrap-password">{t("password.new", { n: MIN_PASSWORD_LENGTH })}</label>
+      <input
+        id="bootstrap-password"
+        type="password"
+        autoComplete="new-password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      <label htmlFor="bootstrap-confirm">{t("password.confirm")}</label>
+      <input
+        id="bootstrap-confirm"
+        type="password"
+        autoComplete="new-password"
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+      />
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+      <button type="submit" className="primary" disabled={busy || !username.trim() || !password || !confirm}>
+        {t("bootstrap.submit")}
+      </button>
+    </form>
+  );
+}

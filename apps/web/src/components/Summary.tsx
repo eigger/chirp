@@ -19,20 +19,19 @@ export const REFRESH_RELOAD_MS = 3000;
 
 interface Props {
   data: StatusSnapshot;
-  apiKey: string;
   lang: Lang;
   onRefreshed: () => void;
   onUnauthorized: () => void;
 }
 
-export function Summary({ data, apiKey, lang, onRefreshed, onUnauthorized }: Props) {
+export function Summary({ data, lang, onRefreshed, onUnauthorized }: Props) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { instance } = data;
 
-  // Cancel a pending reload when the summary unmounts (e.g. logout, key change).
+  // Cancel a pending reload when the summary unmounts (e.g. logout, switching to Settings).
   useEffect(
     () => () => {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
@@ -44,7 +43,7 @@ export function Summary({ data, apiKey, lang, onRefreshed, onUnauthorized }: Pro
     setBusy(true);
     setMsg(null);
     try {
-      await postRefresh(apiKey);
+      await postRefresh();
       setMsg(t("summary.queued"));
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
       reloadTimer.current = setTimeout(() => {

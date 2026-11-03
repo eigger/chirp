@@ -86,3 +86,26 @@ tr.detail-row td { white-space: normal; background: var(--color-bg); }
   .big { font-size: 2.1rem; }
   .container { padding: 12px; }
 }
+.topbar-right { align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.topbar-right .user { font-size: .85rem; }
+button.link[aria-current="page"] { text-decoration: underline; text-underline-offset: 4px; }
+button.danger { background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
+label { font-size: .85rem; color: var(--color-text-muted); }
+.settings-form { display: grid; gap: 8px; max-width: 480px; }
+.inline-form { display: grid; gap: 6px; margin: 12px 0; max-width: 560px; }
+.row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row-actions input { flex: 1; min-width: 160px; width: auto; }
+.issued {
+  border: 2px solid var(--color-primary); border-radius: var(--radius); padding: 12px 14px; margin: 12px 0;
+  display: grid; gap: 8px; background: var(--color-bg);
+}
+.issued p { margin: 0; }
+.issued-key {
+  display: block; font-size: 1.05rem; padding: 10px 12px; border-radius: 8px; overflow-wrap: anywhere;
+  background: var(--color-surface); border: 1px solid var(--color-border); user-select: all;
+}
+.key-actions { text-align: right; }
+.key-actions .confirm { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; white-space: normal; justify-content: flex-end; }
+.confirm-box { border: 1px solid var(--color-danger); border-radius: var(--radius); padding: 10px 12px; margin: 8px 0; display: grid; gap: 8px; }
+.confirm-box p { margin: 0; }
+.issued-key + .row-actions { margin-top: 8px; }
