@@ -7,6 +7,7 @@ import { Settings } from "./components/Settings";
 import { Summary } from "./components/Summary";
 import { CpuCard } from "./components/CpuCard";
 import { DiskTable } from "./components/DiskTable";
+import { LoadCard, MemoryCard, NetworkTable, PowerCard } from "./components/HostCards";
 
 const POLL_MS = 30_000;
 
@@ -23,6 +24,7 @@ function Dashboard({ lang, onUnauthorized }: { lang: Lang; onUnauthorized: () =>
   const t = (k: Parameters<typeof translate>[1]) => translate(lang, k);
   const [data, setData] = useState<StatusSnapshot | null>(null);
   const [history, setHistory] = useState<[number, number][]>([]);
+  const [cpuUsageHistory, setCpuUsageHistory] = useState<[number, number][]>([]);
   const [failed, setFailed] = useState(false);
 
   const load = useCallback(async () => {
@@ -33,6 +35,13 @@ function Dashboard({ lang, onUnauthorized }: { lang: Lang; onUnauthorized: () =>
       fetchHistory("cpu.packageTemp")
         .then((h) => setHistory(h.points))
         .catch(() => setHistory([]));
+      if (s.load) {
+        fetchHistory("load.cpuUsagePercent")
+          .then((h) => setCpuUsageHistory(h.points))
+          .catch(() => setCpuUsageHistory([]));
+      } else {
+        setCpuUsageHistory([]);
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else setFailed(true);
@@ -62,6 +71,16 @@ function Dashboard({ lang, onUnauthorized }: { lang: Lang; onUnauthorized: () =>
       {failed && <p className="error">{t("common.error")}</p>}
       <Summary data={data} lang={lang} onRefreshed={() => void load()} onUnauthorized={onUnauthorized} />
       <CpuCard cpu={data.cpu} history={history} />
+      {(data.memory || data.load) && (
+        <div className="host-grid">
+          {data.memory && <MemoryCard memory={data.memory} />}
+          {data.load && <LoadCard load={data.load} history={cpuUsageHistory} />}
+        </div>
+      )}
+      {data.network && <NetworkTable network={data.network} />}
+      {(data.power || (data.fans?.length ?? 0) > 0 || (data.voltages?.length ?? 0) > 0) && (
+        <PowerCard power={data.power ?? null} fans={data.fans ?? []} voltages={data.voltages ?? []} />
+      )}
       <DiskTable disks={data.disks} lang={lang} />
       <p className="muted small">{t("common.autoRefresh")}</p>
     </>

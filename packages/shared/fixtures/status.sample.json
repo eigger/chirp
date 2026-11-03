@@ -15,13 +15,25 @@
     "highTemp": 80.0,
     "critTemp": 100.0,
     "cores": [
-      { "label": "Core 0", "temp": 45.0 },
-      { "label": "Core 1", "temp": 52.0 }
+      {
+        "label": "Core 0",
+        "temp": 45.0
+      },
+      {
+        "label": "Core 1",
+        "temp": 52.0
+      }
     ],
     "source": "coretemp",
     "updatedAt": "2026-11-03T10:00:00Z"
   },
-  "sensors": [{ "chip": "nvme", "label": "Composite", "temp": 41.9 }],
+  "sensors": [
+    {
+      "chip": "nvme",
+      "label": "Composite",
+      "temp": 41.9
+    }
+  ],
   "disks": [
     {
       "id": "wwn_5000c500a1b2c3d4",
@@ -41,7 +53,12 @@
       "smartPassed": true,
       "health": {
         "status": "warning",
-        "reasons": [{ "code": "reallocated_sectors", "value": 8 }]
+        "reasons": [
+          {
+            "code": "reallocated_sectors",
+            "value": 8
+          }
+        ]
       },
       "ata": {
         "reallocatedSectors": 8,
@@ -70,7 +87,10 @@
       "powerOnHours": 5120,
       "powerCycleCount": 88,
       "smartPassed": true,
-      "health": { "status": "ok", "reasons": [] },
+      "health": {
+        "status": "ok",
+        "reasons": []
+      },
       "ata": null,
       "nvme": {
         "percentageUsed": 3,
@@ -84,6 +104,163 @@
       },
       "lastReadAt": "2026-11-03T09:58:00Z",
       "error": null
+    }
+  ],
+  "memory": {
+    "scope": "host",
+    "totalBytes": 67108864000,
+    "availableBytes": 41875931136,
+    "usedBytes": 25232932864,
+    "usedPercent": 37.6,
+    "swapTotalBytes": 8589930496,
+    "swapUsedBytes": 268435456,
+    "swapUsedPercent": 3.1
+  },
+  "load": {
+    "scope": "host",
+    "load1": 0.84,
+    "load5": 0.71,
+    "load15": 0.65,
+    "cpuCount": 12,
+    "cpuUsagePercent": 6.4
+  },
+  "network": {
+    "scope": "host",
+    "interfaces": [
+      {
+        "id": "bond0",
+        "name": "bond0",
+        "kind": "bond",
+        "up": true,
+        "operState": "up",
+        "speedMbps": 2000,
+        "rxBytes": 812345678901,
+        "txBytes": 123456789012,
+        "rxBytesPerSec": 152340.5,
+        "txBytesPerSec": 40210.2,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 0,
+        "txDropped": 0
+      },
+      {
+        "id": "eno1",
+        "name": "eno1",
+        "kind": "physical",
+        "up": true,
+        "operState": "up",
+        "speedMbps": 1000,
+        "rxBytes": 812345678901,
+        "txBytes": 123456789012,
+        "rxBytesPerSec": 152340.5,
+        "txBytesPerSec": 40210.2,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 12,
+        "txDropped": 0
+      },
+      {
+        "id": "enp3s0",
+        "name": "enp3s0",
+        "kind": "physical",
+        "up": false,
+        "operState": "down",
+        "speedMbps": null,
+        "rxBytes": 0,
+        "txBytes": 0,
+        "rxBytesPerSec": 0,
+        "txBytesPerSec": 0,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 0,
+        "txDropped": 0
+      },
+      {
+        "id": "vmbr0",
+        "name": "vmbr0",
+        "kind": "bridge",
+        "up": true,
+        "operState": "up",
+        "speedMbps": null,
+        "rxBytes": 790123456789,
+        "txBytes": 120987654321,
+        "rxBytesPerSec": 150112.0,
+        "txBytesPerSec": 39876.4,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 0,
+        "txDropped": 0
+      },
+      {
+        "id": "vmbr0_100",
+        "name": "vmbr0.100",
+        "kind": "vlan",
+        "up": true,
+        "operState": "up",
+        "speedMbps": null,
+        "rxBytes": 1234567890,
+        "txBytes": 987654321,
+        "rxBytesPerSec": 812.3,
+        "txBytesPerSec": 95.1,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 0,
+        "txDropped": 0
+      }
+    ]
+  },
+  "power": {
+    "packageWatts": 18.4,
+    "packageSource": "rapl",
+    "sources": [
+      {
+        "id": "rapl_package_0",
+        "label": "package-0",
+        "watts": 18.4
+      },
+      {
+        "id": "rapl_package_0_core",
+        "label": "package-0 core",
+        "watts": 11.2
+      },
+      {
+        "id": "rapl_package_0_uncore",
+        "label": "package-0 uncore",
+        "watts": 0.3
+      },
+      {
+        "id": "rapl_psys",
+        "label": "psys",
+        "watts": 24.9
+      }
+    ]
+  },
+  "fans": [
+    {
+      "id": "nct6798_cpu_fan",
+      "chip": "nct6798",
+      "label": "CPU Fan",
+      "rpm": 1180
+    },
+    {
+      "id": "nct6798_fan2",
+      "chip": "nct6798",
+      "label": "fan2",
+      "rpm": 0
+    }
+  ],
+  "voltages": [
+    {
+      "id": "nct6798_in0",
+      "chip": "nct6798",
+      "label": "in0",
+      "volts": 1.032
+    },
+    {
+      "id": "nct6798_3_3v",
+      "chip": "nct6798",
+      "label": "+3.3V",
+      "volts": 3.344
     }
   ]
 }

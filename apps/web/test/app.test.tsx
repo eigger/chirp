@@ -259,14 +259,16 @@ describe("each screen fetches once on mount (no render loops)", () => {
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
-  it("dashboard: one status and one history request until the 30 s poll", async () => {
+  it("dashboard: one status and one request per history metric until the 30 s poll", async () => {
     const { fn } = fakeServer({ signedIn: true });
     render(<App />);
     await screen.findByText("pve");
     await settle();
     expect(calls(fn, "/api/v1/auth/me")).toBe(1);
     expect(calls(fn, "/api/v1/status")).toBe(1);
-    expect(fn.mock.calls.filter(([u]) => String(u).startsWith("/api/v1/history")).length).toBe(1);
+    for (const metric of ["cpu.packageTemp", "load.cpuUsagePercent"]) {
+      expect(fn.mock.calls.filter(([u]) => String(u).includes(`metric=${metric}`)).length).toBe(1);
+    }
   });
 
   it("settings: exactly one GET /admin/api-key, also after re-renders (language switch, show/hide)", async () => {

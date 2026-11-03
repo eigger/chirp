@@ -90,6 +90,9 @@ CHIRP_DEVICES=
 # For other options see README / .env.example and uncomment as needed.
 # CHIRP_SMART_INTERVAL=300
 # CHIRP_SENSOR_INTERVAL=10
+# Network interfaces (comma-separated globs): always show / always hide.
+# CHIRP_NET_INCLUDE=
+# CHIRP_NET_EXCLUDE=
 EOF2
 fi
 chmod 0640 /etc/chirp/chirp.env

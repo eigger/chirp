@@ -1,0 +1,161 @@
+{
+  "apiVersion": 1,
+  "instance": {
+    "id": "8f0c2b7e-3a41-4d6e-9b1f-5c7d2e8a9f10",
+    "hostname": "pve",
+    "version": "0.1.0",
+    "kernel": "6.14.8-2-pve",
+    "uptimeSeconds": 123456,
+    "collectedAt": "2026-11-03T10:00:00Z"
+  },
+  "cpu": {
+    "model": "Intel(R) Core(TM) i5-12500",
+    "packageTemp": 47.0,
+    "maxTemp": 52.0,
+    "highTemp": 80.0,
+    "critTemp": 100.0,
+    "cores": [
+      {
+        "label": "Core 0",
+        "temp": 45.0
+      },
+      {
+        "label": "Core 1",
+        "temp": 52.0
+      }
+    ],
+    "source": "coretemp",
+    "updatedAt": "2026-11-03T10:00:00Z"
+  },
+  "sensors": [
+    {
+      "chip": "nvme",
+      "label": "Composite",
+      "temp": 41.9
+    }
+  ],
+  "disks": [
+    {
+      "id": "wwn_5000c500a1b2c3d4",
+      "devicePath": "/dev/disk/by-id/wwn-0x5000c500a1b2c3d4",
+      "name": "sda",
+      "protocol": "ata",
+      "kind": "hdd",
+      "model": "ST4000VN008-2DR166",
+      "serial": "ZDH1ABCD",
+      "firmware": "SC60",
+      "capacityBytes": 4000787030016,
+      "rotationRate": 5980,
+      "standby": false,
+      "temperature": 34,
+      "powerOnHours": 23456,
+      "powerCycleCount": 120,
+      "smartPassed": true,
+      "health": {
+        "status": "warning",
+        "reasons": [
+          {
+            "code": "reallocated_sectors",
+            "value": 8
+          }
+        ]
+      },
+      "ata": {
+        "reallocatedSectors": 8,
+        "pendingSectors": 0,
+        "offlineUncorrectable": 0,
+        "udmaCrcErrors": 0,
+        "wearLevelPercentUsed": null
+      },
+      "nvme": null,
+      "lastReadAt": "2026-11-03T09:58:00Z",
+      "error": null
+    },
+    {
+      "id": "nvme_eui_0025385b21400001",
+      "devicePath": "/dev/disk/by-id/nvme-eui.0025385b21400001",
+      "name": "nvme0n1",
+      "protocol": "nvme",
+      "kind": "nvme",
+      "model": "Samsung SSD 980 PRO 1TB",
+      "serial": "S5GXNF0R123456A",
+      "firmware": "5B2QGXA7",
+      "capacityBytes": 1000204886016,
+      "rotationRate": 0,
+      "standby": false,
+      "temperature": 42,
+      "powerOnHours": 5120,
+      "powerCycleCount": 88,
+      "smartPassed": true,
+      "health": {
+        "status": "ok",
+        "reasons": []
+      },
+      "ata": null,
+      "nvme": {
+        "percentageUsed": 3,
+        "availableSpare": 100,
+        "availableSpareThreshold": 10,
+        "criticalWarning": 0,
+        "mediaErrors": 0,
+        "unsafeShutdowns": 12,
+        "dataUnitsWritten": 123456789,
+        "bytesWritten": 63209875968000
+      },
+      "lastReadAt": "2026-11-03T09:58:00Z",
+      "error": null
+    }
+  ],
+  "memory": {
+    "scope": "container",
+    "totalBytes": 536870912,
+    "availableBytes": 402653184,
+    "usedBytes": 134217728,
+    "usedPercent": 25.0,
+    "swapTotalBytes": 536870912,
+    "swapUsedBytes": 0,
+    "swapUsedPercent": 0.0
+  },
+  "load": {
+    "scope": "container",
+    "load1": 0.84,
+    "load5": 0.71,
+    "load15": 0.65,
+    "cpuCount": 1,
+    "cpuUsagePercent": null
+  },
+  "network": {
+    "scope": "container",
+    "interfaces": [
+      {
+        "id": "eth0",
+        "name": "eth0",
+        "kind": "virtual",
+        "up": true,
+        "operState": "up",
+        "speedMbps": 10000,
+        "rxBytes": 12345678,
+        "txBytes": 9876543,
+        "rxBytesPerSec": null,
+        "txBytesPerSec": null,
+        "rxErrors": 0,
+        "txErrors": 0,
+        "rxDropped": 0,
+        "txDropped": 0
+      }
+    ]
+  },
+  "power": {
+    "packageWatts": null,
+    "packageSource": "rapl",
+    "sources": [
+      {
+        "id": "rapl_package_0",
+        "label": "package-0",
+        "watts": null
+      }
+    ]
+  },
+  "fans": [],
+  "voltages": []
+}

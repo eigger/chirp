@@ -84,6 +84,21 @@ step "chirp-passthrough.sh: least-privilege device rules"
 PT="$REPO_ROOT/proxmox/install/chirp-passthrough.sh"
 grep -q 'CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"' "$PT" || fail "chirp-passthrough.sh default device permission is not rw"
 
+step "chirp-passthrough.sh: host metric mounts"
+grep -q 'CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-all}"' "$PT" || fail "host metric mounts are not on by default"
+grep -q 'none bind,ro,optional,create=file' "$PT" || fail "host /proc mounts are not read-only + optional"
+grep -q 'host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir' "$PT" || fail "the host /sys mount is not ro,nosuid,nodev,noexec + optional"
+grep -q 'proc) echo proc' "$PT" || fail "CHIRP_HOST_MOUNTS=proc (no host sysfs) is missing"
+grep -q 'AppArmor' "$PT" || fail "chirp-passthrough.sh does not document the /host/sys AppArmor exposure"
+for doc in docs/deploy.md docs/ko/deploy.md README.md README.ko.md; do
+  grep -q 'CHIRP_HOST_MOUNTS=proc' "$REPO_ROOT/$doc" || fail "$doc does not document CHIRP_HOST_MOUNTS=proc"
+done
+grep -q 'chirp_check_host_mounts' "$PT" || fail "the smoke test does not verify the host metric mounts"
+# Proxmox moves `#` lines of a CT config into the description (top of file): never rely on markers.
+grep -q 'chirp-passthrough:start' "$PT" && fail "chirp-passthrough.sh still writes/uses marker comments"
+grep -q 'CHIRP_CONF_AWK' "$PT" || fail "chirp_apply_conf does not recognise its lines by content"
+grep -q '"/host/proc"' "$CFG" || fail "config.ts does not default to /host/proc"
+grep -q '"/host/sys"' "$CFG" || fail "config.ts does not default to /host/sys"
 step "Admin account / API key hand-off"
 grep -q 'create the admin account' "$INST" || fail "chirp-install.sh does not tell the user to create the admin account"
 grep -q 'create the admin account' "$REPO_ROOT/proxmox/ct/chirp.sh" || fail "ct/chirp.sh does not tell the user to create the admin account"
