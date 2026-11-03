@@ -235,6 +235,15 @@ chirp_apply_conf() {
     _cp_err "Cannot read the block file: ${blockfile}"
     return 1
   fi
+  # A start marker without its end marker would make the rewrite drop every following line
+  # (including [snapshot] sections): refuse and leave the file alone.
+  local starts ends
+  starts="$(grep -cxF -- "$CHIRP_MARK_START" "$conf")"
+  ends="$(grep -cxF -- "$CHIRP_MARK_END" "$conf")"
+  if [[ "$starts" != "$ends" ]]; then
+    _cp_err "${conf} has unbalanced chirp-passthrough markers (${starts} start, ${ends} end); fix it by hand. Leaving it unchanged."
+    return 1
+  fi
   tmp="$(mktemp)" || return 1
   if ! awk -v s="$CHIRP_MARK_START" -v e="$CHIRP_MARK_END" -v bf="$blockfile" '
     function emit(   l) {
@@ -382,23 +391,35 @@ chirp_memtotal_matches() {
   [[ -n "$h" && "$h" == "$c" ]]
 }
 
-# stdin: interface names (one per line). stdout: the first one that only exists on the
-# host side (bridges, bonds, NICs), skipping loopback and per-guest/container devices.
+# $1: the host's class/net directory, $2: the container's own interface names (newline-separated).
+# stdout: an interface that proves /host/sys shows the host's network namespace: a real network
+# device (has a `type` or `address` file; never `bonding_masters`), not a per-guest device, and
+# absent from the container's own namespace (a host `eth0` would also match the CT's `eth0`).
+# Preference: vmbr*, then bond<N>*, then any other. Returns 1 when nothing distinguishes them.
 chirp_pick_host_iface() {
-  local n
-  while IFS= read -r n; do
-    case "$n" in
-      ""|lo|veth*|tap*|fwbr*|fwpr*|fwln*|docker*|br-*) continue ;;
-    esac
-    printf '%s\n' "$n"
-    return 0
+  local dir="$1" ct="$2" pass p n
+  for pass in vmbr bond other; do
+    for p in "$dir"/*; do
+      n="${p##*/}"
+      [[ -e "$p/type" || -e "$p/address" ]] || continue
+      case "$n" in
+        lo|veth*|tap*|fwbr*|fwpr*|fwln*|docker*|br-*|bonding_masters) continue ;;
+      esac
+      if [[ -n "$ct" ]] && grep -qxF -- "$n" <<<"$ct"; then continue; fi
+      case "$pass" in
+        vmbr) [[ "$n" == vmbr* ]] || continue ;;
+        bond) [[ "$n" =~ ^bond[0-9] ]] || continue ;;
+      esac
+      printf '%s\n' "$n"
+      return 0
+    done
   done
   return 1
 }
 
 # Verify that the host metric mounts show the host's values (not the container's).
 chirp_check_host_mounts() {
-  local ctid="$1" host_mem ct_mem iface mode
+  local ctid="$1" host_mem ct_mem iface mode ct_own
   mode="$(chirp_host_mounts_mode)" || return 0
   [[ "$mode" == "none" ]] && return 0
   host_mem="$(cat /proc/meminfo 2>/dev/null)"
@@ -410,8 +431,9 @@ chirp_check_host_mounts() {
   fi
   [[ "$mode" == "all" ]] || return 0
   # Guests start and stop, so do not compare whole lists: one host-only interface must be there.
-  if ! iface="$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | chirp_pick_host_iface)"; then
-    _cp_warn "Host metric mounts: no host interface to check against; skipping the network check."
+  ct_own="$(pct exec "$ctid" -- sh -c 'ls /sys/class/net 2>/dev/null' || true)"
+  if ! iface="$(chirp_pick_host_iface /sys/class/net "$ct_own")"; then
+    _cp_warn "Host metric mounts: network check inconclusive (no host interface that the container's own namespace lacks); only MemTotal was verified."
     return 0
   fi
   if pct exec "$ctid" -- test -e "/host/sys/class/net/${iface}"; then

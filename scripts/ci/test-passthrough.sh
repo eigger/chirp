@@ -172,8 +172,28 @@ chirp_memtotal_matches $'MemTotal:       65536000 kB' $'MemTotal:         524288
 chirp_memtotal_matches $'MemTotal:       65536000 kB' ""; eq "missing mount" "1" "$?"
 
 echo "[10] host-only interface for the mount check"
-eq "skips lo/tap/veth/fw*/docker" "vmbr0" "$(printf 'docker0\nfwbr100i0\nlo\ntap100i0\nveth101i0\nvmbr0\neno1\n' | chirp_pick_host_iface)"
-printf 'lo\ntap100i0\n' | chirp_pick_host_iface >/dev/null; eq "none -> rc 1" "1" "$?"
+NET="$TMP/net"
+mkiface() { mkdir -p "$NET/$1"; echo 1 >"$NET/$1/type"; }
+mkdir -p "$NET"; : >"$NET/bonding_masters"
+for i in bond0 docker0 eno1 eth0 fwbr100i0 lo tap100i0 veth101i0 vmbr0; do mkiface "$i"; done
+eq "prefers vmbr*" "vmbr0" "$(chirp_pick_host_iface "$NET" $'eth0\nlo')"
+rm -rf "$NET/vmbr0"
+eq "then bond<N>" "bond0" "$(chirp_pick_host_iface "$NET" $'eth0\nlo')"
+rm -rf "$NET/bond0"
+eq "never bonding_masters; then any real device" "eno1" "$(chirp_pick_host_iface "$NET" $'eth0\nlo')"
+rm -rf "$NET/eno1"
+chirp_pick_host_iface "$NET" $'eth0\nlo' >/dev/null; eq "host eth0 clashes with the CT's eth0 -> inconclusive (rc 1)" "1" "$?"
+eq "eth0 counts when the CT has none" "eth0" "$(chirp_pick_host_iface "$NET" "lo")"
+rm -rf "$NET"; mkdir -p "$NET"; : >"$NET/bonding_masters"; mkiface lo; mkiface tap100i0
+chirp_pick_host_iface "$NET" "" >/dev/null; eq "only guest devices -> rc 1" "1" "$?"
+
+echo "[10b] unbalanced markers leave the conf unchanged"
+printf 'arch: amd64\n# chirp-passthrough:start\nlxc.mount.entry: x\n\n[snap1]\nhostname: chirp\n' >"$TMP/broken.conf"
+cp "$TMP/broken.conf" "$TMP/broken.orig"
+chirp_apply_conf "$TMP/broken.conf" "$TMP/b2" 2>/dev/null; eq "start without end -> rc 1" "1" "$?"
+eq "start without end -> untouched (snapshot kept)" "$(cat "$TMP/broken.orig")" "$(cat "$TMP/broken.conf")"
+printf 'arch: amd64\n# chirp-passthrough:end\n' >"$TMP/broken2.conf"
+chirp_apply_conf "$TMP/broken2.conf" "$TMP/b2" 2>/dev/null; eq "end without start -> rc 1" "1" "$?"
 
 echo "[11] CHIRP_DEV_PERM overrides the default rw"
 eq "rwm override" "lxc.cgroup2.devices.allow: b 8:* rwm" \
