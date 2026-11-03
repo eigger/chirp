@@ -84,6 +84,15 @@ step "chirp-passthrough.sh: least-privilege device rules"
 PT="$REPO_ROOT/proxmox/install/chirp-passthrough.sh"
 grep -q 'CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"' "$PT" || fail "chirp-passthrough.sh default device permission is not rw"
 
+step "Admin account / API key hand-off"
+grep -q 'create the admin account' "$INST" || fail "chirp-install.sh does not tell the user to create the admin account"
+grep -q 'create the admin account' "$REPO_ROOT/proxmox/ct/chirp.sh" || fail "ct/chirp.sh does not tell the user to create the admin account"
+grep -q '/api/v1/bootstrap/status' "$PT" || fail "chirp-passthrough.sh does not check whether the admin account exists"
+grep -q 'Settings -> API key' "$PT" || fail "chirp-passthrough.sh does not point Home Assistant users at Settings -> API key"
+grep -qE 'key show|cat /var/lib/chirp/api-key' "$PT" && fail "chirp-passthrough.sh still prints the API key (it belongs in the dashboard)"
+grep -qE 'admin\.json|api-key|/var/lib/chirp' "$UPD" && fail "update.sh must not touch the data directory (admin.json, api-key, ...)"
+echo "admin / key hand-off checks passed"
+
 step "proxmox/ paths referenced by the scripts exist in the repository"
 for src in proxmox/install/chirp-install.sh proxmox/ct/chirp.sh proxmox/install/update.sh; do
   while IFS= read -r rel; do

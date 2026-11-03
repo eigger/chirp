@@ -121,4 +121,7 @@ systemctl restart container-getty@1.service || true
 IP_ADDR="$(hostname -I | awk '{print $1}')"
 echo "[chirp-install] Completed successfully (ref ${REF_RESOLVED})"
 echo "Access URL: http://${IP_ADDR}/"
+echo "Next: open http://${IP_ADDR}/ right away and create the admin account"
+echo "      (until an admin exists, anyone who can reach this address can create it)."
+echo "Then: Settings -> API key -> Copy, and paste it into Home Assistant (hass-chirp)."
 echo "Later updates: run 'update' inside this container"

@@ -49,11 +49,63 @@ fi
 echo "[smoke] cli key show (the server generated the key on first start)"
 KEY="$(node "$APP/apps/server/dist/cli.js" key show)"
 [[ "$KEY" == chp_* ]] || { echo "[smoke] unexpected key output" >&2; exit 1; }
-STATUS="$(node -e 'fetch(process.argv[1],{headers:{authorization:"Bearer "+process.argv[2]}}).then(r=>console.log(r.status))' \
-  "http://127.0.0.1:${PORT}/api/v1/status" "$KEY")"
-[[ "$STATUS" == 200 ]] || { echo "[smoke] /api/v1/status returned $STATUS" >&2; exit 1; }
-if grep -q "$KEY" "$WORK/server.log"; then
-  echo "[smoke] the API key leaked into the log" >&2
-  exit 1
-fi
+
+echo "[smoke] bootstrap -> login -> read key -> /status -> regenerate -> old key 401"
+PASSWORD="smoke-$(node -e 'process.stdout.write(require("node:crypto").randomBytes(9).toString("hex"))')"
+cat >"$WORK/flow.mjs" <<'EOF2'
+const [base, oldKey, password] = process.argv.slice(2);
+const csrf = { "x-chirp-csrf": "1", "content-type": "application/json" };
+const fail = (msg) => { console.error(`[smoke] ${msg}`); process.exit(1); };
+const expect = (res, status, what) => { if (res.status !== status) fail(`${what}: expected ${status}, got ${res.status}`); };
+const cookieOf = (res) => (res.headers.get("set-cookie") ?? "").split(";")[0];
+const status = (key) => fetch(`${base}/api/v1/status`, { headers: { authorization: `Bearer ${key}` } });
+
+let res = await fetch(`${base}/api/v1/bootstrap/status`);
+expect(res, 200, "bootstrap status");
+if ((await res.json()).needsBootstrap !== true) fail("a fresh server should need bootstrap");
+res = await fetch(`${base}/api/v1/bootstrap/admin`, {
+  method: "POST", headers: csrf, body: JSON.stringify({ username: "admin", password, passwordConfirm: password + "x" }),
+});
+expect(res, 400, "bootstrap with a mismatched confirmation");
+res = await fetch(`${base}/api/v1/bootstrap/admin`, {
+  method: "POST", headers: csrf, body: JSON.stringify({ username: "admin", password, passwordConfirm: password }),
+});
+expect(res, 201, "bootstrap");
+res = await fetch(`${base}/api/v1/bootstrap/admin`, {
+  method: "POST", headers: csrf, body: JSON.stringify({ username: "mallory", password, passwordConfirm: password }),
+});
+expect(res, 409, "second bootstrap");
+res = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: csrf, body: JSON.stringify({ username: "admin", password }) });
+expect(res, 200, "login");
+const cookie = cookieOf(res);
+if (!cookie.startsWith("chirp_session=")) fail("login set no session cookie");
+res = await fetch(`${base}/api/v1/admin/api-key`, { headers: { cookie } });
+expect(res, 200, "read key");
+const shown = await res.json();
+if (shown.key !== oldKey || shown.source !== "file") fail("dashboard key differs from cli key show");
+expect(await fetch(`${base}/api/v1/admin/api-key`, { headers: { authorization: `Bearer ${oldKey}` } }), 403, "key endpoint with Bearer");
+expect(await status(oldKey), 200, "/status with the key");
+expect(await fetch(`${base}/api/v1/status`, { headers: { cookie } }), 200, "/status with the session");
+expect(await fetch(`${base}/api/v1/admin/api-key/regenerate`, { method: "POST", headers: { cookie } }), 403, "regenerate without CSRF header");
+res = await fetch(`${base}/api/v1/admin/api-key/regenerate`, { method: "POST", headers: { cookie, "x-chirp-csrf": "1" } });
+expect(res, 200, "regenerate");
+const { key: newKey } = await res.json();
+expect(await status(oldKey), 401, "/status with the old key");
+expect(await status(newKey), 200, "/status with the new key");
+res = await fetch(`${base}/api/v1/auth/logout`, { method: "POST", headers: { cookie, "x-chirp-csrf": "1" } });
+expect(res, 204, "logout");
+expect(await fetch(`${base}/api/v1/auth/me`, { headers: { cookie } }), 401, "session after logout");
+console.log(newKey);
+EOF2
+NEW_KEY="$(node "$WORK/flow.mjs" "http://127.0.0.1:${PORT}" "$KEY" "$PASSWORD")"
+[[ "$NEW_KEY" == chp_* ]] || { echo "[smoke] regenerate returned no key" >&2; exit 1; }
+[[ "$(node "$APP/apps/server/dist/cli.js" key show)" == "$NEW_KEY" ]] || { echo "[smoke] cli key show does not see the regenerated key" >&2; exit 1; }
+[[ "$(node "$APP/apps/server/dist/cli.js" admin show-user)" == admin ]] || { echo "[smoke] cli admin show-user" >&2; exit 1; }
+
+for secret in "$KEY" "$NEW_KEY" "$PASSWORD"; do
+  if grep -qF "$secret" "$WORK/server.log"; then
+    echo "[smoke] a key or password leaked into the log" >&2
+    exit 1
+  fi
+done
 echo "[smoke] OK"

@@ -96,3 +96,6 @@ rm -f "$PASSTHROUGH_TMP"
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
+echo -e "${INFO}${YW}Open http://${IP:-<container IP>}/ right away and create the admin account:${CL}"
+echo -e "${INFO}${YW}until an admin exists, anyone who can reach the dashboard can create it.${CL}"
+echo -e "${INFO}${YW}Then Settings -> API key -> Copy, and paste it into Home Assistant (hass-chirp).${CL}"
