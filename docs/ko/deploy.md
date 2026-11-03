@@ -27,11 +27,12 @@ lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x500
 
 - **`rwm`이 아니라 `rw`.** 디스크는 bind mount되므로 컨테이너가 `mknod`를 할 필요가 없다. smartctl은 SG_IO를 위해 SCSI/SAT 장치를 읽기·쓰기로 열기 때문에 `r`만으로는 부족하다. `CHIRP_DEV_PERM`으로 덮어쓸 수 있다(예: `CHIRP_DEV_PERM=rwm`).
 - **정확한 `major:minor`가 아니라 major 와일드카드(`8:*`).** `sd`의 minor는 장치 인식 순서를 따르고 NVMe 네임스페이스(major 259)의 minor는 동적으로 배정되므로, 정확한 minor 규칙은 호스트 재부팅이나 핫플러그 후 엉뚱한 디스크를 가리키거나 아무것도 가리키지 않게 된다. by-id bind mount는 컨테이너가 시작할 때마다 다시 해석되지만 정적 cgroup 규칙은 그렇지 않고, Proxmox에는 컨테이너 시작 전에 이 규칙을 다시 쓸 수 있는 훅이 없다.
+- **줄 관리 방식.** 스크립트는 자기 줄을 내용으로 알아본다. 위 형식 그대로의 by-id 마운트와 호스트 메트릭 마운트, 그리고 추가하거나 제거하는 디스크 major의 `lxc.cgroup2.devices.allow: b <major>:* <perm>`이다. 실행할 때마다 main 섹션 어디에 있든 이 줄들을 지우고, 새 집합을 첫 `[snapshot]` / `[pve:pending]` 섹션 앞에 한 번만 쓴다. 스냅샷 섹션, 사용자 자신의 `lxc.*` 줄과 나머지는 그대로 두며, 바뀌는 것이 없으면 파일을 다시 쓰지 않는다. 이전 버전은 이 줄들을 `# chirp-passthrough:start` / `:end` 주석으로 감쌌는데, Proxmox는 모든 `#` 줄을 컨테이너 설명(description)으로 취급해 설정을 다시 쓸 때마다 파일 맨 위로 옮긴다(`:`는 `%3A`로 인코딩). 그래서 마커는 믿을 수 없으므로 더 이상 쓰지 않고, 남아 있는 마커는 지운다. chirp가 관리하는 major에 대해 chirp와 똑같은 형식으로 쓴 사용자 규칙(예: `b 8:* rw`)은 chirp의 것으로 취급된다. 호스트에서 사라진 디스크의 장치 규칙(major를 알 수 없음)은 남겨 둔다. CRLF 줄 끝 파일은 변경하지 않고 거부한다.
 - **위험:** 컨테이너 root는 같은 major의 다른 블록 장치(호스트 부트 디스크도 `sd*`/NVMe라면 포함)에 접근할 수 있다. privileged 컨테이너의 root는 이미 사실상 호스트 root이므로 위험이 더 커지지는 않지만, 신뢰하는 네트워크에 두고 다른 서비스를 함께 돌리지 말 것.
 
 ### 호스트 메트릭(메모리·부하·네트워크)
 
-컨테이너 안의 `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`는 lxcfs가 보여 주는 컨테이너 관점 값일 수 있고(예: 호스트 64GB 대신 512MB), 네트워크 네임스페이스에는 컨테이너의 `eth0`만 있다. 그래서 같은 스크립트가 마커 블록에 호스트 파일의 읽기 전용 마운트도 쓴다. `CHIRP_HOST_MOUNTS`로 고른다.
+컨테이너 안의 `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`는 lxcfs가 보여 주는 컨테이너 관점 값일 수 있고(예: 호스트 64GB 대신 512MB), 네트워크 네임스페이스에는 컨테이너의 `eth0`만 있다. 그래서 같은 스크립트가 컨테이너 설정에 호스트 파일의 읽기 전용 마운트도 쓴다. `CHIRP_HOST_MOUNTS`로 고른다.
 
 | `CHIRP_HOST_MOUNTS` | 마운트 | 결과 |
 |---|---|---|
@@ -46,7 +47,7 @@ lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=fi
 lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0
 ```
 
-기존 설치에 마운트를 추가하거나 모드를 바꾸려면 스크립트를 다시 실행한다(예: `CHIRP_HOST_MOUNTS=proc CHIRP_DISKS=<현재 디스크> bash -c "$(curl ...)" _ <CTID>`). 블록은 다시 쓰일 뿐 중복되지 않는다. **재실행 시 디스크 선택은 기존 선택을 대체한다.** 체크리스트에서는 유지할 디스크를 모두 고르고, 비대화식으로는 이전과 같은 `CHIRP_DISKS`를 준다(터미널 없이 실행하면 기본값이 `all`이고, `none`은 passthrough된 디스크를 모두 제거한다).
+기존 설치에 마운트를 추가하거나 모드를 바꾸려면 스크립트를 다시 실행한다(예: `CHIRP_HOST_MOUNTS=proc CHIRP_DISKS=<현재 디스크> bash -c "$(curl ...)" _ <CTID>`). chirp의 줄은 교체될 뿐 중복되지 않는다. **재실행 시 디스크 선택은 기존 선택을 대체한다.** 체크리스트에서는 유지할 디스크를 모두 고르고, 비대화식으로는 이전과 같은 `CHIRP_DISKS`를 준다(터미널 없이 실행하면 기본값이 `all`이고, `none`은 passthrough된 디스크를 모두 제거한다).
 
 chirp은 `/host/proc`, `/host/sys`를 먼저 읽고 `scope: "host"`로 보고한다. 없으면 컨테이너 자신의 파일로 대체하고 `scope: "container"`로 보고하며, 대시보드에는 "컨테이너 관점"(툴팁: 호스트가 아닌 컨테이너 값)이 표시된다. `optional`이므로 마운트가 실패해도 컨테이너는 정상 시작한다. `/proc/net`은 읽는 프로세스의 네트워크 네임스페이스를 따르므로 `/proc/net/dev`는 일부러 마운트하지 않는다.
 
@@ -83,11 +84,13 @@ docker run -d --name chirp \
 ```
 
 - `--privileged` 대신 `--cap-add SYS_RAWIO --cap-add SYS_ADMIN` + `--device` 조합 가능.
-- **읽기 전용 호스트 sysfs 마운트 하나(`-v /sys:/host/sys:ro` + `CHIRP_SYSFS_ROOT=/host/sys`)**로 sysfs에서 오는 것을 모두 처리한다. CPU 센서(hwmon), RAPL 전력, 디스크를 깨우지 않는 안정적인 디스크 ID, 그리고 호스트 네트워크 인터페이스(`scope: "host"`)다. 호스트 sysfs를 bind mount하면 호스트의 네트워크 네임스페이스가 유지되므로 `/host/sys/class/net`에 `vmbr0`, `eno1` 등이 보인다. 주의: 호스트 sysfs 전체가 privileged 컨테이너에 보인다. 읽기 전용이지만 privileged 컨테이너는 다시 마운트할 수 있다(위 `CHIRP_HOST_MOUNTS=all`과 같은 절충).
+- **읽기 전용 호스트 sysfs 마운트 하나(`-v /sys:/host/sys:ro` + `CHIRP_SYSFS_ROOT=/host/sys`)**로 sysfs에서 오는 것을 모두 처리한다. CPU 센서(hwmon), RAPL 전력, 디스크를 깨우지 않는 안정적인 디스크 ID, 그리고 호스트 네트워크 인터페이스(`scope: "host"`)다. 호스트 sysfs를 bind mount하면 호스트의 네트워크 네임스페이스가 유지되므로 `/host/sys/class/net`에 `vmbr0`, `eno1` 등이 보인다. 주의: 호스트 sysfs 전체가 privileged 컨테이너에 보인다. 읽기 전용이지만 privileged 컨테이너는 다시 마운트할 수 있다. 비재귀인 LXC 마운트와 달리 Docker의 `-v`는 **재귀** bind다. `/sys` 아래 호스트의 하위 마운트(cgroup, debugfs, securityfs, efivarfs 등)도 함께 들어오고, `:ro`는 Docker 25+와 커널 5.12+에서만 재귀적으로 적용된다(그 이전에는 하위 마운트가 쓰기 가능하게 남을 수 있다). Docker 25+라면 LXC 마운트와 같은 비재귀 형식을 권장한다.
+  `--mount type=bind,src=/sys,dst=/host/sys,readonly,bind-recursive=disabled`
+  (예시의 `-v` 형식은 모든 Docker 버전에서 동작한다.)
 - **다른 sysfs 구성:**
   - 대신 `-v /sys:/sys:ro`(이전 예시): 센서와 디스크 ID는 동작하고 `/sys/class/net`에도 호스트 인터페이스가 보이지만, chirp은 이를 컨테이너 자신의 `/sys`와 구분할 수 없어 네트워크 섹션을 `scope: "container"`로 보고한다. 호스트 라벨을 얻으려면 `/host/sys`를 쓴다.
   - `--network host`: 컨테이너 자신의 `/sys/class/net`이 호스트 네임스페이스다. 역시 `/host/sys`가 없으면 호스트 데이터가 `scope: "container"`로 보고된다.
-  - 호스트 sysfs 없이 기본 브리지 네트워크: 컨테이너의 `eth0`만 보이고(`scope: "container"`), 호스트 CPU 센서도 없다.
+  - 호스트 sysfs 없이 기본 브리지 네트워크: 컨테이너의 `eth0`만 보인다(`scope: "container"`). CPU 센서와 RAPL은 컨테이너 자신의 `/sys`로도 동작한다(네트워크 네임스페이스를 따르는 것은 `/sys/class/net`뿐이다. 비 privileged 컨테이너는 `/sys/class/powercap`이 가려져 있을 수 있다).
 - `/proc` 파일 3개 마운트로 호스트의 메모리·부하를 `scope: "host"`로 보고한다. 필요한 것은 이 파일들뿐이다. `/proc` 전체를 `/host/proc`에 마운트해도 동작한다(호스트 sysfs가 없으면 네트워크 카운터를 PID 1의 `/host/proc/1/net/dev`에서 읽을 수 있다). 없으면 메모리·부하는 `scope: "container"`(Docker는 `/proc/meminfo`를 가상화하지 않으므로 값 자체는 대개 호스트와 같다).
 - `chirp-data` 볼륨에 API 키(`api-key`), `instance-id`, `disk-ids.json`(고정된 디스크 ID)이 저장된다. 볼륨을 잃으면 키·인스턴스 ID가 바뀌어 Home Assistant 엔티티가 새로 생긴다.
 - **API 키:** 컨테이너 로그에는 출력되지 않는다. 다음으로 확인한다.
@@ -129,7 +132,17 @@ Restart=on-failure
 
 ## 환경 변수
 
-[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_SYSFS_ROOT`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`, `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+
+호스트 경로:
+
+| 변수 | 기본값 | 용도 |
+|---|---|---|
+| `CHIRP_SYSFS_ROOT` | `/sys` | hwmon(CPU 온도, 팬, 전압, hwmon 전력), RAPL powercap, sysfs 디스크 ID. 이 경로만 사용(대체 경로 없음) |
+| `CHIRP_HOST_SYS` | `/host/sys`가 있으면 그것, 없으면 `/sys` | 네트워크 인터페이스(`/sys/class/net`). 먼저 읽고, 다음에 로컬 `/sys`(`scope`로 구분) |
+| `CHIRP_HOST_PROC` | `/host/proc`가 있으면 그것, 없으면 `/proc` | `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`(및 `1/net/dev`). 먼저 읽고, 다음에 로컬 `/proc` |
+
+Proxmox LXC: 기본값 그대로 둔다(설치 스크립트가 `/host/proc`, `/host/sys`를 마운트). Docker: 호스트 `/sys`를 `/host/sys`에 마운트하고 `CHIRP_SYSFS_ROOT=/host/sys`로 두어 마운트 하나가 두 역할을 하게 하고, `/proc` 파일 3개를 `/host/proc` 아래에 마운트한다(Docker 예시 참고). 호스트 직접 설치에는 셋 다 필요 없다.
 
 ## 릴리스 절차
 
