@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,8 +23,8 @@ import { buildApp } from "../src/app.js";
 import { adminFile, createAuth, type Auth } from "../src/auth.js";
 import { bootstrapAuth } from "../src/bootstrap.js";
 import { loadConfig, type Config } from "../src/config.js";
-import { dummyVerify, hashPassword, verifyPassword } from "../src/password.js";
-import { FREE_FAILURES } from "../src/rateLimit.js";
+import { BusyError, dummyVerify, hashPassword, scryptGate, Semaphore, verifyPassword } from "../src/password.js";
+import { clientKey, FREE_FAILURES } from "../src/rateLimit.js";
 import { createFileExclusive } from "../src/secureFile.js";
 import { SESSION_IDLE_MS, SESSION_MAX_MS } from "../src/session.js";
 import { Collector } from "../src/scheduler.js";
@@ -115,8 +115,19 @@ describe("password hashing", () => {
 
   it("refuses absurd parameters from a tampered file instead of running them", async () => {
     const h = await hashPassword("s3cret password", FAST_SCRYPT);
-    expect(await verifyPassword("s3cret password", { ...h, N: 1 << 24 })).toBe(false);
-    expect(await verifyPassword("s3cret password", { ...h, N: 1000 })).toBe(false);
+    for (const bad of [{ N: 1 << 18 }, { N: 1000 }, { r: 17 }, { p: 5 }, { keyLen: 8 }]) {
+      expect(await verifyPassword("s3cret password", { ...h, ...bad }), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("rate-limit identity: IPv4 as is, IPv4-mapped IPv6 as IPv4, IPv6 by /64", () => {
+    expect(clientKey("192.0.2.1")).toBe("192.0.2.1");
+    expect(clientKey("::ffff:192.0.2.1")).toBe("192.0.2.1");
+    expect(clientKey("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(clientKey("2001:0db8:0001:0002:ffff:eeee:dddd:cccc")).toBe("2001:db8:1:2::/64");
+    expect(clientKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(clientKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(clientKey("::1")).toBe("0:0:0:0::/64");
   });
 
   it("admin.json is 0600 and holds only the hash", async () => {
@@ -191,17 +202,69 @@ describe("login / session", () => {
     expect((await login(USER, "wrong password!")).statusCode).toBe(401);
   });
 
-  it("the per-username delay is capped so an attacker cannot lock the admin out for long", async () => {
-    for (let i = 0; i < 30; i++) {
-      await login(USER, "wrong password!", `10.1.${i}.1`); // a new IP each time: only the user key accumulates
-      clock += 61_000;
+  it("a sustained attack on the username costs the real admin at most the 5 s username cap", async () => {
+    // A distributed attacker: a fresh address for every wrong guess, one guess per second, for an hour.
+    let rejectedGuesses = 0;
+    let evaluatedGuesses = 0;
+    for (let i = 0; i < 3600; i++) {
+      const res = await login(USER, "wrong password!", `10.${(i >> 8) & 255}.${i & 255}.1`);
+      if (res.statusCode === 429) rejectedGuesses++;
+      else evaluatedGuesses++;
+      clock += 1000;
     }
-    await login(USER, "wrong password!", "10.9.9.9");
-    const res = await login(USER, PASS, "192.168.1.10");
+    // Guessing this username is bounded to about one evaluated password per 5 s, from all sources together.
+    expect(evaluatedGuesses).toBeLessThanOrEqual(3600 / 5 + FREE_FAILURES + 1);
+    expect(rejectedGuesses).toBeGreaterThan(2500);
+    // The admin, from a clean address, is told to wait at most 5 s and then gets in.
+    const first = await login(USER, PASS, "192.168.1.10");
+    if (first.statusCode === 429) {
+      const wait = RateLimitedResponse.parse(first.json()).retryAfter;
+      expect(wait).toBeLessThanOrEqual(5);
+      clock += wait * 1000;
+      expect((await login(USER, PASS, "192.168.1.10")).statusCode).toBe(200);
+    } else {
+      expect(first.statusCode).toBe(200);
+    }
+  });
+
+  it("a single source keeps backing off up to 15 minutes", async () => {
+    let last = 0;
+    for (let failures = 0; failures < 16; ) {
+      // A different username every time: only the address key accumulates.
+      const res = await login(`user${failures}`, "wrong password!", "10.7.7.7");
+      if (res.statusCode === 429) {
+        last = RateLimitedResponse.parse(res.json()).retryAfter;
+        clock += last * 1000; // wait exactly as told
+      } else {
+        failures++;
+      }
+    }
+    const res = await login("someone-else", "wrong password!", "10.7.7.7");
     expect(res.statusCode).toBe(429);
-    expect(RateLimitedResponse.parse(res.json()).retryAfter).toBeLessThanOrEqual(60);
-    clock += 60_000;
-    expect((await login(USER, PASS, "192.168.1.10")).statusCode).toBe(200);
+    expect(RateLimitedResponse.parse(res.json()).retryAfter).toBe(15 * 60); // 2^11 s, capped at 15 min
+    expect(last).toBeGreaterThan(5);
+  });
+
+  it("IPv6 clients are grouped by /64: rotating the interface ID does not reset the backoff", async () => {
+    for (let i = 0; i < FREE_FAILURES; i++) await login("x", "wrong password!", `2001:db8:1:2::${(i + 1).toString(16)}`);
+    const sameBlock = await login("y", "wrong password!", "2001:db8:1:2:dead:beef:0:9");
+    expect(sameBlock.statusCode).toBe(429);
+    expect((await login("z", "wrong password!", "2001:db8:1:3::1")).statusCode).toBe(401); // another /64
+  });
+
+  it("a successful login ends the session of the cookie it came with", async () => {
+    const old = await session();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { ...CSRF, cookie: old },
+      payload: { username: USER, password: PASS },
+    });
+    expect(res.statusCode).toBe(200);
+    const fresh = cookieOf(res);
+    expect(fresh).not.toBe(old);
+    expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie: old } })).statusCode).toBe(401);
+    expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie: fresh } })).statusCode).toBe(200);
   });
 
   it("parallel guesses are throttled too", async () => {
@@ -471,5 +534,98 @@ describe("start-up notices", () => {
     expect((await bootstrapAuth(config, auth)).find((n) => n.level === "warn")?.msg).toMatch(/create it/);
     await auth.admin.create(USER, PASS);
     expect((await bootstrapAuth(config, auth)).some((n) => n.level === "warn")).toBe(false);
+  });
+});
+
+describe("client address behind proxies", () => {
+  const spoofLogins = async (xff: (i: number) => string, remote: string) => {
+    const codes: number[] = [];
+    for (let i = 0; i < FREE_FAILURES + 3; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/auth/login",
+        headers: { ...CSRF, "x-forwarded-for": xff(i) },
+        payload: { username: `u${i}`, password: "wrong password!" },
+        remoteAddress: remote,
+      });
+      codes.push(res.statusCode);
+    }
+    return codes;
+  };
+
+  it("without CHIRP_TRUST_PROXY a forged X-Forwarded-For is ignored (backoff still applies)", async () => {
+    await start();
+    const codes = await spoofLogins((i) => `203.0.113.${i}`, "198.51.100.7");
+    expect(codes.slice(FREE_FAILURES)).toEqual([429, 429, 429]);
+  });
+
+  it("a hop count trusts only the proxy's own entry, not what the client prepended", async () => {
+    await start({ CHIRP_TRUST_PROXY: "1" });
+    // The client forges a new leftmost address each time; the proxy appends the real one.
+    const codes = await spoofLogins((i) => `203.0.113.${i}, 192.0.2.50`, "10.0.0.2");
+    expect(codes.slice(FREE_FAILURES)).toEqual([429, 429, 429]);
+  });
+
+  it("a proxy address list behaves the same", async () => {
+    await start({ CHIRP_TRUST_PROXY: "10.0.0.0/8" });
+    const codes = await spoofLogins((i) => `203.0.113.${i}, 192.0.2.50`, "10.0.0.2");
+    expect(codes.slice(FREE_FAILURES)).toEqual([429, 429, 429]);
+  });
+
+  it("CHIRP_TRUST_PROXY=true believes the leftmost entry (documented as unsafe unless the proxy overwrites it)", async () => {
+    await start({ CHIRP_TRUST_PROXY: "true" });
+    const codes = await spoofLogins((i) => `203.0.113.${i}, 192.0.2.50`, "10.0.0.2");
+    expect(codes.every((c) => c === 401)).toBe(true);
+  });
+});
+
+describe("scrypt concurrency gate", () => {
+  it("runs at most `max` jobs, queues `queueMax`, rejects the rest immediately", async () => {
+    const gate = new Semaphore(2, 3);
+    const release: (() => void)[] = [];
+    const jobs = Array.from({ length: 10 }, () =>
+      gate.run(() => new Promise<void>((resolve) => release.push(resolve))).then(
+        () => "ok",
+        (e) => (e instanceof BusyError ? "busy" : "other"),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(release).toHaveLength(2);
+    while (release.length) {
+      release.shift()!();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const results = await Promise.all(jobs);
+    expect(results.filter((r) => r === "ok")).toHaveLength(5);
+    expect(results.filter((r) => r === "busy")).toHaveLength(5);
+    expect(gate.peak).toBe(2);
+  });
+
+  it("an unauthenticated login flood is shed with 429 and never runs more than 2 hashes at once", async () => {
+    await start();
+    scryptGate.peak = 0;
+    const results = await Promise.all(
+      Array.from({ length: 60 }, (_, i) => login(`flood${i}`, "wrong password!", `10.66.${i}.1`)),
+    );
+    const codes = results.map((r) => r.statusCode);
+    expect(scryptGate.peak).toBeLessThanOrEqual(2);
+    expect(codes.filter((c) => c === 429).length).toBeGreaterThan(0);
+    for (const r of results.filter((x) => x.statusCode === 429)) {
+      expect(RateLimitedResponse.parse(r.json()).retryAfter).toBe(1);
+    }
+    expect(codes.every((c) => c === 401 || c === 429)).toBe(true);
+  });
+
+  it("admin.json with out-of-range scrypt parameters is refused, not executed", async () => {
+    await start();
+    const file = adminFile(dir);
+    for (const bad of [{ N: 1 << 18 }, { r: 32 }, { p: 8 }]) {
+      const data = JSON.parse(readFileSync(file, "utf8"));
+      writeFileSync(file, JSON.stringify({ ...data, password: { ...data.password, ...bad } }));
+      clock += 10_000;
+      expect((await login(USER, PASS, `10.5.${bad.N ? 1 : bad.r ? 2 : 3}.1`)).statusCode).toBe(401);
+      writeFileSync(file, JSON.stringify(data));
+    }
+    expect((await login(USER, PASS, "10.5.9.1")).statusCode).toBe(200);
   });
 });

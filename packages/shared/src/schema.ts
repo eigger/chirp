@@ -177,7 +177,7 @@ export const BadRequestResponse = z.object({ error: z.literal("bad_request") });
 /**
  * 401: missing or wrong credentials (`WWW-Authenticate: Bearer`): no/invalid API
  * key or session on a data route, no session on a session route, wrong
- * username/password on login, wrong setup code.
+ * username/password on login.
  */
 export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") });
 /**
@@ -187,7 +187,10 @@ export const UnauthorizedResponse = z.object({ error: z.literal("unauthorized") 
 export const ForbiddenResponse = z.object({ error: z.literal("forbidden") });
 /** 409: POST /bootstrap/admin once an admin exists; regenerating a key that comes from CHIRP_API_KEY. */
 export const ConflictResponse = z.object({ error: z.literal("conflict") });
-/** 429: too many failed login / setup / password attempts (`Retry-After` header carries the same seconds). */
+/**
+ * 429: too many failed logins / current-password checks, or too many password
+ * hashes already queued on the server (`Retry-After` header carries the same seconds).
+ */
 export const RateLimitedResponse = z.object({
   error: z.literal("rate_limited"),
   retryAfter: z.number(),

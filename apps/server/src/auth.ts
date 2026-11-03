@@ -214,6 +214,9 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     // Same 401 for an unknown user, a wrong password and "no admin yet".
     if (!(await auth.admin.verify(username, password))) return sendError(reply, 401, "unauthorized");
     auth.limiter.succeed(request.ip, username);
+    // Never keep two sessions for one browser: the session of the cookie this
+    // request came with (if any) ends before the new one is issued.
+    auth.sessions.destroy(readCookie(request.headers.cookie, SESSION_COOKIE));
     return startSession(request, reply);
   });
 

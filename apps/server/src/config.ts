@@ -37,7 +37,12 @@ export interface Config {
   tempWarn: TempWarn;
   webDir: string;
   displayName: string;
-  trustProxy: boolean;
+  /**
+   * Fastify `trustProxy`: false (default), true (trust every X-Forwarded-For
+   * hop: only safe when the proxy overwrites the header), a hop count, or a
+   * list of proxy addresses/CIDRs.
+   */
+  trustProxy: boolean | number | string[];
   corsOrigins: string[];
   /** CHIRP_DEVICES / CHIRP_DEVICE_TYPES entries that were dropped as unsafe. */
   rejected: string[];
@@ -105,6 +110,23 @@ function cookieSecure(value: string | undefined): Config["cookieSecure"] {
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off"].includes(v)) return false;
   throw new ConfigError(`CHIRP_COOKIE_SECURE must be auto, true or false (got "${value}")`);
+}
+
+function trustProxy(value: string | undefined): Config["trustProxy"] {
+  const v = (value ?? "").trim();
+  const lower = v.toLowerCase();
+  if (v === "" || ["0", "false", "no", "off"].includes(lower)) return false;
+  if (["true", "yes", "on"].includes(lower)) return true;
+  if (/^\d+$/.test(v)) {
+    const hops = Number(v);
+    if (hops >= 1 && hops <= 10) return hops;
+  }
+  const items = list(v);
+  const addr = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)(?:\/\d{1,3})?$/;
+  if (items.length && items.every((i) => addr.test(i))) return items;
+  throw new ConfigError(
+    `CHIRP_TRUST_PROXY must be false, true, a hop count (1-10) or a comma-separated list of proxy IPs/CIDRs (got "${value}")`,
+  );
 }
 
 function scanMode(value: string | undefined): Config["scanMode"] {
@@ -209,7 +231,7 @@ export function loadConfig(env: Env = process.env): Config {
     },
     webDir: env.CHIRP_WEB_DIR?.trim() ? resolve(env.CHIRP_WEB_DIR.trim()) : defaultWebDir(),
     displayName: env.CHIRP_DISPLAY_NAME?.trim() || hostname(),
-    trustProxy: bool(env.CHIRP_TRUST_PROXY),
+    trustProxy: trustProxy(env.CHIRP_TRUST_PROXY),
     corsOrigins: list(env.CHIRP_CORS_ORIGINS),
     rejected,
   };

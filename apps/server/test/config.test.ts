@@ -64,6 +64,21 @@ describe("CHIRP_ADMIN_* / CHIRP_COOKIE_SECURE", () => {
     expect(() => loadConfig({ CHIRP_ADMIN_USER: "admin", CHIRP_ADMIN_PASSWORD: "short" })).toThrowError(/10-256 characters/);
     expect(() => loadConfig({ CHIRP_ADMIN_USER: "bad user", CHIRP_ADMIN_PASSWORD: "0123456789" })).toThrowError(ConfigError);
   });
+  it("CHIRP_TRUST_PROXY: false, true, a hop count or a proxy list", () => {
+    expect(loadConfig({}).trustProxy).toBe(false);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "false" }).trustProxy).toBe(false);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "true" }).trustProxy).toBe(true);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "1" }).trustProxy).toBe(1);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "2" }).trustProxy).toBe(2);
+    expect(loadConfig({ CHIRP_TRUST_PROXY: "10.0.0.1, 192.168.0.0/16, fd00::/8" }).trustProxy).toEqual([
+      "10.0.0.1",
+      "192.168.0.0/16",
+      "fd00::/8",
+    ]);
+    for (const bad of ["maybe", "11", "proxy.local", "10.0.0.1,nope"]) {
+      expect(() => loadConfig({ CHIRP_TRUST_PROXY: bad }), bad).toThrowError(/CHIRP_TRUST_PROXY/);
+    }
+  });
   it("cookie Secure flag: auto by default, explicit true/false", () => {
     expect(loadConfig({}).cookieSecure).toBe("auto");
     expect(loadConfig({ CHIRP_COOKIE_SECURE: "true" }).cookieSecure).toBe(true);

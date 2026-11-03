@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import { authHook, registerAuthRoutes, type Auth } from "./auth.js";
 import type { Config } from "./config.js";
+import { BusyError } from "./password.js";
 import type { Collector } from "./scheduler.js";
 import { registerStatic } from "./static.js";
 import { VERSION } from "./version.js";
@@ -26,7 +27,11 @@ export interface AppOptions {
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const { config, collector, auth } = opts;
   const now = opts.now ?? Date.now;
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: config.trustProxy, bodyLimit: 64 * 1024 });
+  // A hop count trusts exactly that many proxies in front of chirp (proxy-addr's
+  // `(addr, i) => i < n`); the rest of X-Forwarded-For is client-controlled.
+  const hops = config.trustProxy;
+  const trustProxy = typeof hops === "number" ? (_addr: string, i: number) => i < hops : hops;
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy, bodyLimit: 64 * 1024 });
 
   if (config.corsOrigins.length) {
     // Bearer-key access only: no credentials (cookies) and never the CSRF header,
@@ -40,6 +45,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // Every error body follows the shared ErrorResponse schema: {"error": <code>}.
   app.setErrorHandler((error: { statusCode?: number }, request, reply) => {
+    if (error instanceof BusyError) {
+      // Password hashing is saturated (login/bootstrap flood): shed load quickly.
+      return reply.code(429).header("retry-after", "1").send({ error: "rate_limited", retryAfter: 1 });
+    }
     const status = typeof error.statusCode === "number" && error.statusCode >= 400 ? error.statusCode : 500;
     if (status >= 500) {
       request.log.error(error);
