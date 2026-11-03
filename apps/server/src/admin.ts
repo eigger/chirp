@@ -8,6 +8,7 @@ import {
   passwordProblem,
   verifyPassword,
   type PasswordHash,
+  type PasswordProblem,
   type ScryptParams,
 } from "./password.js";
 import { createFileExclusive, writeFileAtomic } from "./secureFile.js";
@@ -31,8 +32,14 @@ export class InvalidUsernameError extends Error {
   }
 }
 export class WeakPasswordError extends Error {
-  constructor(readonly problem: "too_short" | "too_long") {
-    super(problem === "too_short" ? "Password is too short" : "Password is too long");
+  constructor(readonly problem: PasswordProblem) {
+    super(
+      problem === "too_short"
+        ? "Password is too short"
+        : problem === "too_long"
+          ? "Password is too long"
+          : "Password is too common or easy to guess",
+    );
   }
 }
 
@@ -104,7 +111,7 @@ export class AdminStore {
 
   private async build(username: string, password: string, createdAt?: string): Promise<AdminFile> {
     if (!Username.safeParse(username).success) throw new InvalidUsernameError();
-    const problem = passwordProblem(password);
+    const problem = passwordProblem(password, username);
     if (problem) throw new WeakPasswordError(problem);
     const at = new Date(this.now()).toISOString();
     return {
@@ -138,19 +145,19 @@ export class AdminStore {
    * the username is wrong or there is no admin) and compares usernames in
    * constant time, so neither timing nor result reveals which part was wrong.
    */
-  async verify(username: string, password: string): Promise<boolean> {
+  async verify(username: string, password: string, priority = false): Promise<boolean> {
     this.refresh();
     const admin = this.admin;
-    if (!admin) return dummyVerify(password, this.scryptParams);
+    if (!admin) return dummyVerify(password, this.scryptParams, priority);
     const userOk = timingSafeEqual(digest(username), digest(admin.username));
-    const passOk = await verifyPassword(password, admin.password);
+    const passOk = await verifyPassword(password, admin.password, priority);
     return userOk && passOk;
   }
 
   /** Check only the password (re-authentication for a password change). */
-  async verifyPassword(password: string): Promise<boolean> {
+  async verifyPassword(password: string, priority = false): Promise<boolean> {
     this.refresh();
-    if (!this.admin) return dummyVerify(password, this.scryptParams);
-    return verifyPassword(password, this.admin.password);
+    if (!this.admin) return dummyVerify(password, this.scryptParams, priority);
+    return verifyPassword(password, this.admin.password, priority);
   }
 }

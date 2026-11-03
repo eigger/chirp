@@ -197,8 +197,15 @@ export const RateLimitedResponse = z.object({
 });
 /** 400: wrong current password on POST /auth/password. */
 export const InvalidCredentialsResponse = z.object({ error: z.literal("invalid_credentials") });
-/** 400: a new password shorter than MIN_PASSWORD_LENGTH (or longer than MAX_PASSWORD_LENGTH). */
-export const WeakPasswordResponse = z.object({ error: z.literal("weak_password") });
+/**
+ * 400: a new password that is shorter than MIN_PASSWORD_LENGTH, longer than
+ * MAX_PASSWORD_LENGTH, or too common/guessable (`reason` says which; added
+ * field, absent in older servers).
+ */
+export const WeakPasswordResponse = z.object({
+  error: z.literal("weak_password"),
+  reason: z.enum(["too_short", "too_long", "common"]).optional(),
+});
 /** 400: the password and its confirmation differ (bootstrap, password change). */
 export const PasswordMismatchResponse = z.object({ error: z.literal("password_mismatch") });
 /** 404: unknown disk id, unknown history metric, unknown /api or /health path. */

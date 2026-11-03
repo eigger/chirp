@@ -57,7 +57,7 @@ function passwordFromStdin(): string {
 function explain(err: unknown): never {
   if (err instanceof InvalidUsernameError) fail(err.message);
   if (err instanceof WeakPasswordError) {
-    fail(err.problem === "too_short" ? "Password is too short (minimum 10 characters)" : "Password is too long");
+    fail(err.problem === "too_short" ? "Password is too short (minimum 10 characters)" : `${err.message}; choose another one`);
   }
   throw err;
 }

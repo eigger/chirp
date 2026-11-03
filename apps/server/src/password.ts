@@ -1,5 +1,6 @@
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@chirp/shared";
+import { isCommonPassword } from "./commonPassword.js";
 
 export interface ScryptParams {
   N: number;
@@ -32,22 +33,40 @@ export class BusyError extends Error {
  * anything beyond that fails at once with BusyError. Used for scrypt so an
  * unauthenticated login/bootstrap flood cannot occupy the whole libuv thread
  * pool (which also serves file and DNS work) or pile up memory.
+ *
+ * `priority` jobs (sources that signed in successfully before, signed-in
+ * sessions) have their own small queue (`reserved`) that is served first, so
+ * a flood from strangers cannot crowd the admin out of the gate.
  */
 export class Semaphore {
   private running = 0;
   private waiting: (() => void)[] = [];
+  private waitingPriority: (() => void)[] = [];
   /** Highest number of jobs ever running at once (for tests). */
   peak = 0;
 
   constructor(
     readonly max: number,
     readonly queueMax: number,
+    readonly reserved = 0,
   ) {}
 
-  async run<T>(job: () => Promise<T>): Promise<T> {
+  /** Jobs waiting in the normal queue. */
+  get queued(): number {
+    return this.waiting.length;
+  }
+
+  async run<T>(job: () => Promise<T>, priority = false): Promise<T> {
     if (this.running >= this.max) {
-      if (this.waiting.length >= this.queueMax) throw new BusyError();
-      await new Promise<void>((resolve) => this.waiting.push(resolve));
+      const queue = priority ? this.waitingPriority : this.waiting;
+      const limit = priority ? this.reserved : this.queueMax;
+      if (queue.length >= limit) {
+        // A priority job may still take a normal queue position when its own queue is full.
+        if (!priority || this.waiting.length >= this.queueMax) throw new BusyError();
+        await new Promise<void>((resolve) => this.waiting.push(resolve));
+      } else {
+        await new Promise<void>((resolve) => queue.push(resolve));
+      }
     } else {
       this.running += 1;
     }
@@ -55,7 +74,7 @@ export class Semaphore {
     try {
       return await job();
     } finally {
-      const next = this.waiting.shift();
+      const next = this.waitingPriority.shift() ?? this.waiting.shift();
       if (next) next(); // hand the slot over directly
       else this.running -= 1;
     }
@@ -63,7 +82,7 @@ export class Semaphore {
 }
 
 /** Global gate for every scrypt call in this process. */
-export const scryptGate = new Semaphore(2, 16);
+export const scryptGate = new Semaphore(2, 16, 4);
 
 export interface PasswordHash extends ScryptParams {
   algo: "scrypt";
@@ -71,7 +90,7 @@ export interface PasswordHash extends ScryptParams {
   hash: string; // base64
 }
 
-function scrypt(password: string, salt: Buffer, params: ScryptParams): Promise<Buffer> {
+function scrypt(password: string, salt: Buffer, params: ScryptParams, priority = false): Promise<Buffer> {
   const opts: ScryptOptions = {
     N: params.N,
     r: params.r,
@@ -83,6 +102,7 @@ function scrypt(password: string, salt: Buffer, params: ScryptParams): Promise<B
       new Promise<Buffer>((resolve, reject) =>
         scryptCb(password.normalize("NFC"), salt, params.keyLen, opts, (err, key) => (err ? reject(err) : resolve(key))),
       ),
+    priority,
   );
 }
 
@@ -110,11 +130,11 @@ export async function hashPassword(password: string, params: ScryptParams = DEFA
   return { algo: "scrypt", ...params, salt: salt.toString("base64"), hash: hash.toString("base64") };
 }
 
-export async function verifyPassword(password: string, stored: PasswordHash): Promise<boolean> {
+export async function verifyPassword(password: string, stored: PasswordHash, priority = false): Promise<boolean> {
   if (stored.algo !== "scrypt" || !validParams(stored)) return false;
   const expected = Buffer.from(stored.hash, "base64");
   if (expected.length !== stored.keyLen) return false;
-  const actual = await scrypt(password, Buffer.from(stored.salt, "base64"), stored);
+  const actual = await scrypt(password, Buffer.from(stored.salt, "base64"), stored, priority);
   return timingSafeEqual(actual, expected);
 }
 
@@ -122,16 +142,23 @@ export async function verifyPassword(password: string, stored: PasswordHash): Pr
  * Burn the same work as a real verification when there is nothing to verify
  * against (unknown user, no admin yet), so response time does not reveal it.
  */
-export async function dummyVerify(password: string, params: ScryptParams = DEFAULT_SCRYPT): Promise<false> {
-  await scrypt(password, Buffer.alloc(16), params);
+export async function dummyVerify(password: string, params: ScryptParams = DEFAULT_SCRYPT, priority = false): Promise<false> {
+  await scrypt(password, Buffer.alloc(16), params, priority);
   return false;
 }
 
-/** null when acceptable, else why not. */
-export function passwordProblem(password: string): "too_short" | "too_long" | null {
+export type PasswordProblem = "too_short" | "too_long" | "common";
+
+/**
+ * null when acceptable, else why not: shorter than MIN_PASSWORD_LENGTH, longer
+ * than MAX_PASSWORD_LENGTH, or guessable (common password, keyboard walk,
+ * repetition, the username with decorations; see commonPassword.ts).
+ */
+export function passwordProblem(password: string, username?: string | null): PasswordProblem | null {
   const len = [...password].length;
   if (len < MIN_PASSWORD_LENGTH) return "too_short";
   if (len > MAX_PASSWORD_LENGTH) return "too_long";
+  if (isCommonPassword(password, username)) return "common";
   return null;
 }
 

@@ -1,20 +1,26 @@
 import { isIPv6 } from "node:net";
 
 /**
- * Exponential backoff for failed credential checks (login, current password).
- * No hard lockout. Every attempt is counted *before* the password is checked,
- * so parallel guesses are throttled too, and while a key is backing off the
- * password is not evaluated at all (the 429 is no oracle).
+ * Throttling for credential checks (login, current password on a change).
  *
- * Two keys per attempt:
- * - the client address (IPv6 grouped by /64, the block one subscriber gets):
- *   after FREE_FAILURES failures it waits 1 s, 2 s, 4 s, ... up to 15 min.
- *   This is what stops guessing from one source.
- * - the username: same schedule but capped at 5 s. A distributed attacker who
- *   keeps failing on the admin's name therefore costs the real admin at most
- *   a few seconds (no lockout), while guessing that name is still bounded to
- *   about one password per 5 s across all sources.
- * Failures are forgotten after FORGET_MS without a new one, or on success.
+ * Every attempt is recorded with begin() *before* the password is checked
+ * (parallel guesses count too) and is refunded when it succeeds or when it
+ * was never evaluated (the scrypt gate was full). Three mechanisms:
+ *
+ * 1. Source backoff (source = IPv4 address or IPv6 /64): after FREE_FAILURES
+ *    failures it waits 1 s, 2 s, 4 s, ... up to 15 min. Always applies.
+ * 2. Username backoff: the same schedule, capped at 5 s. It only applies to
+ *    sources that already failed in the window and have never signed in as
+ *    that user. A clean source (no recorded failure) or a source with a
+ *    previous successful login is still evaluated, so a distributed attack
+ *    on the admin's name cannot keep the admin out.
+ * 3. Daily budget per username (default 1000 failures per rolling 24 h,
+ *    hourly buckets): once spent, only sources with a previous successful
+ *    login for that username may try; everyone else gets 429 until failures
+ *    age out. This is what bounds a distributed guesser that keeps using
+ *    fresh sources. Recovery: wait, restart the service (all of this is in
+ *    memory) or `cli.js admin reset-password` (a credential change resets
+ *    the username's state).
  */
 export const FREE_FAILURES = 5;
 export const FORGET_MS = 15 * 60_000;
@@ -46,13 +52,25 @@ function hextets(ip: string): string[] | null {
  * one subscriber's block does not reset the backoff.
  */
 export function clientKey(ip: string): string {
-  const addr = ip.replace(/%.*$/, "");
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(addr);
-  if (mapped) return mapped[1];
-  if (!isIPv6(addr) || addr.includes(".")) return addr;
-  const h = hextets(addr.toLowerCase());
+  const addr = ip.replace(/%.*$/, "").toLowerCase();
+  if (!isIPv6(addr)) return addr;
+  let h: string[] | null;
+  let v4: string | null = null;
+  if (addr.includes(".")) {
+    // Embedded dotted IPv4 (`::ffff:1.2.3.4`): stand in two zero hextets for it.
+    const i = addr.lastIndexOf(":");
+    v4 = addr.slice(i + 1);
+    h = hextets(`${addr.slice(0, i + 1)}0:0`);
+  } else {
+    h = hextets(addr);
+  }
   if (!h) return addr;
-  return `${h.slice(0, 4).map((x) => (parseInt(x, 16) || 0).toString(16)).join(":")}::/64`;
+  const n = h.map((x) => parseInt(x, 16) || 0);
+  if (n.slice(0, 5).every((x) => x === 0) && n[5] === 0xffff) {
+    // IPv4-mapped, dotted or hex form (`::ffff:0102:0304`): it is that IPv4 client.
+    return v4 ?? `${n[6] >> 8}.${n[6] & 255}.${n[7] >> 8}.${n[7] & 255}`;
+  }
+  return `${n.slice(0, 4).map((x) => x.toString(16)).join(":")}::/64`;
 }
 
 interface Entry {
@@ -60,65 +78,175 @@ interface Entry {
   last: number;
 }
 
+/** What begin() recorded, so the attempt can be refunded exactly once. */
+export interface Attempt {
+  source: string;
+  user: string | null;
+  at: number;
+  refunded: boolean;
+}
+
+export type Decision = { ok: true } | { ok: false; waitMs: number; reason: "source" | "user" | "budget" };
+
+export const DEFAULT_DAILY_BUDGET = 1000;
+const HOUR = 3_600_000;
+const DAY_HOURS = 24;
+/** Remembered successful sources per username (most recent kept). */
+const MAX_TRUSTED_SOURCES = 32;
+
 export class LoginLimiter {
-  private entries = new Map<string, Entry>();
+  private sources = new Map<string, Entry>();
+  private users = new Map<string, Entry>();
+  /** username -> hour index -> failures in that hour */
+  private budget = new Map<string, Map<number, number>>();
+  /** username -> sources that signed in successfully (insertion order = recency) */
+  private trusted = new Map<string, Set<string>>();
 
   constructor(
     private readonly now: () => number = Date.now,
     private readonly caps: BackoffCaps = DEFAULT_CAPS,
+    readonly dailyBudget: number = DEFAULT_DAILY_BUDGET,
   ) {}
-
-  private keys(ip: string, user: string | null): [string, number][] {
-    const out: [string, number][] = [[`ip:${clientKey(ip)}`, this.caps.ip]];
-    if (user) out.push([`user:${user.toLowerCase()}`, this.caps.user]);
-    return out;
-  }
 
   private delay(e: Entry, cap: number): number {
     if (e.failures < FREE_FAILURES) return 0;
     return Math.min(cap, 1000 * 2 ** (e.failures - FREE_FAILURES));
   }
 
-  /** Milliseconds the caller still has to wait (0 = may try now). */
-  retryAfterMs(ip: string, user: string | null): number {
-    const t = this.now();
-    let wait = 0;
-    for (const [k, cap] of this.keys(ip, user)) {
-      const e = this.entries.get(k);
-      if (!e) continue;
-      if (t - e.last > FORGET_MS) {
-        this.entries.delete(k);
+  private live(map: Map<string, Entry>, key: string, t: number): Entry | null {
+    const e = map.get(key);
+    if (!e) return null;
+    if (t - e.last > FORGET_MS) {
+      map.delete(key);
+      return null;
+    }
+    return e;
+  }
+
+  private wait(e: Entry | null, cap: number, t: number): number {
+    return e ? Math.max(0, e.last + this.delay(e, cap) - t) : 0;
+  }
+
+  private budgetUsed(user: string, t: number): { used: number; oldestHour: number | null } {
+    const b = this.budget.get(user);
+    if (!b) return { used: 0, oldestHour: null };
+    const hour = Math.floor(t / HOUR);
+    let used = 0;
+    let oldestHour: number | null = null;
+    for (const [h, n] of b) {
+      if (h <= hour - DAY_HOURS) {
+        b.delete(h);
         continue;
       }
-      wait = Math.max(wait, e.last + this.delay(e, cap) - t);
+      used += n;
+      if (oldestHour === null || h < oldestHour) oldestHour = h;
     }
-    return wait;
+    if (b.size === 0) this.budget.delete(user);
+    return { used, oldestHour };
   }
 
-  fail(ip: string, user: string | null): void {
+  /** Failures currently recorded for a source (diagnostics and tests). */
+  sourceFailures(ip: string): number {
+    return this.live(this.sources, clientKey(ip), this.now())?.failures ?? 0;
+  }
+
+  isTrusted(ip: string, user: string): boolean {
+    return this.trusted.get(user.toLowerCase())?.has(clientKey(ip)) ?? false;
+  }
+
+  /** May this source try this username now? (Nothing is recorded.) */
+  check(ip: string, user: string | null): Decision {
     const t = this.now();
-    if (this.entries.size >= MAX_ENTRIES) this.prune(t);
-    for (const [k] of this.keys(ip, user)) {
-      const e = this.entries.get(k);
-      if (e && t - e.last <= FORGET_MS) {
-        e.failures += 1;
-        e.last = t;
-        this.entries.delete(k); // keep Map order = recency for pruning
-        this.entries.set(k, e);
-      } else {
-        this.entries.delete(k);
-        this.entries.set(k, { failures: 1, last: t });
+    const source = clientKey(ip);
+    const sourceEntry = this.live(this.sources, source, t);
+    const sourceWait = this.wait(sourceEntry, this.caps.ip, t);
+    if (sourceWait > 0) return { ok: false, waitMs: sourceWait, reason: "source" };
+    if (!user) return { ok: true };
+    const name = user.toLowerCase();
+    const trusted = this.trusted.get(name)?.has(source) ?? false;
+    if (trusted) return { ok: true };
+    const { used, oldestHour } = this.budgetUsed(name, t);
+    if (used >= this.dailyBudget && oldestHour !== null) {
+      return { ok: false, waitMs: Math.max(1000, (oldestHour + DAY_HOURS) * HOUR - t), reason: "budget" };
+    }
+    const clean = !sourceEntry || sourceEntry.failures === 0;
+    if (clean) return { ok: true };
+    const userWait = this.wait(this.live(this.users, name, t), this.caps.user, t);
+    return userWait > 0 ? { ok: false, waitMs: userWait, reason: "user" } : { ok: true };
+  }
+
+  private bump(map: Map<string, Entry>, key: string, t: number): void {
+    if (map.size >= MAX_ENTRIES) this.prune(map, t);
+    const e = this.live(map, key, t);
+    map.delete(key); // keep Map order = recency for pruning
+    map.set(key, e ? { failures: e.failures + 1, last: t } : { failures: 1, last: t });
+  }
+
+  /** Record an attempt as a failure before the password is checked. */
+  begin(ip: string, user: string | null): Attempt {
+    const t = this.now();
+    const source = clientKey(ip);
+    const name = user?.toLowerCase() ?? null;
+    this.bump(this.sources, source, t);
+    if (name) {
+      this.bump(this.users, name, t);
+      if (!this.budget.has(name) && this.budget.size >= MAX_ENTRIES) {
+        this.budget.delete(this.budget.keys().next().value as string);
       }
+      const b = this.budget.get(name) ?? new Map<number, number>();
+      const hour = Math.floor(t / HOUR);
+      b.set(hour, (b.get(hour) ?? 0) + 1);
+      this.budget.set(name, b);
+    }
+    return { source, user: name, at: t, refunded: false };
+  }
+
+  private unbump(map: Map<string, Entry>, key: string): void {
+    const e = map.get(key);
+    if (!e) return;
+    e.failures -= 1;
+    if (e.failures <= 0) map.delete(key);
+  }
+
+  /** Undo begin(): the attempt was never evaluated (server busy). */
+  refund(a: Attempt): void {
+    if (a.refunded) return;
+    a.refunded = true;
+    this.unbump(this.sources, a.source);
+    if (!a.user) return;
+    this.unbump(this.users, a.user);
+    const b = this.budget.get(a.user);
+    const hour = Math.floor(a.at / HOUR);
+    const n = b?.get(hour);
+    if (b && n) {
+      if (n <= 1) b.delete(hour);
+      else b.set(hour, n - 1);
     }
   }
 
-  succeed(ip: string, user: string | null): void {
-    for (const [k] of this.keys(ip, user)) this.entries.delete(k);
+  /** The password was right: clear the backoffs and remember the source. */
+  succeed(a: Attempt): void {
+    this.refund(a);
+    this.sources.delete(a.source);
+    if (!a.user) return;
+    this.users.delete(a.user);
+    const set = this.trusted.get(a.user) ?? new Set<string>();
+    set.delete(a.source);
+    set.add(a.source);
+    while (set.size > MAX_TRUSTED_SOURCES) set.delete(set.values().next().value as string);
+    this.trusted.set(a.user, set);
   }
 
-  private prune(t: number): void {
-    for (const [k, e] of this.entries) if (t - e.last > FORGET_MS) this.entries.delete(k);
+  /** Forget everything about a username (its credentials changed). Trusted sources stay. */
+  resetUser(user: string): void {
+    const name = user.toLowerCase();
+    this.users.delete(name);
+    this.budget.delete(name);
+  }
+
+  private prune(map: Map<string, Entry>, t: number): void {
+    for (const [k, e] of map) if (t - e.last > FORGET_MS) map.delete(k);
     // Still full: drop the least recently failing entries.
-    while (this.entries.size >= MAX_ENTRIES) this.entries.delete(this.entries.keys().next().value as string);
+    while (map.size >= MAX_ENTRIES) map.delete(map.keys().next().value as string);
   }
 }

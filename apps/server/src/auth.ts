@@ -12,8 +12,8 @@ import type { ZodError } from "zod";
 import { AdminExistsError, AdminStore, WeakPasswordError } from "./admin.js";
 import { ApiKeyStore, EnvKeyError } from "./apiKey.js";
 import type { Config } from "./config.js";
-import { DEFAULT_SCRYPT, passwordProblem, type ScryptParams } from "./password.js";
-import { LoginLimiter } from "./rateLimit.js";
+import { BusyError, DEFAULT_SCRYPT, passwordProblem, type ScryptParams } from "./password.js";
+import { DEFAULT_DAILY_BUDGET, DEFAULT_CAPS, LoginLimiter, type Attempt } from "./rateLimit.js";
 import { SESSION_MAX_MS, SessionStore } from "./session.js";
 
 /** How a route may be reached. Routes without a mode are `data`. */
@@ -38,7 +38,7 @@ export function adminFile(dataDir: string): string {
 }
 
 export function createAuth(
-  config: Pick<Config, "dataDir">,
+  config: Pick<Config, "dataDir"> & Partial<Pick<Config, "loginDailyBudget">>,
   key: ApiKeyStore,
   opts: { now?: () => number; scrypt?: ScryptParams } = {},
 ): Auth {
@@ -47,7 +47,7 @@ export function createAuth(
     admin: new AdminStore(adminFile(config.dataDir), opts.scrypt ?? DEFAULT_SCRYPT, now),
     sessions: new SessionStore(now),
     key,
-    limiter: new LoginLimiter(now),
+    limiter: new LoginLimiter(now, DEFAULT_CAPS, config.loginDailyBudget ?? DEFAULT_DAILY_BUDGET),
   };
 }
 
@@ -102,6 +102,10 @@ function sendError(reply: FastifyReply, status: number, error: string) {
 
 function unauthorized(reply: FastifyReply) {
   return reply.code(401).header("www-authenticate", "Bearer").send({ error: "unauthorized" });
+}
+
+function weakPassword(reply: FastifyReply, reason: "too_short" | "too_long" | "common") {
+  return reply.code(400).send({ error: "weak_password", reason });
 }
 
 function rateLimited(reply: FastifyReply, waitMs: number) {
@@ -180,6 +184,30 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
 
   const bootstrapLock = serial();
 
+  /**
+   * Run a password check for an attempt begin() already counted. An attempt
+   * the scrypt gate rejected (BusyError) was never evaluated, so it is
+   * refunded instead of counting as a failure.
+   */
+  const counted = async (attempt: Attempt, check: () => Promise<boolean>) => {
+    try {
+      return { attempt, result: await check() };
+    } catch (err) {
+      if (err instanceof BusyError) auth.limiter.refund(attempt);
+      throw err;
+    }
+  };
+
+  // A password change or `cli.js admin reset-password` gives the username a fresh budget.
+  let lastStamp = auth.admin.credentialStamp();
+  const syncCredentials = () => {
+    const stamp = auth.admin.credentialStamp();
+    if (stamp === lastStamp) return;
+    lastStamp = stamp;
+    const name = auth.admin.username();
+    if (name) auth.limiter.resetUser(name);
+  };
+
   api.get("/bootstrap/status", pub, async () => ({ needsBootstrap: !auth.admin.exists() }));
 
   // First-run registration: while no admin exists, the first visitor creates it
@@ -188,7 +216,8 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
   api.post("/bootstrap/admin", pub, async (request, reply) => {
     const body = BootstrapAdminRequest.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, bodyError(body.error));
-    if (passwordProblem(body.data.password)) return sendError(reply, 400, "weak_password");
+    const problem = passwordProblem(body.data.password, body.data.username);
+    if (problem) return weakPassword(reply, problem);
     const created = await bootstrapLock(async () => {
       if (auth.admin.exists()) return false;
       try {
@@ -208,12 +237,14 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     const body = LoginRequest.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, "bad_request");
     const { username, password } = body.data;
-    const wait = auth.limiter.retryAfterMs(request.ip, username);
-    if (wait > 0) return rateLimited(reply, wait);
-    auth.limiter.fail(request.ip, username);
+    syncCredentials();
+    const decision = auth.limiter.check(request.ip, username);
+    if (!decision.ok) return rateLimited(reply, decision.waitMs);
+    const known = auth.limiter.isTrusted(request.ip, username);
     // Same 401 for an unknown user, a wrong password and "no admin yet".
-    if (!(await auth.admin.verify(username, password))) return sendError(reply, 401, "unauthorized");
-    auth.limiter.succeed(request.ip, username);
+    const ok = await counted(auth.limiter.begin(request.ip, username), () => auth.admin.verify(username, password, known));
+    if (!ok.result) return sendError(reply, 401, "unauthorized");
+    auth.limiter.succeed(ok.attempt);
     // Never keep two sessions for one browser: the session of the cookie this
     // request came with (if any) ends before the new one is issued.
     auth.sessions.destroy(readCookie(request.headers.cookie, SESSION_COOKIE));
@@ -233,19 +264,22 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     const body = ChangePasswordRequest.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, bodyError(body.error));
     const user = sessionOf.get(request)!.user;
-    const wait = auth.limiter.retryAfterMs(request.ip, user);
-    if (wait > 0) return rateLimited(reply, wait);
-    auth.limiter.fail(request.ip, user);
-    if (!(await auth.admin.verifyPassword(body.data.currentPassword))) {
-      return sendError(reply, 400, "invalid_credentials");
-    }
-    auth.limiter.succeed(request.ip, user);
+    syncCredentials();
+    const decision = auth.limiter.check(request.ip, user);
+    if (!decision.ok) return rateLimited(reply, decision.waitMs);
+    // A signed-in session is a known party: it gets the gate's priority lane.
+    const ok = await counted(auth.limiter.begin(request.ip, user), () =>
+      auth.admin.verifyPassword(body.data.currentPassword, true),
+    );
+    if (!ok.result) return sendError(reply, 400, "invalid_credentials");
+    auth.limiter.succeed(ok.attempt);
     try {
       await auth.admin.setPassword(body.data.newPassword);
     } catch (err) {
-      if (err instanceof WeakPasswordError) return sendError(reply, 400, "weak_password");
+      if (err instanceof WeakPasswordError) return weakPassword(reply, err.problem);
       throw err;
     }
+    syncCredentials();
     // Every other session (other browsers, a stolen cookie) ends; this one gets a fresh session.
     auth.sessions.clear();
     startSession(request, reply);

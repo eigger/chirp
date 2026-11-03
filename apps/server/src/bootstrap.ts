@@ -17,8 +17,34 @@ export interface Notice {
  *   registration to whoever opens it first. That window is announced loudly.
  * Nothing here logs a password.
  */
-export async function bootstrapAuth(config: Pick<Config, "adminUser" | "adminPassword">, auth: Auth): Promise<Notice[]> {
+/**
+ * A hop count or `true` believes X-Forwarded-For from *any* peer. That is only
+ * safe when chirp cannot be reached except through the proxy.
+ */
+export function trustProxyNotice(config: Pick<Config, "trustProxy" | "host">): Notice | null {
+  const t = config.trustProxy;
+  if (t !== true && typeof t !== "number") return null;
+  const h = config.host.trim();
+  const wildcard = h === "" || h === "0.0.0.0" || h === "::" || h === "[::]" || h === "*";
+  if (!wildcard) return null;
+  return {
+    level: "warn",
+    msg:
+      `CHIRP_TRUST_PROXY=${String(t)} while listening on ${h || "0.0.0.0"}: a client that reaches chirp directly can ` +
+      "forge X-Forwarded-For/-Proto (and dodge the per-address login backoff). Set CHIRP_TRUST_PROXY to the proxy's " +
+      "IP/CIDR, or bind chirp to 127.0.0.1 / firewall it so only the proxy can reach it.",
+  };
+}
+
+export async function bootstrapAuth(
+  config: Pick<Config, "adminUser" | "adminPassword"> & Partial<Pick<Config, "trustProxy" | "host">>,
+  auth: Auth,
+): Promise<Notice[]> {
   const out: Notice[] = [];
+  if (config.trustProxy !== undefined && config.host !== undefined) {
+    const n = trustProxyNotice({ trustProxy: config.trustProxy, host: config.host });
+    if (n) out.push(n);
+  }
   if (config.adminUser && config.adminPassword) {
     if (!auth.admin.exists()) {
       try {

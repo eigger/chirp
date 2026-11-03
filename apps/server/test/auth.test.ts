@@ -21,9 +21,9 @@ import { AdminStore } from "../src/admin.js";
 import { ApiKeyStore, rotateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
 import { adminFile, createAuth, type Auth } from "../src/auth.js";
-import { bootstrapAuth } from "../src/bootstrap.js";
+import { bootstrapAuth, trustProxyNotice } from "../src/bootstrap.js";
 import { loadConfig, type Config } from "../src/config.js";
-import { BusyError, dummyVerify, hashPassword, scryptGate, Semaphore, verifyPassword } from "../src/password.js";
+import { BusyError, dummyVerify, hashPassword, passwordProblem, scryptGate, Semaphore, verifyPassword } from "../src/password.js";
 import { clientKey, FREE_FAILURES } from "../src/rateLimit.js";
 import { createFileExclusive } from "../src/secureFile.js";
 import { SESSION_IDLE_MS, SESSION_MAX_MS } from "../src/session.js";
@@ -128,6 +128,11 @@ describe("password hashing", () => {
     expect(clientKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
     expect(clientKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
     expect(clientKey("::1")).toBe("0:0:0:0::/64");
+    // Hex form of an IPv4-mapped address is that IPv4 too, not the ::/64 bucket.
+    expect(clientKey("::ffff:0102:0304")).toBe("1.2.3.4");
+    expect(clientKey("::FFFF:c000:0201")).toBe("192.0.2.1");
+    expect(clientKey("0:0:0:0:0:ffff:192.0.2.1")).toBe("192.0.2.1");
+    expect(clientKey("::fffe:0102:0304")).toBe("0:0:0:0::/64");
   });
 
   it("admin.json is 0600 and holds only the hash", async () => {
@@ -202,29 +207,77 @@ describe("login / session", () => {
     expect((await login(USER, "wrong password!")).statusCode).toBe(401);
   });
 
-  it("a sustained attack on the username costs the real admin at most the 5 s username cap", async () => {
-    // A distributed attacker: a fresh address for every wrong guess, one guess per second, for an hour.
-    let rejectedGuesses = 0;
-    let evaluatedGuesses = 0;
-    for (let i = 0; i < 3600; i++) {
-      const res = await login(USER, "wrong password!", `10.${(i >> 8) & 255}.${i & 255}.1`);
-      if (res.statusCode === 429) rejectedGuesses++;
-      else evaluatedGuesses++;
-      clock += 1000;
+  /**
+   * Drive an attacker that rotates source addresses at `periodMs` against the
+   * admin's username for `durationMs`, while the real admin tries the right
+   * password from `adminIp` every `adminEveryMs`. Returns what each side saw.
+   */
+  async function siege(opts: { periodMs: number; durationMs: number; adminIp: string; adminEveryMs: number; budget?: number }) {
+    const start = clock;
+    let n = 0;
+    let evaluated = 0;
+    let rejected = 0;
+    const admin: number[] = [];
+    let nextAdmin = start + opts.adminEveryMs;
+    while (clock - start < opts.durationMs) {
+      const res = await login(USER, `guess number ${n}`, `10.${(n >> 16) & 255}.${(n >> 8) & 255}.${n & 255}`);
+      n++;
+      if (res.statusCode === 429) rejected++;
+      else evaluated++;
+      clock += opts.periodMs;
+      if (clock >= nextAdmin) {
+        admin.push((await login(USER, PASS, opts.adminIp)).statusCode);
+        nextAdmin += opts.adminEveryMs;
+      }
     }
-    // Guessing this username is bounded to about one evaluated password per 5 s, from all sources together.
-    expect(evaluatedGuesses).toBeLessThanOrEqual(3600 / 5 + FREE_FAILURES + 1);
-    expect(rejectedGuesses).toBeGreaterThan(2500);
-    // The admin, from a clean address, is told to wait at most 5 s and then gets in.
-    const first = await login(USER, PASS, "192.168.1.10");
-    if (first.statusCode === 429) {
-      const wait = RateLimitedResponse.parse(first.json()).retryAfter;
-      expect(wait).toBeLessThanOrEqual(5);
-      clock += wait * 1000;
-      expect((await login(USER, PASS, "192.168.1.10")).statusCode).toBe(200);
-    } else {
-      expect(first.statusCode).toBe(200);
+    return { evaluated, rejected, admin, sent: n };
+  }
+
+  it("during a continuing distributed attack (1/s) the admin signs in from a clean address", async () => {
+    const r = await siege({ periodMs: 1000, durationMs: 10 * 60_000, adminIp: "192.168.1.10", adminEveryMs: 6000 });
+    // A clean address is always evaluated: the very first try succeeds, and every later one from that
+    // (now known) address as well.
+    expect(r.admin.length).toBeGreaterThan(90);
+    expect(r.admin.every((c) => c === 200)).toBe(true);
+    // Every evaluated guess spends the username's daily budget, so guessing stays bounded.
+    expect(r.evaluated).toBeLessThanOrEqual(auth.limiter.dailyBudget);
+  });
+
+  it("at 10 guesses/s the budget runs out: strangers get 429, the known admin source still gets in", async () => {
+    await login(); // the admin's usual address is known from an earlier sign-in
+    const r = await siege({ periodMs: 100, durationMs: 5 * 60_000, adminIp: "10.0.0.1", adminEveryMs: 6000 });
+    expect(r.sent).toBe(3000);
+    expect(r.evaluated).toBeLessThanOrEqual(auth.limiter.dailyBudget); // at most 1000 guesses per 24 h
+    expect(r.rejected).toBeGreaterThanOrEqual(r.sent - auth.limiter.dailyBudget);
+    expect(r.admin.every((c) => c === 200)).toBe(true);
+    // Budget exhausted: an address that never signed in is refused, even with the right password...
+    const stranger = await login(USER, PASS, "172.16.5.5");
+    expect(stranger.statusCode).toBe(429);
+    expect(RateLimitedResponse.parse(stranger.json()).retryAfter).toBeGreaterThan(60);
+    // ...until the failures age out of the 24 h window.
+    clock += 25 * 3_600_000;
+    expect((await login(USER, PASS, "172.16.5.5")).statusCode).toBe(200);
+  });
+
+  it("a password reset (another process) gives the username a fresh budget", async () => {
+    await siege({ periodMs: 100, durationMs: 2 * 60_000, adminIp: "10.0.0.1", adminEveryMs: 10 * 60_000 });
+    expect((await login(USER, PASS, "172.16.5.6")).statusCode).toBe(429);
+    clock += 5;
+    await new AdminStore(adminFile(dir), FAST_SCRYPT, () => clock).setPassword("reset from the cli");
+    expect((await login(USER, "reset from the cli", "172.16.5.6")).statusCode).toBe(200);
+  });
+
+  it("a source that keeps failing waits out the username backoff; one source cannot guess fast", async () => {
+    // Make the username back off (5 distinct failing sources), then hammer it from one of them.
+    for (let i = 0; i < FREE_FAILURES; i++) await login(USER, "wrong password!", `10.3.0.${i}`);
+    let evaluated = 0;
+    for (let i = 0; i < 600; i++) {
+      const res = await login(USER, "wrong password!", "10.3.0.0");
+      if (res.statusCode === 401) evaluated++;
+      clock += 100;
     }
+    // 60 s at 10 req/s from one already-failing source: only a handful are even evaluated.
+    expect(evaluated).toBeLessThanOrEqual(15);
   });
 
   it("a single source keeps backing off up to 15 minutes", async () => {
@@ -314,7 +367,7 @@ describe("login / session", () => {
     expect(InvalidCredentialsResponse.parse(wrong.json())).toEqual({ error: "invalid_credentials" });
     const weak = await change({ currentPassword: PASS, newPassword: "short", newPasswordConfirm: "short" });
     expect(weak.statusCode).toBe(400);
-    expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password" });
+    expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password", reason: "too_short" });
 
     const ok = await change({ currentPassword: PASS, newPassword: "a brand new password", newPasswordConfirm: "a brand new password" });
     expect(ok.statusCode).toBe(204);
@@ -490,7 +543,7 @@ describe("first-run registration (bootstrap)", () => {
     expect(mismatch.statusCode).toBe(400);
     expect(PasswordMismatchResponse.parse(mismatch.json())).toEqual({ error: "password_mismatch" });
     const weak = await bootstrap({ username: USER, password: "short", passwordConfirm: "short" });
-    expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password" });
+    expect(WeakPasswordResponse.parse(weak.json())).toEqual({ error: "weak_password", reason: "too_short" });
     expect((await bootstrap({ ...good, username: "bad user" })).json()).toEqual({ error: "bad_request" });
     expect((await bootstrap({ username: USER, password: PASS })).json()).toEqual({ error: "bad_request" });
     expect((await bootstrap(good, {})).statusCode).toBe(403);
@@ -515,7 +568,60 @@ describe("first-run registration (bootstrap)", () => {
   });
 });
 
+describe("common passwords", () => {
+  it.each([
+    "password123", "Password123!", "P@ssw0rd!!", "p4ssw0rd2026", "qwertyuiop", "QWERTYUIOP1", "1q2w3e4r5t", "1qaz2wsx3edc",
+    "0987654321", "1234567890", "abcdefghij", "aaaaaaaaaa", "abcabcabcabc", "1212121212", "football2026", "2026football!",
+    "iloveyou12", "letmein1234", "chirpchirp", "chirp123456", "adminchirp1", "homeassistant1", "proxmox2026", "dragonmaster",
+    "Sunshine!!1", "welcome1234", "changeme123", "trustno1234",
+  ])("rejects %s", (pw) => {
+    expect(passwordProblem(pw, "admin")).toBe("common");
+  });
+
+  it("rejects the username with decorations", () => {
+    expect(passwordProblem("operator2026!", "operator")).toBe("common");
+    expect(passwordProblem("--operator--", "operator")).toBe("common");
+  });
+
+  it.each(["correct horse battery", "a brand new password", "seeded password!", "Tz8#kq!Lw2vR", "glacier-mango-tulip", "reset from the cli"])(
+    "accepts %s",
+    (pw) => {
+      expect(passwordProblem(pw, "admin")).toBeNull();
+    },
+  );
+
+  it("bootstrap and password change answer weak_password with reason common", async () => {
+    await start({}, { admin: false });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { username: USER, password: "password123!", passwordConfirm: "password123!" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(WeakPasswordResponse.parse(res.json())).toEqual({ error: "weak_password", reason: "common" });
+    await auth.admin.create(USER, PASS);
+    const cookie = await session();
+    const change = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/password",
+      headers: { cookie, ...CSRF },
+      payload: { currentPassword: PASS, newPassword: "qwertyuiop12", newPasswordConfirm: "qwertyuiop12" },
+    });
+    expect(change.json()).toEqual({ error: "weak_password", reason: "common" });
+    await expect(auth.admin.setPassword("admin123456")).rejects.toThrow(/too common/);
+  });
+});
+
 describe("start-up notices", () => {
+  it("warns when a hop count or true trusts proxies while listening on every address", () => {
+    expect(trustProxyNotice({ trustProxy: 1, host: "0.0.0.0" })?.msg).toMatch(/forge X-Forwarded-For/);
+    expect(trustProxyNotice({ trustProxy: true, host: "::" })?.level).toBe("warn");
+    expect(trustProxyNotice({ trustProxy: 1, host: "127.0.0.1" })).toBeNull();
+    expect(trustProxyNotice({ trustProxy: ["10.0.0.5"], host: "0.0.0.0" })).toBeNull();
+    expect(trustProxyNotice({ trustProxy: false, host: "0.0.0.0" })).toBeNull();
+  });
+
   it("CHIRP_ADMIN_USER/PASSWORD seed the admin once and never log the password", async () => {
     await start({ CHIRP_ADMIN_USER: "ops", CHIRP_ADMIN_PASSWORD: "seeded password!" }, { admin: false });
     const notices = await bootstrapAuth(config, auth);
@@ -579,6 +685,11 @@ describe("client address behind proxies", () => {
   });
 });
 
+/** Resolves once the scrypt gate's normal queue is full (a flood is in progress). */
+async function whenGateFull(): Promise<void> {
+  for (let i = 0; i < 1000 && scryptGate.queued < scryptGate.queueMax; i++) await new Promise((r) => setImmediate(r));
+}
+
 describe("scrypt concurrency gate", () => {
   it("runs at most `max` jobs, queues `queueMax`, rejects the rest immediately", async () => {
     const gate = new Semaphore(2, 3);
@@ -614,6 +725,67 @@ describe("scrypt concurrency gate", () => {
       expect(RateLimitedResponse.parse(r.json()).retryAfter).toBe(1);
     }
     expect(codes.every((c) => c === 401 || c === 429)).toBe(true);
+  });
+
+  it("busy rejections are not counted: after a flood nobody stays penalised", async () => {
+    await start();
+    // Fresh flood addresses every round, so the flood is never throttled away and really fills the gate.
+    const flood = (round: number) =>
+      Promise.all(Array.from({ length: 40 }, (_, i) => login(USER, `flood guess ${i}`, `10.88.${round}.${i}`)));
+    // The admin tries the right password while the gate is full, from a new address each round
+    // (so each try is a stranger to the reserved lane): those tries are shed with 429 busy.
+    const shedAdmin: string[] = [];
+    for (let round = 0; round < 10; round++) {
+      const ip = `192.168.7.${round + 1}`;
+      const [floodResults, code] = await Promise.all([
+        flood(round),
+        whenGateFull().then(() => login(USER, PASS, ip)).then((r) => r.statusCode),
+      ]);
+      expect(floodResults.some((r) => r.statusCode === 429)).toBe(true);
+      if (code === 429) shedAdmin.push(ip);
+      clock += 100;
+    }
+    expect(shedAdmin.length).toBeGreaterThanOrEqual(5);
+    // Nothing was recorded for the shed tries: once capacity is back each address gets in at once.
+    for (const ip of shedAdmin) {
+      expect(auth.limiter.sourceFailures(ip)).toBe(0);
+      expect(auth.limiter.check(ip, USER).ok).toBe(true);
+      expect((await login(USER, PASS, ip)).statusCode).toBe(200);
+    }
+    // Flood sources whose attempts were shed (busy) have nothing recorded against them.
+    const shed = (await flood(99)).map((r, i) => ({ i, code: r.statusCode })).filter((x) => x.code === 429);
+    expect(shed.length).toBeGreaterThan(0);
+    for (const { i } of shed.slice(0, 5)) {
+      expect(auth.limiter.sourceFailures(`10.88.99.${i}`)).toBe(0);
+    }
+  });
+
+  it("an address that signed in before gets the reserved lane while strangers flood the gate", async () => {
+    await start();
+    expect((await login(USER, PASS, "192.168.7.8")).statusCode).toBe(200);
+    const [floodResults, known] = await Promise.all([
+      Promise.all(Array.from({ length: 40 }, (_, i) => login(`stranger${i}`, "wrong password!", `10.89.${i}.1`))),
+      // Fired after the flood has filled the normal queue.
+      whenGateFull().then(() => login(USER, PASS, "192.168.7.8")).then((r) => r.statusCode),
+    ]);
+    expect(floodResults.filter((r) => r.statusCode === 429).length).toBeGreaterThan(0);
+    expect(known).toBe(200);
+  });
+
+  it("the gate's priority lane is served first and bounded", async () => {
+    const gate = new Semaphore(1, 1, 1);
+    const order: string[] = [];
+    let release!: () => void;
+    const first = gate.run(() => new Promise<void>((r) => (release = r)));
+    const normal = gate.run(async () => void order.push("normal"));
+    const prio = gate.run(async () => void order.push("priority"), true);
+    const prio2 = gate.run(async () => void order.push("priority2"), true).catch((e) => (e instanceof BusyError ? "busy" : "x"));
+    const normal2 = gate.run(async () => void order.push("normal2")).catch((e) => (e instanceof BusyError ? "busy" : "x"));
+    expect(await normal2).toBe("busy");
+    expect(await prio2).toBe("busy"); // its own lane and the normal queue are both full
+    release();
+    await Promise.all([first, normal, prio]);
+    expect(order).toEqual(["priority", "normal"]);
   });
 
   it("admin.json with out-of-range scrypt parameters is refused, not executed", async () => {
