@@ -180,7 +180,7 @@ chirp_resolve_selection() {
 # Shared awk helper functions for parsing devN entries and identifying chirp-managed lines.
 CHIRP_DEV_AWK_FUNCS='
   function trim(x) { sub(/^[ \t]+/, "", x); sub(/[ \t]+$/, "", x); return x }
-  function parse_dev(line, res,   idx, v, p, f) {
+  function parse_dev(line, res,   idx, v, p, rest) {
     if (line !~ /^dev[0-9]+[ \t]*[:=]/) return 0
     idx = line
     sub(/[ \t]*[:=].*$/, "", idx)
@@ -189,11 +189,13 @@ CHIRP_DEV_AWK_FUNCS='
     v = line
     sub(/^dev[0-9]+[ \t]*[:=][ \t]*/, "", v)
     v = trim(v)
-    res["has_opts"] = (v ~ /,/ || v ~ /^path=/)
-    split(v, f, /[, \t]/)
-    p = f[1]
+    p = v
+    sub(/,.*$/, "", p)
+    rest = ""
+    if (v ~ /,/) rest = substr(v, length(p) + 2)
     sub(/^path=/, "", p)
     res["path"] = p
+    res["has_opts"] = (rest != "")
     if (p ~ /^\/dev\/disk\/by-id\/[^\/]+$/) {
       res["is_byid"] = 1
       sub(/^\/dev\/disk\/by-id\//, "", p)
@@ -355,7 +357,11 @@ chirp_render_block() {
           if (( ! collision )); then break; fi
           idx=$((idx + 1))
         done
-        echo "dev${idx}: /dev/disk/by-id/${byid}"
+        if [[ "$byid" == *"="* ]]; then
+          echo "dev${idx}: path=/dev/disk/by-id/${byid}"
+        else
+          echo "dev${idx}: /dev/disk/by-id/${byid}"
+        fi
         idx=$((idx + 1))
       done <<<"$tsv"
     else
@@ -501,7 +507,7 @@ chirp_apply_conf() {
   newmajors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
   majors="$newmajors"$'\n'"$recorded"
 
-  new_disks="$(sed -nE 's/^dev[0-9]+: \/dev\/disk\/by-id\/([^\/, \t]+)$/\1/p' "$blockfile")"
+  new_disks="$(sed -nE 's/^dev[0-9]+: (path=)?\/dev\/disk\/by-id\/([^\/, \t]+)$/\2/p' "$blockfile")"
   disks="$(printf '%s\n%s' "$new_disks" "$recorded_disks" | sed '/^$/d' | sort -u | paste -sd, -)"
 
   if awk '
@@ -924,6 +930,17 @@ chirp_passthrough_run() {
       ;;
   esac
 
+  local had_disks_state=0
+  if [[ -s "/var/lib/chirp-passthrough/${ctid}.disks" ]]; then
+    had_disks_state=1
+  fi
+  if [[ "$dev_mode" == "legacy" && "$had_disks_state" -eq 0 ]]; then
+    if awk '/^\[/{exit} /^dev[0-9]+:[ \t]*(path=)?\/dev\/disk\/by-id\// {found=1} END{exit !found}' "$conf"; then
+      _cp_warn "Found existing devN: /dev/disk/by-id/ entries in ${conf} without chirp ownership state."
+      _cp_warn "If these were created by a previous chirp install (e.g. before backup/restore), remove them manually from ${conf} to prevent container boot failures if disks go offline."
+    fi
+  fi
+
   blockfile="$(mktemp)"
   chirp_render_block "$conf" "$dev_mode" <<<"$sel_tsv" >"$blockfile"
   if ! mkdir -p /var/lib/chirp-passthrough || ! chmod 700 /var/lib/chirp-passthrough; then
@@ -935,12 +952,6 @@ chirp_passthrough_run() {
       "/var/lib/chirp-passthrough/${ctid}.disks"; then
     rm -f "$blockfile"
     return 1
-  fi
-  if [[ "$dev_mode" == "legacy" && ! -s "/var/lib/chirp-passthrough/${ctid}.disks" ]]; then
-    if grep -qE '^dev[0-9]+:[ \t]*/dev/disk/by-id/' "$conf"; then
-      _cp_warn "Found existing devN: /dev/disk/by-id/ entries in ${conf} without chirp ownership state."
-      _cp_warn "If these were created by a previous chirp install (e.g. before backup/restore), remove them manually from ${conf} to prevent container boot failures if disks go offline."
-    fi
   fi
   if [[ -s "$blockfile" ]]; then
     if [[ -n "$sel_tsv" ]]; then
