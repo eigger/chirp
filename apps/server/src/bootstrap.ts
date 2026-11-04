@@ -57,8 +57,10 @@ export async function bootstrapAuth(
           const file = config.envFile ?? DEFAULT_ENV_FILE;
           const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
           if (res.error) {
+            const code = (res.error as NodeJS.ErrnoException).code;
+            const ro = code === "EROFS" || code === "EACCES" || code === "EPERM";
             out.push({
-              level: "warn",
+              level: ro ? "info" : "warn",
               msg: `Could not remove CHIRP_SETUP_TOKEN from ${file}: ${res.error.message}`,
             });
           }

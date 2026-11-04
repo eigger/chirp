@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import { readFileSync } from "node:fs";
+import { createSecureContext } from "node:tls";
 import Fastify, { type FastifyInstance } from "fastify";
 import { authHook, registerAuthRoutes, type Auth } from "./auth.js";
 import { ConfigError, type Config } from "./config.js";
@@ -48,8 +49,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         cert: readFileSync(config.tlsCert),
         key: readFileSync(config.tlsKey),
       };
+      createSecureContext(https);
     } catch (err) {
-      throw new ConfigError(`Failed to read TLS certificate or key: ${(err as Error).message}`);
+      throw new ConfigError(`Failed to configure TLS: ${(err as Error).message}`);
     }
   }
   const app = Fastify({

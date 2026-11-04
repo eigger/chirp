@@ -205,4 +205,24 @@ describe("static dashboard", () => {
       }),
     ).rejects.toThrowError(ConfigError);
   });
+
+  it("buildApp throws ConfigError when TLS PEM certificate or key is malformed", async () => {
+    const badCert = join(tmp, "bad-cert.pem");
+    const badKey = join(tmp, "bad-key.pem");
+    writeFileSync(badCert, "not a valid pem block\n");
+    writeFileSync(badKey, "not a valid key block\n");
+    await expect(
+      buildApp({
+        config: {
+          ...loadConfig({
+            CHIRP_TLS_CERT: badCert,
+            CHIRP_TLS_KEY: badKey,
+          }),
+          webDir: join(tmp, "missing"),
+        },
+        collector,
+        auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
+      }),
+    ).rejects.toThrowError(/Failed to configure TLS/);
+  });
 });

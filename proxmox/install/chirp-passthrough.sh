@@ -444,6 +444,7 @@ chirp_ct_env_value() {
   local ctid="$1" key="$2" v=""
   if [[ -n "$ctid" ]] && command -v pct >/dev/null 2>&1; then
     v="$(pct exec "$ctid" -- grep -E "^[[:space:]]*${key}=" /etc/chirp/chirp.env 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+    if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
     v="${v//\"/}"; v="${v//\'/}"
     v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
   fi
@@ -557,12 +558,20 @@ chirp_smoke_and_report() {
 
   chirp_check_host_mounts "$ctid"
 
-  local health="FAIL"
+  local scheme port host_port health_url health="FAIL"
+  scheme="$(chirp_detect_scheme "$ctid")"
+  port="$(chirp_ct_port "$ctid")"
+  if [[ ("$scheme" == "http" && "$port" == "80") || ("$scheme" == "https" && "$port" == "443") ]]; then
+    host_port="${ip}"
+  else
+    host_port="${ip}:${port}"
+  fi
+  health_url="${scheme}://${host_port}/health"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -fsS --max-time 3 "http://${ip}/health" >/dev/null 2>&1; then health="OK"; break; fi
+    if curl -kfsS --max-time 3 "$health_url" >/dev/null 2>&1; then health="OK"; break; fi
     sleep 2
   done
-  echo "GET http://${ip}/health : ${health}"
+  echo "GET ${health_url} : ${health}"
   echo
 
   chirp_account_report "$ctid" "$ip"

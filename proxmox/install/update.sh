@@ -159,6 +159,7 @@ env_value() {
   # Last NAME=value in the env file, without surrounding quotes/whitespace.
   local v
   v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
   v="${v//\"/}"; v="${v//\'/}"
   v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
   printf '%s' "$v"

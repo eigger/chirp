@@ -322,6 +322,44 @@ eq "old release / unreachable -> unknown" "unknown" "$(chirp_bootstrap_state 10.
 eq "unknown -> generic instruction" "1" "$(chirp_account_report 100 10.0.0.5 | grep -c 'create the admin account (or sign in')"
 unset -f curl
 
+echo "[11] pct stub: TLS and port variations in account report"
+FAKE_ENV=""
+pct() {
+  if [[ "$1" == "exec" ]]; then
+    shift 3
+    grep -E "$3" <<<"$FAKE_ENV"
+    return 0
+  fi
+  return 1
+}
+
+# 1. Non-standard port with HTTP
+FAKE_ENV=$'CHIRP_PORT=8080\n'
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "http on port 8080 URL" "1" "$(grep -c 'Dashboard : http://10.0.0.5:8080/' <<<"$REPORT")"
+
+# 2. TLS with port 8443 (CRLF and quotes)
+FAKE_ENV=$'CHIRP_PORT="8443"\r\nCHIRP_TLS_CERT="/etc/chirp/cert.pem"\r\nCHIRP_TLS_KEY=\'/etc/chirp/key.pem\'\r\n'
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "https on port 8443 URL with CRLF and quotes" "1" "$(grep -c 'Dashboard : https://10.0.0.5:8443/' <<<"$REPORT")"
+
+# 3. TLS with default HTTPS port 443 (omits port)
+FAKE_ENV=$'CHIRP_PORT=443\nCHIRP_TLS_CERT=/etc/chirp/cert.pem\nCHIRP_TLS_KEY=/etc/chirp/key.pem\n'
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "https on port 443 omits port" "1" "$(grep -c 'Dashboard : https://10.0.0.5/' <<<"$REPORT")"
+
+# 4. Only CERT without KEY -> falls back to HTTP
+FAKE_ENV=$'CHIRP_PORT=80\nCHIRP_TLS_CERT=/etc/chirp/cert.pem\n'
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "only cert falls back to http" "1" "$(grep -c 'Dashboard : http://10.0.0.5/' <<<"$REPORT")"
+
+# 5. Inline comments on port
+FAKE_ENV=$'CHIRP_PORT=9000 # custom port\n'
+REPORT="$(chirp_account_report 100 10.0.0.5)"
+eq "inline comment stripped from port" "1" "$(grep -c 'Dashboard : http://10.0.0.5:9000/' <<<"$REPORT")"
+
+unset -f pct
+
 echo
 echo "passed=${PASS} failed=${FAILS}"
 [[ "$FAILS" -eq 0 ]]

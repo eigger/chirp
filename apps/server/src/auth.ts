@@ -243,7 +243,7 @@ export function registerAuthRoutes(
       const decision = auth.limiter.check(request.ip, null);
       if (!decision.ok) return rateLimited(reply, decision.waitMs);
       const attempt = auth.limiter.begin(request.ip, null);
-      const token = body.data.setupToken;
+      const token = body.data.setupToken?.trim();
       const valid = token !== undefined && constantTimeEqual(token, config.setupToken);
       if (!valid) {
         return sendError(reply, 403, "unauthorized");
@@ -268,7 +268,10 @@ export function registerAuthRoutes(
       const file = config.envFile ?? DEFAULT_ENV_FILE;
       const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
       if (res.error) {
-        request.log.warn(`Could not remove CHIRP_SETUP_TOKEN from ${file}: ${res.error.message}`);
+        const code = (res.error as NodeJS.ErrnoException).code;
+        const ro = code === "EROFS" || code === "EACCES" || code === "EPERM";
+        const level = ro ? "info" : "warn";
+        request.log[level](`Could not remove CHIRP_SETUP_TOKEN from ${file}: ${res.error.message}`);
       }
     }
     request.log.info(`Admin account "${body.data.username}" created from the dashboard (${request.ip})`);

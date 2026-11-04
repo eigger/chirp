@@ -678,13 +678,18 @@ describe("setup token for first-run registration", () => {
     chmodSync(envFile, 0o400);
     chmodSync(envDir, 0o500);
 
-    const warnLogs: string[] = [];
+    const noticeLogs: string[] = [];
     try {
       await start({ CHIRP_SETUP_TOKEN: TOKEN, CHIRP_ENV_FILE: envFile }, { admin: false });
       app.addHook("onRequest", async (req) => {
+        const origInfo = req.log.info.bind(req.log);
         const origWarn = req.log.warn.bind(req.log);
+        req.log.info = ((...args: unknown[]) => {
+          noticeLogs.push(args.map(String).join(" "));
+          return origInfo(...args);
+        }) as typeof req.log.info;
         req.log.warn = ((...args: unknown[]) => {
-          warnLogs.push(args.map(String).join(" "));
+          noticeLogs.push(args.map(String).join(" "));
           return origWarn(...args);
         }) as typeof req.log.warn;
       });
@@ -700,8 +705,8 @@ describe("setup token for first-run registration", () => {
       expect(auth.admin.username()).toBe(USER);
       expect(config.setupToken).toBeNull();
 
-      expect(warnLogs.some((m) => m.includes("Could not remove CHIRP_SETUP_TOKEN"))).toBe(true);
-      expect(warnLogs.some((m) => m.includes(TOKEN))).toBe(false);
+      expect(noticeLogs.some((m) => m.includes("Could not remove CHIRP_SETUP_TOKEN"))).toBe(true);
+      expect(noticeLogs.some((m) => m.includes(TOKEN))).toBe(false);
     } finally {
       chmodSync(envDir, 0o700);
       chmodSync(envFile, 0o600);
