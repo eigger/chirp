@@ -99,7 +99,7 @@ describe("sign-in flow", () => {
   it("shows the login form, rejects a wrong password, then renders the dashboard", async () => {
     const { fn } = fakeServer();
     render(<App />);
-    await userEvent.type(await screen.findByLabelText("Username"), "admin");
+    await userEvent.type(await screen.findByLabelText(/Username|Email/), "admin");
     await userEvent.type(screen.getByLabelText("Password"), "wrong one");
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Wrong username or password");
@@ -167,7 +167,7 @@ describe("first-run registration", () => {
     await userEvent.type(screen.getByLabelText("Repeat password"), "a long password");
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
     expect(await screen.findByText("pve")).toBeInTheDocument();
-    expect(state.admin).toEqual({ username: "admin", password: "a long password" });
+    expect(state.admin).toEqual({ username: "admin@example.com", password: "a long password" });
   });
 
   it("checks length and confirmation in the browser before sending anything", async () => {
@@ -189,7 +189,7 @@ describe("first-run registration", () => {
   it("rejects an invalid username with a specific message (client and server)", async () => {
     const { fn, state } = fakeServer({ admin: false });
     render(<App />);
-    const user = await screen.findByLabelText("Username");
+    const user = await screen.findByLabelText(/Username|Email/);
     await userEvent.clear(user);
     await userEvent.type(user, "my admin");
     await userEvent.type(screen.getByLabelText(/^Password \(at least/), "a long password");
@@ -275,7 +275,7 @@ describe("first-run registration", () => {
     await userEvent.type(tokenInput, "secret123");
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
     expect(await screen.findByText("pve")).toBeInTheDocument();
-    expect(state.admin).toEqual({ username: "admin", password: "a long password" });
+    expect(state.admin).toEqual({ username: "admin@example.com", password: "a long password" });
   });
 });
 

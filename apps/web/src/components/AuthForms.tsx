@@ -52,16 +52,27 @@ export function LoginForm({
       <h1>{t("login.title")}</h1>
       <p className="muted">{t("login.desc")}</p>
       {notice && !error && <p className="muted">{t(notice === "expired" ? "login.expired" : "bootstrap.taken")}</p>}
-      <label htmlFor="login-username">{t("login.username")}</label>
-      <input id="login-username" autoComplete="username" autoFocus value={username} onChange={(e) => setUsername(e.target.value)} />
-      <label htmlFor="login-password">{t("login.password")}</label>
-      <input
-        id="login-password"
-        type="password"
-        autoComplete="current-password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
+      <div className="form-field">
+        <label htmlFor="login-username">{t("login.username")}</label>
+        <input
+          id="login-username"
+          autoComplete="username email"
+          autoFocus
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="admin@example.com"
+        />
+      </div>
+      <div className="form-field">
+        <label htmlFor="login-password">{t("login.password")}</label>
+        <input
+          id="login-password"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
       {error && (
         <p role="alert" className="error">
           {error}
@@ -98,7 +109,7 @@ export function BootstrapForm({
   onTaken: () => void;
 }) {
   const t = useT();
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("admin@example.com");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [setupToken, setSetupToken] = useState("");
@@ -142,7 +153,7 @@ export function BootstrapForm({
       <h1>{t("bootstrap.title")}</h1>
       <p className="muted">{t("bootstrap.desc")}</p>
       {setupTokenRequired && (
-        <>
+        <div className="form-field">
           <label htmlFor="bootstrap-token">{t("bootstrap.setupToken")}</label>
           <input
             id="bootstrap-token"
@@ -151,32 +162,41 @@ export function BootstrapForm({
             onChange={(e) => setSetupToken(e.target.value)}
             placeholder={t("bootstrap.setupTokenPlaceholder")}
           />
-        </>
+        </div>
       )}
-      <label htmlFor="bootstrap-username">{t("login.username")}</label>
-      <input
-        id="bootstrap-username"
-        autoComplete="username"
-        autoFocus={!setupTokenRequired}
-        value={username}
-        onChange={(e) => setUsername(e.target.value)}
-      />
-      <label htmlFor="bootstrap-password">{t("password.new", { n: MIN_PASSWORD_LENGTH })}</label>
-      <input
-        id="bootstrap-password"
-        type="password"
-        autoComplete="new-password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
-      <label htmlFor="bootstrap-confirm">{t("password.confirm")}</label>
-      <input
-        id="bootstrap-confirm"
-        type="password"
-        autoComplete="new-password"
-        value={confirm}
-        onChange={(e) => setConfirm(e.target.value)}
-      />
+      <div className="form-field">
+        <label htmlFor="bootstrap-username">{t("login.username")}</label>
+        <input
+          id="bootstrap-username"
+          type="text"
+          inputMode="email"
+          autoComplete="username email"
+          autoFocus={!setupTokenRequired}
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="admin@example.com"
+        />
+      </div>
+      <div className="form-field">
+        <label htmlFor="bootstrap-password">{t("password.new", { n: MIN_PASSWORD_LENGTH })}</label>
+        <input
+          id="bootstrap-password"
+          type="password"
+          autoComplete="new-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+      <div className="form-field">
+        <label htmlFor="bootstrap-confirm">{t("password.confirm")}</label>
+        <input
+          id="bootstrap-confirm"
+          type="password"
+          autoComplete="new-password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
+      </div>
       {error && (
         <p role="alert" className="error">
           {error}
