@@ -1,6 +1,6 @@
 # Plan: reduce the privileged-LXC attack surface without losing features
 
-Status: completed. Phase 1 (1.1 exact devN: passthrough with PVE >= 8.1 detection and legacy fallback, 1.2 setup token, 1.3 built-in TLS, 1.4 docs) and Phase 2 (host collector, snapshot schema, server ingestion, unprivileged LXC support) fully implemented. Audience: the agent maintaining it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
+Status: implementation is largely complete; the v0.3.0 release, unprivileged default switch, and real-host verification remain pending. Phase 1 and Phase 2 collector and ingestion features are implemented. Audience: the agent maintaining it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
 
 ## Problem
 
@@ -190,7 +190,7 @@ During peer review cycles for PR #8, several critical edge cases and failure mod
 - **PR #8 Status:** Merged into `master` via commit `3561970`. All CI suites (`lint`, `build`, `test`, `proxmox`) passing.
 - **Default Container Mode:** `var_unprivileged=0` (privileged) remains the default in `proxmox/ct/chirp.sh` until release `v0.3.0` is tagged, ensuring one-liner installs do not fail against older release tarballs (v0.2.0). Unprivileged mode is opt-in via `var_unprivileged=1`.
 - **v0.3.0 Release Roadmap:**
-  1. Extend `chirp-collector.py` to collect host filesystem / ZFS pool metrics for unprivileged containers (Implemented in current PR).
+  1. Extend `chirp-collector.py` to collect host filesystem / ZFS pool metrics for unprivileged containers (implemented in PR #9).
   2. Cut `v0.3.0` release tag containing Phase 2 collector assets and server snapshot ingestion.
   3. Flip `var_unprivileged=1` as the default in `proxmox/ct/chirp.sh` and update deploy documentation.
 

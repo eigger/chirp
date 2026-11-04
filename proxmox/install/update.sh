@@ -100,6 +100,30 @@ if [[ -z "${CHIRP_SELF_UPDATED:-}" ]]; then
   fi
 fi
 
+env_value() {
+  # Last NAME=value in the env file, without surrounding quotes/whitespace.
+  local v
+  v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
+  v="${v//\"/}"; v="${v//\'/}"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
+collector_notice() {
+  local snapshot
+  if grep -qE '^[[:space:]]*CHIRP_HOST_SNAPSHOT=' "$ENV_FILE"; then
+    snapshot="$(env_value CHIRP_HOST_SNAPSHOT)"
+    case "$(printf '%s' "$snapshot" | tr '[:upper:]' '[:lower:]')" in
+      ""|none|0|false) return ;;
+    esac
+  elif [[ ! -d "$1" ]]; then
+    return
+  fi
+  echo "[update] Host collector version cannot be checked from this container."
+  echo "[update] On the Proxmox host, re-run chirp-passthrough.sh for this CT to update the collector."
+}
+
 PREV_TARGET=""
 PREV_VER=""
 if [[ -L "$CURRENT_LINK" ]]; then
@@ -153,16 +177,6 @@ swap_link() {
   # Replace the `current` symlink atomically (temp link + rename).
   ln -sfn "$1" "${CHIRP_DIR}/.current.new"
   mv -Tf "${CHIRP_DIR}/.current.new" "$CURRENT_LINK"
-}
-
-env_value() {
-  # Last NAME=value in the env file, without surrounding quotes/whitespace.
-  local v
-  v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
-  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
-  v="${v//\"/}"; v="${v//\'/}"
-  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
-  printf '%s' "$v"
 }
 
 health_scheme() {
@@ -230,6 +244,7 @@ if wait_healthy; then
     fi
   done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
   echo "chirp update completed (version ${NEW_VER})."
+  collector_notice /run/chirp
   exit 0
 fi
 

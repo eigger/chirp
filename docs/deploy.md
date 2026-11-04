@@ -14,13 +14,19 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-Creates a privileged LXC container by default (`var_unprivileged=0`) for compatibility with current release tarballs. To use an unprivileged LXC with the host-side reader daemon (`chirp-collector`) writing to `/run/chirp/host.json` (no device nodes or host sysfs mounts required inside the container), set `var_unprivileged=1`. (Unprivileged mode will become the default in v0.3.0). Script details are in `proxmox/`.
+Creates a privileged LXC container by default (`var_unprivileged=0`) for compatibility with current release tarballs. To use an unprivileged LXC with the host-side reader daemon (`chirp-collector`) writing to `/run/chirp/host.json` (no device nodes or host sysfs mounts required inside the container), set `var_unprivileged=1`. The default will change after a release containing the host collector is available. Script details are in `proxmox/`.
 
 **Right after installing, open `http://<container IP>/` and create the admin account** (username, password twice, and the one-time `Setup token` printed during installation). The installer writes `CHIRP_SETUP_TOKEN` to `/etc/chirp/chirp.env` (`0600`). On registration, the server attempts best-effort deletion of the token from the env file. Under systemd (`ProtectSystem=strict`), `/etc/chirp` is read-only so the token remains in `chirp.env`; this is harmless because once an admin exists, first-run bootstrap is disabled permanently (`POST /bootstrap/admin` returns `409 conflict`). To retrieve the token if it scrolled off during installation: `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`. When `CHIRP_SETUP_TOKEN` is unset (Docker, manual installs), the registration window is open to anyone who reaches it first, so create it immediately. Then copy the API key from **Settings -> API key** into Home Assistant. Forgot the password: `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password` (prints a new random password and signs out every session).
 
 ### Disk passthrough and its permissions
 
 `proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) configures device access into the container:
+
+For an unprivileged container, re-run the script on the Proxmox host after updating the container, replacing `<CTID>` with its ID. The container cannot check the host collector version. The script selects the installed release when available and may fall back to `master` for older releases.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
+```
 
 - **Legacy passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, default):** uses legacy bind mounts and major wildcard rules:
 

@@ -26,7 +26,7 @@ unset _chirp_build_func
 #
 # Notes:
 #  - Default: privileged direct passthrough (var_unprivileged=0) for compatibility
-#    with current release v0.2.0. Set var_unprivileged=1 to use an unprivileged container
+#    with older release tarballs. Set var_unprivileged=1 to use an unprivileged container
 #    with the host-side snapshot collector (/run/chirp).
 #  - Do not use it for CTs managed by cluster HA (the disks are tied to one node).
 #  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES:
