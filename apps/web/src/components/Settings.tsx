@@ -93,23 +93,25 @@ export function ApiKeyPanel({ onUnauthorized }: Props) {
       <p className="muted">{t("key.desc")}</p>
       {state && (
         <>
-          <code className="issued-key" data-testid="api-key">
-            {visible ? state.key : masked(state.key)}
-          </code>
-          <div className="row-actions">
-            <button type="button" onClick={() => setVisible((v) => !v)}>
-              {visible ? t("key.hide") : t("key.show")}
-            </button>
-            <button type="button" className="primary" onClick={() => void copy()}>
-              {t("key.copy")}
-            </button>
-            {!confirming && (
-              <button type="button" disabled={fromEnv || busy} onClick={() => setConfirming(true)}>
-                {t("key.regenerate")}
+          <div className="key-display-row">
+            <code className="issued-key" data-testid="api-key">
+              {visible ? state.key : masked(state.key)}
+            </code>
+            <div className="row-actions">
+              <button type="button" onClick={() => setVisible((v) => !v)}>
+                {visible ? t("key.hide") : t("key.show")}
               </button>
-            )}
+              <button type="button" className="primary" onClick={() => void copy()}>
+                {t("key.copy")}
+              </button>
+              {!confirming && (
+                <button type="button" disabled={fromEnv || busy} onClick={() => setConfirming(true)}>
+                  {t("key.regenerate")}
+                </button>
+              )}
+            </div>
           </div>
-          <p className="muted">{t("key.haHint", { host, port })}</p>
+          <p className="muted small">{t("key.haHint", { host, port })}</p>
           {fromEnv && <p className="muted small">{t("key.envReadOnly")}</p>}
           {confirming && (
             <div className="confirm-box" role="alertdialog" aria-label="regenerate-confirm">
@@ -176,22 +178,32 @@ export function ChangePassword({ onUnauthorized }: Props) {
   };
 
   return (
-    <form className="card settings-form" aria-label="change-password" onSubmit={submit}>
+    <form className="card settings-card" aria-label="change-password" onSubmit={submit}>
       <h2>{t("pw.title")}</h2>
-      <label htmlFor="pw-current">{t("pw.current")}</label>
-      <input id="pw-current" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
-      <label htmlFor="pw-new">{t("pw.new", { n: MIN_PASSWORD_LENGTH })}</label>
-      <input id="pw-new" type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
-      <label htmlFor="pw-confirm">{t("pw.confirm")}</label>
-      <input id="pw-confirm" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-      {msg && (
-        <p role={msg.ok ? "status" : "alert"} className={msg.ok ? "muted" : "error"}>
-          {msg.text}
-        </p>
-      )}
-      <button type="submit" className="primary" disabled={busy || !current || !next || !confirm}>
-        {busy ? t("pw.busy") : t("pw.submit")}
-      </button>
+      <div className="settings-fields">
+        <div className="form-field">
+          <label htmlFor="pw-current">{t("pw.current")}</label>
+          <input id="pw-current" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />
+        </div>
+        <div className="form-field">
+          <label htmlFor="pw-new">{t("pw.new", { n: MIN_PASSWORD_LENGTH })}</label>
+          <input id="pw-new" type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
+        </div>
+        <div className="form-field">
+          <label htmlFor="pw-confirm">{t("pw.confirm")}</label>
+          <input id="pw-confirm" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        </div>
+      </div>
+      <div className="settings-actions">
+        <button type="submit" className="primary" disabled={busy || !current || !next || !confirm}>
+          {busy ? t("pw.busy") : t("pw.submit")}
+        </button>
+        {msg && (
+          <span role={msg.ok ? "status" : "alert"} className={msg.ok ? "muted" : "error"}>
+            {msg.text}
+          </span>
+        )}
+      </div>
     </form>
   );
 }

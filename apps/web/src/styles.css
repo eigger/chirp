@@ -45,7 +45,10 @@ input {
   font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px;
   border: 1px solid var(--color-input-border); background: var(--color-bg); color: var(--color-text);
 }
-.gate { max-width: 420px; margin: 40px auto; display: grid; gap: 10px; }
+.gate { max-width: 440px; margin: 40px auto; display: grid; gap: 14px; }
+.gate h1 { margin-bottom: 2px; }
+.gate p.muted { margin: 0 0 4px; }
+.gate button[type="submit"] { margin-top: 4px; }
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 0 0 12px; }
 .summary-grid dt { font-size: .75rem; color: var(--color-text-muted); }
 .summary-grid dd { margin: 0; font-weight: 600; word-break: break-word; }
@@ -101,7 +104,11 @@ tr.detail-row td { white-space: normal; background: var(--color-bg); }
 button.link[aria-current="page"] { text-decoration: underline; text-underline-offset: 4px; }
 button.danger { background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
 label { font-size: .85rem; color: var(--color-text-muted); }
-.settings-form { display: grid; gap: 8px; max-width: 480px; }
+.key-display-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0 8px; }
+.key-display-row .issued-key { flex: 1; min-width: 260px; }
+.settings-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 12px 0 16px; }
+.form-field { display: grid; gap: 4px; }
+.settings-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .inline-form { display: grid; gap: 6px; margin: 12px 0; max-width: 560px; }
 .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .row-actions input { flex: 1; min-width: 160px; width: auto; }
