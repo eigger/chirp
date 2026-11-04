@@ -30,7 +30,7 @@ export class HostSnapshotReader {
   private readonly now: () => number;
 
   private lastMtimeMs = 0;
-  private lastResult: ReadSnapshotResult = { snapshot: null, stale: false, error: null };
+  private lastParsed: HostSnapshot | null = null;
   private warnedStale = false;
   private warnedError: string | null = null;
 
@@ -65,14 +65,14 @@ export class HostSnapshotReader {
       }
 
       // Fast-path: mtime has not changed since last successful parse
-      if (this.lastResult.snapshot && stat.mtimeMs === this.lastMtimeMs) {
-        const ageSec = Math.floor((this.now() - this.lastResult.snapshot.timestamp) / 1000);
+      if (this.lastParsed && stat.mtimeMs === this.lastMtimeMs) {
+        const ageSec = Math.floor((this.now() - this.lastParsed.timestamp) / 1000);
         const stale = ageSec > this.maxAgeSec;
         this.checkStale(stale, ageSec);
         if (stale) {
           return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
         }
-        return { ...this.lastResult, stale: false };
+        return { snapshot: this.lastParsed, stale: false, error: null };
       }
 
       const text = readFileSync(this.path, "utf8");
@@ -85,6 +85,9 @@ export class HostSnapshotReader {
       }
 
       const snapshot = parsed.data;
+      this.lastMtimeMs = stat.mtimeMs;
+      this.lastParsed = snapshot;
+
       const ageSec = Math.floor((this.now() - snapshot.timestamp) / 1000);
       const stale = ageSec > this.maxAgeSec;
       this.checkStale(stale, ageSec);
@@ -92,13 +95,11 @@ export class HostSnapshotReader {
         return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
       }
 
-      this.lastMtimeMs = stat.mtimeMs;
-      this.lastResult = { snapshot, stale: false, error: null };
       if (this.warnedError) {
         this.warn(`host snapshot recovered: parsed valid snapshot (${this.path})`);
         this.warnedError = null;
       }
-      return this.lastResult;
+      return { snapshot, stale: false, error: null };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logError(`failed to read snapshot: ${msg}`);

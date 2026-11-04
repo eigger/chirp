@@ -105,6 +105,7 @@ describe("Host snapshot integration in CollectorDeps", () => {
       const config = loadConfig({
         CHIRP_HOST_SNAPSHOT: snapPath,
         CHIRP_DATA_DIR: dir,
+        CHIRP_SNAPSHOT_MAX_AGE_SEC: "999999999",
       });
 
       const deps = defaultDeps(config);
@@ -163,6 +164,7 @@ describe("Host snapshot integration in CollectorDeps", () => {
       const config = loadConfig({
         CHIRP_HOST_SNAPSHOT: snapPath,
         CHIRP_DATA_DIR: dir,
+        CHIRP_SNAPSHOT_MAX_AGE_SEC: "999999999",
       });
 
       const deps = defaultDeps(config);
@@ -201,6 +203,7 @@ describe("Host snapshot integration in CollectorDeps", () => {
       const config = loadConfig({
         CHIRP_HOST_SNAPSHOT: snapPath,
         CHIRP_DATA_DIR: dir,
+        CHIRP_SNAPSHOT_MAX_AGE_SEC: "999999999",
       });
 
       const deps = defaultDeps(config);
@@ -231,6 +234,56 @@ describe("Host snapshot integration in CollectorDeps", () => {
       // Sample 3 on server: dt is based on snapshot timestamps (10s)
       const sample3 = deps.sampleHost!(14000);
       expect(sample3.network?.interfaces[0].rxBytesPerSec).toBe(10000);
+    });
+  });
+
+  it("calculates RAPL power using snapshot timestamps and handles transitions between direct and snapshot modes", async () => {
+    await withTempDir(async (dir) => {
+      const snapPath = join(dir, "host.json");
+      const t0 = 1700000000000;
+      const baseSnap = getMockSnapshot(t0);
+      writeFileSync(snapPath, JSON.stringify(baseSnap));
+
+      const config = loadConfig({
+        CHIRP_HOST_SNAPSHOT: snapPath,
+        CHIRP_DATA_DIR: dir,
+        CHIRP_SNAPSHOT_MAX_AGE_SEC: "999999999",
+      });
+
+      const deps = defaultDeps(config);
+
+      // Sample 1: initial reading (no delta yet)
+      const s1 = deps.sampleHost!(1000);
+      expect(s1.power?.packageWatts).toBeNull();
+
+      // Sample 2: 10 seconds later in snapshot epoch time (t0 + 10_000ms), energy +200,000,000 uJ = 200 J / 10s = 20 W
+      const snap2 = {
+        ...baseSnap,
+        timestamp: t0 + 10000,
+        hwmon: {
+          ...baseSnap.hwmon!,
+          rapl: [
+            {
+              zone: "intel-rapl:0",
+              label: "package-0",
+              isPackage: true,
+              energyUj: 5000000 + 200000000,
+              maxEnergyRangeUj: 1000000000,
+            },
+          ],
+        },
+      };
+      writeFileSync(snapPath, JSON.stringify(snap2));
+
+      // Server calls sampleHost at performance.now() = 11000
+      const s2 = deps.sampleHost!(11000);
+      expect(s2.power?.packageWatts).toBe(20);
+
+      // When snapshot file is removed (fallback to direct read), clocks must not be mixed
+      rmSync(snapPath);
+      const s3 = deps.sampleHost!(15000);
+      // Since mode transitioned from snapshot to direct, previous delta state was reset
+      expect(s3.power).toBeNull();
     });
   });
 });

@@ -222,4 +222,61 @@ describe("HostSnapshotReader", () => {
       expect(readout?.sensors[0].temp).toBe(35.0);
     });
   });
+
+  it("permits null smartctl in smart.devices so a failed disk does not reject snapshot", () => {
+    withTempDir((dir) => {
+      const p = join(dir, "host-nullsmart.json");
+      const nullSmartSnapshot = {
+        ...sampleSnapshot,
+        smart: {
+          collectedAt: 1000000,
+          devices: [
+            {
+              devicePath: "/dev/sda",
+              type: "sat",
+              byIds: ["ata-Crucial_123"],
+              wwn: null,
+              smartctl: null,
+            },
+          ],
+        },
+      };
+      writeFileSync(p, JSON.stringify(nullSmartSnapshot));
+
+      const reader = new HostSnapshotReader({ path: p, now: () => 1000000 });
+      const res = reader.read();
+
+      expect(res.error).toBeNull();
+      expect(res.snapshot).not.toBeNull();
+      expect(res.snapshot?.smart?.devices[0].smartctl).toBeNull();
+    });
+  });
+
+  it("reuses cached parse result when file has not changed on disk", () => {
+    withTempDir((dir) => {
+      const p = join(dir, "host.json");
+      writeFileSync(p, JSON.stringify(sampleSnapshot));
+
+      let now = 1000000;
+      const reader = new HostSnapshotReader({ path: p, now: () => now });
+
+      const res1 = reader.read();
+      expect(res1.snapshot).not.toBeNull();
+
+      // Read again immediately without modifying file
+      const res2 = reader.read();
+      expect(res2.snapshot).toBe(res1.snapshot); // exact same object reference
+
+      // Make stale: should use cached parse and fast-path mark stale
+      now += 100_000;
+      const res3 = reader.read();
+      expect(res3.stale).toBe(true);
+      expect(res3.snapshot).toBeNull();
+
+      // Next read still stale: fast-path hit
+      const res4 = reader.read();
+      expect(res4.stale).toBe(true);
+      expect(res4.snapshot).toBeNull();
+    });
+  });
 });

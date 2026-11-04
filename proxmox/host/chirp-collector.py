@@ -12,6 +12,7 @@ Standard library only: Python 3.9+ compatible. No pip packages, no external jq n
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -23,11 +24,31 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 def slug(s: str) -> str:
-    """Format string into ^[a-z0-9_]+$ slug matching chirp-server conventions."""
+    """Format string into ^[a-z0-9_]+$ slug matching chirp-server diskIdentity.ts slug."""
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
-    s = re.sub(r"_+", "_", s)
-    return s.strip("_") or "sensor"
+    return s.strip("_")
+
+
+def load_env_file(path: str = "/etc/chirp/chirp.env") -> Dict[str, str]:
+    """Parse key=value pairs from an env file without shell evaluation."""
+    env: Dict[str, str] = {}
+    if not os.path.isfile(path):
+        return env
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("\"'")
+                    env[k] = v
+    except OSError:
+        pass
+    return env
 
 
 def read_text(path: str) -> Optional[str]:
@@ -182,6 +203,52 @@ def read_thermal_zone(sysfs_root: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def hwmon_key(sysfs_root: str, chip_path: str) -> str:
+    """Stable key that survives hwmonN renumbering (relative to sysfs root)."""
+    try:
+        root_path = os.path.realpath(sysfs_root)
+    except OSError:
+        root_path = sysfs_root
+    try:
+        device_path = os.path.realpath(os.path.join(chip_path, "device"))
+    except OSError:
+        try:
+            device_path = os.path.realpath(chip_path)
+        except OSError:
+            device_path = chip_path
+    rel_path = os.path.relpath(device_path, root_path).replace("\\", "/")
+    if rel_path.startswith("devices/"):
+        return re.sub(r"(?:/hwmon)?/hwmon\d+$", "", rel_path)
+    return rel_path
+
+
+def hwmon_id(chip_name: str, chip_key: str, prefix: str, idx: int, display: str) -> str:
+    """Construct deterministic sensor ID matching server power.ts."""
+    base = slug(f"{chip_name}_{display}") or prefix
+    h = hashlib.sha256(f"{chip_key}/{prefix}{idx}".encode("utf-8")).hexdigest()[:16]
+    return f"{base}_{h}"
+
+
+def is_gpu(chip_path: str, chip_name: str) -> bool:
+    if chip_name in ("coretemp", "k10temp", "zenpower", "cpu_thermal"):
+        return False
+    gpu_drivers = ("amdgpu", "radeon", "nouveau", "nvidia", "i915", "xe")
+    if chip_name in gpu_drivers:
+        return True
+    try:
+        driver = os.path.basename(os.readlink(os.path.join(chip_path, "device", "driver")))
+        return driver in gpu_drivers
+    except OSError:
+        return False
+
+
+def is_suspended(chip_path: str, chip_name: str) -> bool:
+    if not is_gpu(chip_path, chip_name):
+        return False
+    status = read_text(os.path.join(chip_path, "device", "power", "runtime_status"))
+    return (status or "").strip() == "suspended"
+
+
 def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
     hwmon_base = os.path.join(sysfs_root, "class", "hwmon")
     sensors_list: List[Dict[str, Any]] = []
@@ -193,29 +260,41 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
     detected_cpu_chips: List[Tuple[int, str, List[Dict[str, Any]]]] = []
 
     if os.path.isdir(hwmon_base):
-        for d in sorted(os.listdir(hwmon_base)):
-            path = os.path.join(hwmon_base, d)
-            name = (read_text(os.path.join(path, "name")) or "").strip()
-            if not name:
+        chip_dirs: List[Dict[str, Any]] = []
+        for d in os.listdir(hwmon_base):
+            cpath = os.path.join(hwmon_base, d)
+            cname = (read_text(os.path.join(cpath, "name")) or "").strip()
+            if not cname:
                 continue
+            ckey = hwmon_key(sysfs_root, cpath)
+            csuspended = is_suspended(cpath, cname)
+            chip_dirs.append({
+                "path": cpath,
+                "name": cname,
+                "key": ckey,
+                "suspended": csuspended,
+            })
+        chip_dirs.sort(key=lambda c: (c["name"], c["key"], c["path"]))
 
-            chip_temps: List[Dict[str, Any]] = []
+        for chip in chip_dirs:
+            path = chip["path"]
+            name = chip["name"]
+            key = chip["key"]
+            suspended = chip["suspended"]
             files = sorted(os.listdir(path))
 
             # Temp sensors
-            for f in files:
-                m = re.match(r"^temp(\d+)_input$", f)
-                if not m:
-                    continue
-                idx = m.group(1)
-                temp = read_milli(os.path.join(path, f))
+            chip_temps: List[Dict[str, Any]] = []
+            temp_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^temp(\d+)_input$", f))}))
+            for idx in temp_indices:
+                t = read_milli(os.path.join(path, f"temp{idx}_input")) if not suspended else None
                 t_max = read_milli(os.path.join(path, f"temp{idx}_max"))
                 t_crit = read_milli(os.path.join(path, f"temp{idx}_crit"))
                 label = (read_text(os.path.join(path, f"temp{idx}_label")) or f"temp{idx}").strip()
-                entry = {"label": label, "temp": temp, "max": t_max, "crit": t_crit, "index": idx}
+                entry = {"label": label, "temp": t, "max": t_max, "crit": t_crit, "index": idx}
                 chip_temps.append(entry)
                 if name not in cpu_chips:
-                    sensors_list.append({"chip": name, "label": label, "temp": temp})
+                    sensors_list.append({"chip": name, "label": label, "temp": t})
 
             if name in cpu_chips:
                 # Find package socket number
@@ -228,39 +307,39 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                 detected_cpu_chips.append((socket, name, chip_temps))
 
             # Fans
-            for f in files:
-                mf = re.match(r"^fan(\d+)_input$", f)
-                if not mf:
-                    continue
-                idx = mf.group(1)
-                rpm = read_int(os.path.join(path, f))
+            fan_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^fan(\d+)_input$", f))}))
+            for idx in fan_indices:
+                rpm = None
+                if not suspended:
+                    raw_rpm = read_int(os.path.join(path, f"fan{idx}_input"))
+                    rpm = round(raw_rpm) if raw_rpm is not None else None
                 label = (read_text(os.path.join(path, f"fan{idx}_label")) or f"fan{idx}").strip()
-                sensor_id = slug(f"{name}_{label}_{idx}")
+                sensor_id = hwmon_id(name, key, "fan", idx, label)
                 fans_list.append({"id": sensor_id, "chip": name, "label": label, "rpm": rpm})
 
             # Voltages
-            for f in files:
-                mv = re.match(r"^in(\d+)_input$", f)
-                if not mv:
-                    continue
-                idx = mv.group(1)
-                raw_v = read_float(os.path.join(path, f))
-                v = round(raw_v / 1000.0, 3) if raw_v is not None else None
+            in_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^in(\d+)_input$", f))}))
+            for idx in in_indices:
+                volts = None
+                if not suspended:
+                    raw_v = read_float(os.path.join(path, f"in{idx}_input"))
+                    volts = round(raw_v / 1000.0, 3) if raw_v is not None else None
                 label = (read_text(os.path.join(path, f"in{idx}_label")) or f"in{idx}").strip()
-                sensor_id = slug(f"{name}_{label}_{idx}")
-                voltages_list.append({"id": sensor_id, "chip": name, "label": label, "volts": v})
+                sensor_id = hwmon_id(name, key, "in", idx, label)
+                voltages_list.append({"id": sensor_id, "chip": name, "label": label, "volts": volts})
 
             # Power
-            for f in files:
-                mp = re.match(r"^power(\d+)_average$", f) or re.match(r"^power(\d+)_input$", f)
-                if not mp:
-                    continue
-                idx = mp.group(1)
-                raw_p = read_float(os.path.join(path, f))
-                p = round(raw_p / 1000000.0, 1) if raw_p is not None else None
+            power_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^power(\d+)_(?:input|average)$", f))}))
+            for idx in power_indices:
+                watts = None
+                if not suspended:
+                    raw_p = read_float(os.path.join(path, f"power{idx}_input"))
+                    if raw_p is None:
+                        raw_p = read_float(os.path.join(path, f"power{idx}_average"))
+                    watts = round(raw_p / 1000000.0, 1) if raw_p is not None else None
                 label = (read_text(os.path.join(path, f"power{idx}_label")) or f"power{idx}").strip()
-                sensor_id = slug(f"{name}_{label}_{idx}")
-                power_list.append({"id": sensor_id, "chip": name, "label": label, "watts": p})
+                sensor_id = hwmon_id(name, key, "power", idx, label)
+                power_list.append({"id": sensor_id, "chip": name, "label": label, "watts": watts})
 
     # Build CPU readout matching server hwmon.ts logic
     cpu_readout: Optional[Dict[str, Any]] = None
@@ -380,17 +459,54 @@ def parse_device_types(env_str: Optional[str]) -> Dict[str, str]:
     return types
 
 
+def resolve_device_type(
+    dev_path: str,
+    dev_types: Dict[str, str],
+    by_ids: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Resolve device type across raw paths, realpaths, and by-id symlinks."""
+    if not dev_types:
+        return None
+    if dev_path in dev_types:
+        return dev_types[dev_path]
+    try:
+        real = os.path.realpath(dev_path)
+        if real in dev_types:
+            return dev_types[real]
+    except OSError:
+        real = dev_path
+
+    if by_ids:
+        for bid in by_ids:
+            if bid in dev_types:
+                return dev_types[bid]
+            bid_full = f"/dev/disk/by-id/{bid}"
+            if bid_full in dev_types:
+                return dev_types[bid_full]
+
+    for k, v in dev_types.items():
+        try:
+            if os.path.realpath(k) == real:
+                return v
+        except OSError:
+            pass
+    return None
+
+
 def collect_smart(
     smartctl_bin: str,
     configured_devices: Optional[List[str]] = None,
     device_types: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    by_id_map = scan_by_ids()
     target_devices: List[Tuple[str, Optional[str]]] = []
     dev_types = device_types or {}
 
     if configured_devices:
         for d in configured_devices:
-            target_devices.append((d, dev_types.get(d)))
+            by_ids = by_id_map.get(os.path.realpath(d), [])
+            dtype = resolve_device_type(d, dev_types, by_ids)
+            target_devices.append((d, dtype))
     else:
         # Discover devices using smartctl --scan (never --scan-open)
         cmd = [smartctl_bin, "--scan"]
@@ -413,12 +529,12 @@ def collect_smart(
                 dev_type = parts[2]
                 if dev_type == "scsi":
                     dev_type = None
-            # Allow CHIRP_DEVICE_TYPES override
-            if dev_path in dev_types:
-                dev_type = dev_types[dev_path]
+            by_ids = by_id_map.get(os.path.realpath(dev_path), [])
+            override_type = resolve_device_type(dev_path, dev_types, by_ids)
+            if override_type:
+                dev_type = override_type
             target_devices.append((dev_path, dev_type))
 
-    by_id_map = scan_by_ids()
     devices: List[Dict[str, Any]] = []
 
     for dev_path, dev_type in target_devices:
@@ -430,9 +546,10 @@ def collect_smart(
         raw_json: Optional[Dict[str, Any]] = None
         try:
             r = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15)
-            # Exit status bit 1 (exit & 2) means standby. If stdout has valid json, parse it.
+            # Retain smartctl JSON output regardless of non-zero exit codes (such as
+            # failing disk bit 8 or error log bit 64) so failing disks are not marked open_failed.
             out = r.stdout.strip()
-            if out.startswith("{") and (r.returncode == 0 or (r.returncode & 2) != 0):
+            if out.startswith("{"):
                 parsed = json.loads(out)
                 if isinstance(parsed, dict) and ("device" in parsed or "smart_status" in parsed or "smartctl" in parsed):
                     raw_json = parsed
@@ -532,10 +649,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # Load configuration from environment (or /etc/chirp/chirp.env via systemd)
-    env_devices = [d.strip() for d in os.environ.get("CHIRP_DEVICES", "").split(",") if d.strip()]
+    # Load configuration from environment, falling back to /etc/chirp/chirp.env
+    env_file = load_env_file("/etc/chirp/chirp.env")
+    raw_devices = os.environ.get("CHIRP_DEVICES") or env_file.get("CHIRP_DEVICES", "")
+    env_devices = [d.strip() for d in raw_devices.split(",") if d.strip()]
     configured_devices = env_devices if env_devices else None
-    device_types = parse_device_types(os.environ.get("CHIRP_DEVICE_TYPES"))
+
+    raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or env_file.get("CHIRP_DEVICE_TYPES")
+    device_types = parse_device_types(raw_types)
 
     output_path = os.path.join(args.output_dir, args.output_file)
 
@@ -562,14 +683,22 @@ def main() -> int:
         t0 = time.time()
         need_smart = (t0 - last_smart_time) >= args.smart_interval or last_smart is None
 
+        # Periodically re-check /etc/chirp/chirp.env so runtime config changes are picked up
+        cur_env_file = load_env_file("/etc/chirp/chirp.env")
+        cur_raw_devs = os.environ.get("CHIRP_DEVICES") or cur_env_file.get("CHIRP_DEVICES", "")
+        cur_env_devs = [d.strip() for d in cur_raw_devs.split(",") if d.strip()]
+        cur_configured = cur_env_devs if cur_env_devs else None
+        cur_raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or cur_env_file.get("CHIRP_DEVICE_TYPES")
+        cur_dev_types = parse_device_types(cur_raw_types)
+
         try:
             snapshot, last_smart = run_collection(
                 args.smartctl,
                 args.sysfs_root,
                 args.proc_root,
                 last_smart,
-                configured_devices=configured_devices,
-                device_types=device_types,
+                configured_devices=cur_configured,
+                device_types=cur_dev_types,
                 force_smart=need_smart,
             )
             if need_smart:

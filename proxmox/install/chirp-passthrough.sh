@@ -860,6 +860,33 @@ chirp_setup_unprivileged_snapshot() {
     printf '\nlxc.mount.entry: /run/chirp run/chirp none bind,ro,create=dir 0 0\n' >> "$conf"
   fi
 
+  # Sync CHIRP_DEVICE_TYPES and CHIRP_DEVICES from CT if set
+  local ct_device_types ct_devices
+  ct_device_types="$(chirp_ct_env_value "$ctid" CHIRP_DEVICE_TYPES)"
+  ct_devices="$(chirp_ct_env_value "$ctid" CHIRP_DEVICES)"
+
+  if [[ -n "$ct_device_types" || -n "$ct_devices" ]]; then
+    if install -d -m 0755 /etc/chirp 2>/dev/null; then
+      local host_env="/etc/chirp/chirp.env"
+      touch "$host_env" 2>/dev/null || true
+      if [[ -f "$host_env" ]]; then
+        if [[ -n "$ct_device_types" ]]; then
+          _cp_msg "Syncing CHIRP_DEVICE_TYPES from CT ${ctid} to ${host_env}..."
+          grep -v "^CHIRP_DEVICE_TYPES=" "$host_env" >"${host_env}.new" 2>/dev/null || true
+          printf "CHIRP_DEVICE_TYPES=%s\n" "$ct_device_types" >>"${host_env}.new" 2>/dev/null || true
+          cat "${host_env}.new" >"$host_env" 2>/dev/null; rm -f "${host_env}.new"
+        fi
+        if [[ -n "$ct_devices" ]]; then
+          _cp_msg "Syncing CHIRP_DEVICES from CT ${ctid} to ${host_env}..."
+          grep -v "^CHIRP_DEVICES=" "$host_env" >"${host_env}.new" 2>/dev/null || true
+          printf "CHIRP_DEVICES=%s\n" "$ct_devices" >>"${host_env}.new" 2>/dev/null || true
+          cat "${host_env}.new" >"$host_env" 2>/dev/null; rm -f "${host_env}.new"
+        fi
+        chmod 0600 "$host_env" 2>/dev/null || true
+      fi
+    fi
+  fi
+
   if [[ "${CHIRP_PASSTHROUGH_TEST:-0}" == "1" ]]; then
     _cp_msg "Test mode: skipping host collector download and systemctl commands."
     return 0
@@ -868,7 +895,21 @@ chirp_setup_unprivileged_snapshot() {
   local collector_bin="/usr/local/bin/chirp-collector"
   local collector_svc="/etc/systemd/system/chirp-collector.service"
   local repo="${CHIRP_REPO:-eigger/chirp}"
-  local ref="${CHIRP_REF:-master}"
+  local ref="${CHIRP_REF:-}"
+
+  if [[ -z "$ref" && -z "${CHIRP_RAW_BASE:-}" ]]; then
+    # Try container's installed version first
+    local ct_ver
+    ct_ver="$(pct exec "$ctid" -- grep -o '"version": *"[^"]*"' /opt/chirp/package.json 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    if [[ -n "$ct_ver" ]]; then
+      ref="v${ct_ver#v}"
+    else
+      # Try GitHub releases/latest tag
+      ref="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+    fi
+  fi
+  ref="${ref:-master}"
+
   local raw_base="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/${repo}/${ref}}"
 
   _cp_msg "Downloading chirp-collector from ${raw_base}..."
@@ -894,7 +935,8 @@ chirp_setup_unprivileged_snapshot() {
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
-    systemctl enable --now chirp-collector.service
+    systemctl enable chirp-collector.service
+    systemctl restart chirp-collector.service
   fi
 
   _cp_msg "Unprivileged CT ${ctid} configured successfully with /run/chirp snapshot mount."

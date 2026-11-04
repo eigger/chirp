@@ -158,7 +158,7 @@ Restart=on-failure
 
 | 변수 | 기본값 | 용도 |
 |---|---|---|
-| `CHIRP_HOST_SNAPSHOT` | `/run/chirp/host.json`이 있으면 그것, 없으면 null | 호스트 측 수집기(`chirp-collector`)가 생성한 원자적 호스트 메트릭 및 SMART 스냅샷 파일(unprivileged LXC용) |
+| `CHIRP_HOST_SNAPSHOT` | `/run/chirp/host.json` | 호스트 측 수집기(`chirp-collector`)가 생성한 원자적 호스트 메트릭 및 SMART 스냅샷 파일 경로(unprivileged LXC용). `none`, `0`, `false`로 설정하면 스냅샷을 끄고 직접 읽기 모드로 강제 |
 | `CHIRP_SYSFS_ROOT` | `/sys` | hwmon(CPU 온도, 팬, 전압, hwmon 전력), RAPL powercap, sysfs 디스크 ID. 이 경로만 사용(대체 경로 없음) |
 | `CHIRP_HOST_SYS` | `/host/sys`가 있으면 그것, 없으면 `/sys` | 네트워크 인터페이스(`/sys/class/net`). 먼저 읽고, 다음에 로컬 `/sys`(`scope`로 구분) |
 | `CHIRP_HOST_PROC` | `/host/proc`가 있으면 그것, 없으면 `/proc` | `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`(및 `1/net/dev`). 먼저 읽고, 다음에 로컬 `/proc` |

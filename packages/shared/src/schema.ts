@@ -464,7 +464,7 @@ export const HostSnapshotSmartDevice = z.object({
   type: z.string().nullable(),
   byIds: z.array(z.string()),
   wwn: z.string().nullable(),
-  smartctl: z.record(z.string(), z.unknown()),
+  smartctl: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 export type HostSnapshotSmartDevice = z.infer<typeof HostSnapshotSmartDevice>;
 
