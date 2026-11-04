@@ -378,13 +378,15 @@ eq "pve 7.4 does not support devn" "1" "$({ chirp_pve_supports_devn; echo $?; })
 unset -f pveversion
 
 # 2. Mode resolution
-eq "dev mode explicit" "dev" "$(CHIRP_DEV_PASSTHROUGH=dev chirp_dev_mode)"
+eq "legacy mode default" "legacy" "$(CHIRP_DEV_PASSTHROUGH="" chirp_dev_mode)"
 eq "legacy mode explicit" "legacy" "$(CHIRP_DEV_PASSTHROUGH=legacy chirp_dev_mode)"
-eq "auto mode on 8.1 -> dev" "dev" "$(CHIRP_PVE_VERSION=8.1 chirp_dev_mode)"
-eq "auto mode on 8.0 -> legacy" "legacy" "$(CHIRP_PVE_VERSION=8.0 chirp_dev_mode)"
+eq "auto mode resolves to legacy" "legacy" "$(CHIRP_DEV_PASSTHROUGH=auto chirp_dev_mode)"
+eq "dev mode explicit on 8.1" "dev" "$(CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_dev_mode)"
+(CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=7.4 chirp_dev_mode >/dev/null 2>&1); eq "dev mode fails on 7.4 -> rc 1" "1" "$?"
+(CHIRP_DEV_PASSTHROUGH=leagcy chirp_dev_mode >/dev/null 2>&1); eq "typo in mode -> rc 1" "1" "$?"
 
 # 3. Block rendering
-DEV_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev chirp_render_block <<<"$SEL_ALL")"
+DEV_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block <<<"$SEL_ALL")"
 EXPECTED_DEV_BLOCK='dev0: /dev/disk/by-id/wwn-0x5002538e40000001
 dev1: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234
 dev2: /dev/disk/by-id/nvme-eui.0025385b21400001
@@ -396,18 +398,21 @@ eq "dev block content" "$EXPECTED_DEV_BLOCK" "$DEV_BLOCK"
 eq "no cgroup allow rules in dev block" "0" "$(grep -c 'lxc.cgroup2.devices.allow' <<<"$DEV_BLOCK")"
 eq "no disk mount entries in dev block" "0" "$(grep -c 'lxc.mount.entry: /dev/disk' <<<"$DEV_BLOCK")"
 
-# 4. Collision avoidance with user-defined devN
+# 4. Collision avoidance with user-defined devN (including [pve:pending])
 COLLISION_CONF="$TMP/collision.conf"
 cat >"$COLLISION_CONF" <<'EOF'
 arch: amd64
 dev0: /dev/dri/card0,gid=44
 dev2: /dev/dri/renderD128,gid=104
+
+[pve:pending]
+dev3: /dev/ttyUSB0
 EOF
-eq "detected user dev indices" $'0\n2' "$(chirp_user_dev_indices "$COLLISION_CONF")"
-AVOID_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$COLLISION_CONF" <<<"$SEL_ALL")"
-eq "avoids dev0 and dev2" "1" "$(grep -c '^dev1: /dev/disk/by-id/wwn-' <<<"$AVOID_BLOCK")"
-eq "allocates dev3 next" "1" "$(grep -c '^dev3: /dev/disk/by-id/ata-' <<<"$AVOID_BLOCK")"
-eq "allocates dev4 next" "1" "$(grep -c '^dev4: /dev/disk/by-id/nvme-' <<<"$AVOID_BLOCK")"
+eq "detected user dev indices including pending" $'0\n2\n3' "$(chirp_user_dev_indices "$COLLISION_CONF")"
+AVOID_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$COLLISION_CONF" <<<"$SEL_ALL")"
+eq "avoids dev0, dev2, dev3" "1" "$(grep -c '^dev1: /dev/disk/by-id/wwn-' <<<"$AVOID_BLOCK")"
+eq "allocates dev4 next" "1" "$(grep -c '^dev4: /dev/disk/by-id/ata-' <<<"$AVOID_BLOCK")"
+eq "allocates dev5 next" "1" "$(grep -c '^dev5: /dev/disk/by-id/nvme-' <<<"$AVOID_BLOCK")"
 
 # 5. Migration from legacy wildcard config to devN
 MIG_CONF="$TMP/mig.conf"
@@ -419,6 +424,8 @@ lxc.cgroup2.devices.allow: b 8:* rw
 lxc.cgroup2.devices.allow: b 259:* rw
 lxc.cgroup2.devices.allow: c 10:200 rwm
 dev0: /dev/dri/card0
+dev10: /dev/disk/by-id/user-disk,gid=104
+dev11: /dev/disk/by-id/user-disk-no-opts
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
 lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-eui.0025385b21400001 none bind,optional,create=file
 lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
@@ -428,40 +435,48 @@ hostname: chirp
 lxc.cgroup2.devices.allow: b 8:* rw
 EOF
 snap "$MIG_CONF" >"$TMP/mig.snap"
-CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block"
+CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block"
 chirp_apply_conf "$MIG_CONF" "$TMP/mig.block"
 eq "migration: old wildcard rules dropped (8 and 259)" "0" "$(awk '/^\[/{exit} /b (8|259):\*/' "$MIG_CONF" | wc -l | tr -d ' ')"
 eq "migration: user cgroup kept (10:200)" "1" "$(grep -c 'c 10:200 rwm' "$MIG_CONF")"
 eq "migration: user dev0 kept" "1" "$(grep -c '^dev0: /dev/dri/card0' "$MIG_CONF")"
+eq "migration: user dev10 with opts kept" "1" "$(grep -c '^dev10: /dev/disk/by-id/user-disk,gid=104' "$MIG_CONF")"
+eq "migration: user dev11 without opts kept" "1" "$(grep -c '^dev11: /dev/disk/by-id/user-disk-no-opts' "$MIG_CONF")"
 eq "migration: old disk mounts dropped" "0" "$(grep -c '^lxc.mount.entry: /dev/disk' "$MIG_CONF")"
 eq "migration: chirp dev entries added" "3" "$(main "$MIG_CONF" | grep -c '^dev[0-9]: /dev/disk/by-id/')"
 eq "migration: dev1 allocated (dev0 user taken)" "1" "$(grep -c '^dev1: /dev/disk/by-id/wwn-' "$MIG_CONF")"
 eq "migration: snapshot kept" "$(cat "$TMP/mig.snap")" "$(snap "$MIG_CONF")"
 eq "migration: state file cleared of block majors" "" "$(cat "$MIG_CONF.chirp-majors" 2>/dev/null || true)"
 
-# 6. Idempotent re-run in devN mode
+# 6. Idempotent re-run in devN mode preserves user wildcard rule and user devN
+(head -n 2 "$MIG_CONF" && echo "lxc.cgroup2.devices.allow: b 8:* rw" && tail -n +3 "$MIG_CONF") >"$TMP/mig.with_user_rule"
+mv "$TMP/mig.with_user_rule" "$MIG_CONF"
 cp "$MIG_CONF" "$TMP/mig.once"
-CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block2"
+CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block2"
 chirp_apply_conf "$MIG_CONF" "$TMP/mig.block2"
+eq "dev mode does not delete user-added b 8:* rw rule" "1" "$(main "$MIG_CONF" | grep -c '^lxc.cgroup2.devices.allow: b 8:\* rw')"
 eq "dev mode idempotent re-run" "$(cat "$TMP/mig.once")" "$(cat "$MIG_CONF")"
 
-# 7. Unplugged disk in pure devN mode (no wildcard rules) cleanly removed
+# 7. Unplugged disk in pure devN mode (even with user loop device b 7:* rwm) cleanly removed
 GONE_DEV_CONF="$TMP/gone_dev.conf"
 cat >"$GONE_DEV_CONF" <<'EOF'
 arch: amd64
+lxc.cgroup2.devices.allow: b 7:* rwm
 dev0: /dev/disk/by-id/wwn-gone
 EOF
 : >"$TMP/gone_dev.block"
 chirp_byid_major() { return 0; }
-chirp_apply_conf "$GONE_DEV_CONF" "$TMP/gone_dev.block"; eq "unplugged disk in dev mode -> rc 0" "0" "$?"
+chirp_apply_conf "$GONE_DEV_CONF" "$TMP/gone_dev.block"; eq "unplugged disk in dev mode with user loop rule -> rc 0" "0" "$?"
 eq "gone dev entry removed" "0" "$(grep -c 'wwn-gone' "$GONE_DEV_CONF")"
+eq "user loop rule kept" "1" "$(grep -c 'b 7:\* rwm' "$GONE_DEV_CONF")"
 chirp_byid_major() { case "$1" in wwn-*|ata-*) echo 8 ;; nvme-*) echo 259 ;; esac; }
 
 # 8. Selection none removes devN entries
-CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"" >"$TMP/mig.none"
+CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$MIG_CONF" <<<"" >"$TMP/mig.none"
 chirp_apply_conf "$MIG_CONF" "$TMP/mig.none"
-eq "none: chirp dev entries removed" "0" "$(main "$MIG_CONF" | grep -c '^dev[0-9]: /dev/disk/by-id/')"
+eq "none: chirp dev entries removed" "0" "$(main "$MIG_CONF" | grep -c '^dev[0-9]: /dev/disk/by-id/(wwn|ata|nvme)')"
 eq "none: user dev0 kept" "1" "$(grep -c '^dev0: /dev/dri/card0' "$MIG_CONF")"
+eq "none: user dev10 kept" "1" "$(grep -c '^dev10: /dev/disk/by-id/user-disk' "$MIG_CONF")"
 eq "none: host mounts kept" "4" "$(main "$MIG_CONF" | grep -c '^lxc.mount.entry: /[ps]')"
 
 echo

@@ -31,6 +31,8 @@ Replace the major wildcard with Proxmox `devN:` entries.
 - Gate on PVE version: below 8.1, keep the legacy behaviour and print a warning.
 - Update the line-ownership/recognition awk, the `check-proxmox.sh` passthrough tests, and add fixtures for: fresh install, migration from wildcard config, user-owned `devN`, snapshot sections, CRLF refusal (existing behaviour).
 - Unknown: whether `devN` also sets `rwm`; if so document it (exact device, so `m` is harmless) and drop `CHIRP_DEV_PERM` or keep it as a legacy-only knob.
+- **Boot resilience constraint:** Proxmox LXC `devN:` entries do not have an `optional` flag (unlike `bind,optional`). If a disk goes missing or dies, Proxmox refuses to boot the CT. Because a monitoring container must stay online precisely when a disk fails, `legacy` mode (`bind,optional`) remains the default (`CHIRP_DEV_PASSTHROUGH=legacy`), while `dev` mode is available as an opt-in on PVE >= 8.1.
+- Ownership and preservation: Chirp only owns `devN` entries targeting chirp-managed disks without user options (e.g., `,gid=`, `,mode=`). User wildcard cgroup rules and user-defined `devN` entries (including pending entries in `[pve:pending]`) are preserved. Managed disk by-ids and majors are tracked in `/var/lib/chirp-passthrough/<CTID>.disks` and `.majors`.
 
 ### 1.2 Setup token for first-run registration (fixes #4)
 

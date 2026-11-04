@@ -22,26 +22,30 @@ Creates a privileged LXC, installs the release tarball, passes the selected disk
 
 `proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) configures device access into the container:
 
-- **Proxmox VE >= 8.1 (default):** native exact device passthrough using `devN:` entries. Proxmox automatically resolves the exact `major:minor` on every container start and allows only the selected devices in cgroups (no wildcard rules):
-
-```
-dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
-```
-
-Indices (`dev0`, `dev1`, ...) are allocated dynamically to avoid colliding with user-defined `devN` entries (e.g. GPU passthrough). Because only the exact selected devices are allowed, other devices sharing the same block major (such as the host boot disk) are not accessible from the container.
-
-- **Proxmox VE < 8.1 (fallback):** legacy bind mounts and major wildcard rules:
+- **Legacy passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, default):** uses legacy bind mounts and major wildcard rules:
 
 ```
 lxc.cgroup2.devices.allow: b 8:* rw
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x5000c500a1b2c3d4 none bind,optional,create=file
 ```
 
+  - **Boot resilience with `optional`:** Proxmox LXC `devN:` entries lack an `optional` flag and abort container startup if a host path is missing. `legacy` mode with `bind,optional` allows the container to boot normally even if a disk is unplugged or fails, ensuring the monitoring container stays online when disk issues occur.
   - **`rw`, not `rwm`.** Disks are bind-mounted, so the container never needs `mknod`; smartctl opens SCSI/SAT devices read-write for SG_IO, so `r` alone is not enough. Override with `CHIRP_DEV_PERM` (e.g. `CHIRP_DEV_PERM=rwm`).
-  - **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a static rule for an exact minor would point at the wrong disk after reboot. The cost on < 8.1: container root can reach other block devices with the same major (e.g. host boot disk).
-  - Mode selection can be overridden with `CHIRP_DEV_PASSTHROUGH=auto` (default) | `dev` | `legacy`.
+  - **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a static rule for an exact minor would point at the wrong disk after reboot. The cost: container root can reach other block devices with the same major (e.g. host boot disk).
 
-- **How lines and migrations are managed.** The script recognises its own lines by content: `devN: /dev/disk/by-id/...`, by-id mounts, host metric mounts, and `lxc.cgroup2.devices.allow: b <major>:* <perm>` for the majors of the disks it manages. Re-running the script on PVE >= 8.1 automatically migrates legacy configs to `devN:`, cleaning up old wildcard allow rules and `lxc.mount.entry` lines while preserving user lines, snapshots, and other configuration. On every run it deletes chirp's lines wherever they are in the main section and writes the new set once, before the first `[snapshot]` / `[pve:pending]` section. Snapshot sections, your own `lxc.*` lines, and user `devN` lines stay as they are, and a run that changes nothing does not rewrite the file. Older versions wrapped the lines in `# chirp-passthrough:start` / `:end` comments; Proxmox treats every `#` line as the container description and moves it to the top of the file (encoding `:` as `%3A`) whenever it rewrites the config, so markers cannot be relied on. They are no longer written and old ones are deleted. A rule of yours in exactly chirp's format for a major chirp manages (e.g. `b 8:* rw`) is treated as chirp's. Owned major numbers are recorded on the host in `/var/lib/chirp-passthrough/<CTID>.majors` for legacy cleanup. Files with CRLF line endings are refused unchanged.
+- **Exact device passthrough (`CHIRP_DEV_PASSTHROUGH=dev`, requires Proxmox VE >= 8.1):** native exact device passthrough using `devN:` entries:
+
+```
+dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
+```
+
+  - Proxmox automatically resolves the exact `major:minor` on every container start and allows only the selected devices in cgroups (no wildcard rules). Other devices sharing the same block major (such as the host boot disk) are not accessible from the container.
+  - Indices (`dev0`, `dev1`, ...) are allocated dynamically to avoid colliding with user-defined `devN` entries (including pending entries in `[pve:pending]`).
+  - **Caveat:** Proxmox `devN:` has no `optional` flag; if a disk is removed or dies, Proxmox will refuse to start the container until the config is updated.
+
+- **Mode selection:** `CHIRP_DEV_PASSTHROUGH=legacy` (default) | `dev` | `auto` (resolves to `legacy` for boot resilience). Invalid values exit with an error.
+
+- **How lines and migrations are managed.** The script recognises its own lines by content: `devN: /dev/disk/by-id/...` (strictly without user options like `gid=`, `mode=`, and only matching chirp's managed disks), by-id mounts, host metric mounts, and `lxc.cgroup2.devices.allow: b <major>:* <perm>` for the majors of the disks it manages. It preserves user-defined `devN` entries (with or without options) and user wildcard cgroup rules. On every run it deletes chirp's lines wherever they are in the main section and writes the new set once, before the first `[snapshot]` / `[pve:pending]` section. Snapshot sections, your own `lxc.*` lines, and user `devN` lines stay as they are, and a run that changes nothing does not rewrite the file. Older versions wrapped the lines in `# chirp-passthrough:start` / `:end` comments; Proxmox treats every `#` line as the container description and moves it to the top of the file (encoding `:` as `%3A`) whenever it rewrites the config, so markers cannot be relied on. They are no longer written and old ones are deleted. Managed disk by-ids and block majors are recorded on the host in `/var/lib/chirp-passthrough/<CTID>.disks` and `.majors` for cleanup. Files with CRLF line endings are refused unchanged.
 
 ### Host metrics (memory, load, network)
 
