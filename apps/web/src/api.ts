@@ -1,4 +1,4 @@
-import type { Disk, HealthStatus, StatusSnapshot } from "@chirp/shared";
+import type { BootstrapStatusResponse, Disk, HealthStatus, StatusSnapshot } from "@chirp/shared";
 
 /**
  * The dashboard authenticates with the HttpOnly session cookie set by login
@@ -77,9 +77,17 @@ export const postRefresh = () => request<{ queued: true }>("/api/v1/refresh", { 
 
 // --- account ---
 export const fetchMe = () => request<{ username: string }>("/api/v1/auth/me");
-export const fetchBootstrapStatus = () => request<{ needsBootstrap: boolean }>("/api/v1/bootstrap/status");
-export const bootstrapAdmin = (username: string, password: string, passwordConfirm: string) =>
-  request<{ username: string }>("/api/v1/bootstrap/admin", { method: "POST", body: { username, password, passwordConfirm } });
+export const fetchBootstrapStatus = () => request<BootstrapStatusResponse>("/api/v1/bootstrap/status");
+export const bootstrapAdmin = (
+  username: string,
+  password: string,
+  passwordConfirm: string,
+  setupToken?: string,
+) =>
+  request<{ username: string }>("/api/v1/bootstrap/admin", {
+    method: "POST",
+    body: { username, password, passwordConfirm, ...(setupToken ? { setupToken } : {}) },
+  });
 export const login = (username: string, password: string) =>
   request<{ username: string }>("/api/v1/auth/login", { method: "POST", body: { username, password } });
 export const logout = () => request<null>("/api/v1/auth/logout", { method: "POST" });

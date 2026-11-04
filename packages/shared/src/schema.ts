@@ -388,7 +388,11 @@ export const PASSWORD_MISMATCH = "password_mismatch";
 export const Username = z.string().regex(/^[A-Za-z0-9._@-]{1,64}$/);
 
 /** GET /api/v1/bootstrap/status (no auth): true while no admin account exists. */
-export const BootstrapStatusResponse = z.object({ needsBootstrap: z.boolean() });
+export const BootstrapStatusResponse = z.object({
+  needsBootstrap: z.boolean(),
+  setupTokenRequired: z.boolean().optional(),
+});
+export type BootstrapStatusResponse = z.infer<typeof BootstrapStatusResponse>;
 
 /**
  * POST /api/v1/bootstrap/admin (no auth, only while no admin exists): the first
@@ -399,8 +403,10 @@ export const BootstrapAdminRequest = z
     username: Username,
     password: z.string().max(1024),
     passwordConfirm: z.string().max(1024),
+    setupToken: z.string().max(1024).optional(),
   })
   .refine((d) => d.password === d.passwordConfirm, { message: PASSWORD_MISMATCH, path: ["passwordConfirm"] });
+export type BootstrapAdminRequest = z.infer<typeof BootstrapAdminRequest>;
 
 /** POST /api/v1/auth/login */
 export const LoginRequest = z.object({

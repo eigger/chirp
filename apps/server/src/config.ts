@@ -25,6 +25,13 @@ export interface Config {
   /** Admin account seeded on start when none exists (CHIRP_ADMIN_USER + CHIRP_ADMIN_PASSWORD). */
   adminUser: string | null;
   adminPassword: string | null;
+  /** One-time setup token for first-run registration (CHIRP_SETUP_TOKEN). */
+  setupToken: string | null;
+  /** Path to chirp.env (CHIRP_ENV_FILE), if known. */
+  envFile: string | null;
+  /** TLS certificate and key paths (CHIRP_TLS_CERT, CHIRP_TLS_KEY). */
+  tlsCert: string | null;
+  tlsKey: string | null;
   /** Session cookie `Secure` flag: auto = when the request arrived over HTTPS (honours CHIRP_TRUST_PROXY). */
   cookieSecure: "auto" | boolean;
   dataDir: string;
@@ -121,9 +128,19 @@ function adminSeed(env: Env): { adminUser: string | null; adminPassword: string 
   return { adminUser: user, adminPassword: password };
 }
 
-function cookieSecure(value: string | undefined): Config["cookieSecure"] {
+function tls(env: Env): { tlsCert: string | null; tlsKey: string | null } {
+  const cert = env.CHIRP_TLS_CERT?.trim() || null;
+  const key = env.CHIRP_TLS_KEY?.trim() || null;
+  if (!cert && !key) return { tlsCert: null, tlsKey: null };
+  if (!cert || !key) {
+    throw new ConfigError("CHIRP_TLS_CERT and CHIRP_TLS_KEY must be set together");
+  }
+  return { tlsCert: cert, tlsKey: key };
+}
+
+function cookieSecure(value: string | undefined, hasTls = false): Config["cookieSecure"] {
   const v = (value ?? "").trim().toLowerCase();
-  if (v === "" || v === "auto") return "auto";
+  if (v === "" || v === "auto") return hasTls ? true : "auto";
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off"].includes(v)) return false;
   throw new ConfigError(`CHIRP_COOKIE_SECURE must be auto, true or false (got "${value}")`);
@@ -245,6 +262,9 @@ export function loadConfig(env: Env = process.env): Config {
     else rejected.push(d);
   }
   const dataDir = env.CHIRP_DATA_DIR?.trim() || "/var/lib/chirp";
+  const { tlsCert, tlsKey } = tls(env);
+  const setupToken = env.CHIRP_SETUP_TOKEN?.trim() || null;
+  const envFile = env.CHIRP_ENV_FILE?.trim() || null;
   return {
     port: port(env.CHIRP_PORT),
     printKey: bool(env.CHIRP_PRINT_KEY),
@@ -252,7 +272,11 @@ export function loadConfig(env: Env = process.env): Config {
     apiKey: apiKey(env.CHIRP_API_KEY),
     apiKeyFile: env.CHIRP_API_KEY_FILE?.trim() || resolve(dataDir, "api-key"),
     ...adminSeed(env),
-    cookieSecure: cookieSecure(env.CHIRP_COOKIE_SECURE),
+    setupToken,
+    envFile,
+    tlsCert,
+    tlsKey,
+    cookieSecure: cookieSecure(env.CHIRP_COOKIE_SECURE, tlsCert !== null && tlsKey !== null),
     dataDir,
     devices,
     deviceTypes,

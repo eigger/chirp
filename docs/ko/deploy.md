@@ -16,7 +16,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/prox
 
 privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL을 출력한다. 스크립트 상세는 `proxmox/` 참고.
 
-**설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력). 관리자가 생기기 전까지 대시보드는 접속한 *누구에게나* 이 최초 등록 화면을 보여 주므로 바로 만들어야 한다(또는 만들 때까지 컨테이너에 다른 사람이 접근하지 못하게 한다). 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
+**설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력 및 설치 시 출력된 일회용 `Setup token` 입력). 설치 스크립트는 `/etc/chirp/chirp.env`(`0600`)에 `CHIRP_SETUP_TOKEN`을 작성한다. 계정 생성 시 서버는 env 파일에서 토큰을 최선형(best-effort)으로 삭제하려고 시도한다. systemd 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp`가 읽기 전용이므로 토큰이 `chirp.env`에 남을 수 있으나, 관리자 계정이 존재하는 즉시 최초 등록이 영구적으로 비활성화(`POST /bootstrap/admin`이 `409 conflict` 반환)되므로 무해하다. 설치 중 화면 스크롤로 토큰을 놓친 경우: `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 누구에게나 등록 창이 열려 있으므로 즉시 계정을 생성해야 한다. 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
 
 ### 디스크 passthrough와 권한
 
@@ -130,12 +130,12 @@ Restart=on-failure
 컨테이너 안에서 `update`를 실행한다(`pct exec <CTID> -- update`). 릴리스를 내려받아 sha256을 확인하고 `/opt/chirp/releases/<version>`에 푼 뒤 `/opt/chirp/current`를 원자적으로 바꾸고 `/health`를 기다린다.
 
 - 데이터 디렉터리(`/var/lib/chirp`: API 키, 관리자 계정, 인스턴스 ID, 디스크 ID)는 건드리지 않으므로 Home Assistant 연동과 관리자 계정이 업데이트 후에도 유지된다. 계정 기능이 없던 릴리스에서 올리면 기존 API 키는 그대로 쓰이고, 업데이트 후 대시보드에서 관리자 계정을 만들면 된다.
-- 확인 주소는 `/etc/chirp/chirp.env`의 `CHIRP_HOST`/`CHIRP_PORT`를 따른다(`0.0.0.0`/`::`이면 `127.0.0.1`, 그 외에는 설정한 주소).
+- 확인 주소는 `/etc/chirp/chirp.env`의 `CHIRP_HOST`/`CHIRP_PORT`를 따르고(`0.0.0.0`/`::`이면 `127.0.0.1`, 그 외에는 설정한 주소), TLS가 설정되어 있으면 `https`를 선택하며, 루프백 인증서 허용을 위해 `curl -kfsS`를 쓴다.
 - 헬스체크가 실패하면 이전 릴리스로 되돌린다. 첫 설치처럼 되돌릴 릴리스가 없으면 서비스를 멈추고 `current` 링크를 지워, 존재하지 않는 곳을 가리키는 링크를 남기지 않는다.
 
 ## 환경 변수
 
-[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_API_KEY`(우선, 16자 이상, 대시보드에서는 읽기 전용) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD`(관리자 시드), `CHIRP_COOKIE_SECURE`(`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_SYSFS_ROOT`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`(`false`, 프록시 IP/CIDR(권장), `1` 같은 프록시 개수, 또는 `true`; 보안 절 참고), `CHIRP_LOGIN_DAILY_BUDGET`(기본 1000), `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
+[`.env.example`](../../.env.example) 참고. 핵심: `CHIRP_HOST`(바인드 주소, 기본 `0.0.0.0`; 로컬 프록시 뒤일 때 `127.0.0.1`), `CHIRP_SETUP_TOKEN`(최초 관리자 등록용 일회용 설치 토큰; Proxmox 설치 시 자동 생성), `CHIRP_TLS_CERT` 및 `CHIRP_TLS_KEY`(자체 TLS 인증서 및 개인키 경로; 둘 다 지정하거나 둘 다 생략), `CHIRP_API_KEY`(우선, 16자 이상, 대시보드에서는 읽기 전용) / `CHIRP_API_KEY_FILE`, `CHIRP_PRINT_KEY`, `CHIRP_ADMIN_USER` + `CHIRP_ADMIN_PASSWORD`(관리자 시드), `CHIRP_COOKIE_SECURE`(`auto`/`true`/`false`), `CHIRP_DATA_DIR`, `CHIRP_DEVICES`, `CHIRP_DEVICE_TYPES`, `CHIRP_SCAN_MODE`, `CHIRP_RESCAN_INTERVAL`, `CHIRP_SMART_INTERVAL`, `CHIRP_SENSOR_INTERVAL`, `CHIRP_TEMP_WARN_{HDD,SSD,NVME}`, `CHIRP_SYSFS_ROOT`, `CHIRP_HOST_PROC`, `CHIRP_HOST_SYS`, `CHIRP_NET_INCLUDE`, `CHIRP_NET_EXCLUDE`, `CHIRP_WEB_DIR`, `CHIRP_TRUST_PROXY`(`false`, 프록시 IP/CIDR(권장), `1` 같은 프록시 개수, 또는 `true`; 보안 절 참고), `CHIRP_LOGIN_DAILY_BUDGET`(기본 1000), `CHIRP_CORS_ORIGINS`. 잘못된 값이면 `chirp: invalid configuration: CHIRP_PORT must be an integer between 1 and 65535 (got "80a")` 같은 메시지를 내고 서버가 시작하지 않는다.
 
 
 호스트 경로:
@@ -156,8 +156,11 @@ Proxmox LXC: 기본값 그대로 둔다(설치 스크립트가 `/host/proc`, `/h
 
 ## 보안
 
-- **최초 등록 창.** 관리자 계정이 생기기 전까지는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
-- **HTTP 평문이면 자격 증명이 노출된다.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다. 신뢰하는 LAN이 아니라면 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 둔다. chirp가 HTTPS 요청임을 알 수 없으면 `CHIRP_COOKIE_SECURE=true`로 쿠키의 `Secure`를 강제한다.
+- **최초 등록 창.** Proxmox 설치 스크립트를 사용한 경우, 최초 관리자 계정 생성에는 `/etc/chirp/chirp.env`(`0600`)에 기록된 일회용 `CHIRP_SETUP_TOKEN`이 필요하다. 관리자 계정이 생성되면 서버는 env 파일에서 토큰을 최선형으로 삭제하려 시도한다. systemd의 엄격한 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp/chirp.env`가 읽기 전용이므로 파일에 토큰이 남을 수 있으나, 관리자 계정이 생성된 후에는 `POST /bootstrap/admin`이 409 conflict를 반환하므로 토큰은 무효화(inert)된다. 등록 전 토큰을 확인해야 할 경우 `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`로 조회할 수 있다. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
+- **TLS 및 전송 계층.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다.
+  - **자체 TLS:** `CHIRP_TLS_CERT` 및 `CHIRP_TLS_KEY`(인증서 및 개인키 경로)를 지정하면 Fastify가 HTTPS로 직접 서비스하며 `CHIRP_COOKIE_SECURE=true`를 기본값으로 파생한다. chirp 서버 안에서 인증서를 자동 발급하거나 갱신하지 않는다.
+  - **역프록시 / Tailscale:** 실제 운영 환경에서는 chirp를 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 두는 것을 권장한다. chirp가 HTTPS 요청임을 알 수 없으면 `CHIRP_COOKIE_SECURE=true`로 쿠키의 `Secure`를 강제한다.
+  - **바인드 제어:** `CHIRP_HOST`로 수신 주소를 제어할 수 있다(기본값 `0.0.0.0`). 같은 호스트의 로컬 역프록시 뒤에서 실행할 때는 `CHIRP_HOST=127.0.0.1`로 바인드한다.
 - **역프록시 뒤라면 `CHIRP_TRUST_PROXY`를 설정한다.**
   - 설정하지 않으면 chirp는 모든 클라이언트를 프록시 주소로 본다. 그러면 로그인 지연이 모든 사용자를 한 출처로 취급해, 공격자 한 명의 실패가 모두를 최대 15분까지 기다리게 하고, "로그인한 적 있는 출처"가 곧 프록시 뒤의 누구나가 된다. 세션 쿠키에 `Secure`도 자동으로 붙지 않는다.
   - **권장:** 프록시 자신의 주소. 예: `CHIRP_TRUST_PROXY=10.0.0.5` 또는 `10.0.0.0/24,fd00::/64`. 그러면 요청이 실제로 프록시에서 올 때만 `X-Forwarded-For`/`-Proto`를 믿는다.

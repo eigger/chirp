@@ -159,9 +159,21 @@ env_value() {
   # Last NAME=value in the env file, without surrounding quotes/whitespace.
   local v
   v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
   v="${v//\"/}"; v="${v//\'/}"
   v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
   printf '%s' "$v"
+}
+
+health_scheme() {
+  local cert key
+  cert="$(env_value CHIRP_TLS_CERT)"
+  key="$(env_value CHIRP_TLS_KEY)"
+  if [[ -n "$cert" && -n "$key" ]]; then
+    echo "https"
+  else
+    echo "http"
+  fi
 }
 
 health_port() {
@@ -184,11 +196,14 @@ health_host() {
 }
 
 wait_healthy() {
-  local url deadline
-  url="http://$(health_host):$(health_port)/health"
+  local scheme host port url deadline
+  scheme="$(health_scheme)"
+  host="$(health_host)"
+  port="$(health_port)"
+  url="${scheme}://${host}:${port}/health"
   deadline=$((SECONDS + HEALTH_TIMEOUT_SEC))
   while ((SECONDS < deadline)); do
-    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+    if curl -kfsS --max-time 3 "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -202,7 +217,7 @@ swap_link "$NEW_DIR"
 systemctl daemon-reload || true
 systemctl restart "$SERVICE" || echo "[update] systemctl restart ${SERVICE} failed" >&2
 
-echo "[update] Waiting for http://$(health_host):$(health_port)/health (up to ${HEALTH_TIMEOUT_SEC}s)..."
+echo "[update] Waiting for $(health_scheme)://$(health_host):$(health_port)/health (up to ${HEALTH_TIMEOUT_SEC}s)..."
 if wait_healthy; then
   # Prune old releases: keep the newest KEEP_RELEASES plus the current target.
   CUR_REAL="$(readlink -f "$CURRENT_LINK")"

@@ -61,7 +61,7 @@ While a rule blocks an attempt, the password is not checked: the answer is `429 
 
 ### First-run registration
 
-While no admin account exists, `GET /bootstrap/status` returns `{"needsBootstrap":true}` and **the first visitor** can create the admin with `POST /bootstrap/admin`. Concurrent requests are serialized and the account file is created exclusively, so exactly one wins; every later call is `409 {"error":"conflict"}`. Create the account right after installing (or seed it with `CHIRP_ADMIN_USER` / `CHIRP_ADMIN_PASSWORD`).
+While no admin account exists, `GET /bootstrap/status` returns `{"needsBootstrap":true}` (plus `setupTokenRequired:true` when `CHIRP_SETUP_TOKEN` is configured) and **the first visitor** can create the admin with `POST /bootstrap/admin`. If `CHIRP_SETUP_TOKEN` is configured, `POST /bootstrap/admin` requires `setupToken` matching the token; an invalid or missing token responds with `403 {"error":"unauthorized"}` and is subject to the per-address rate limiter. Concurrent requests are serialized and the account file is created exclusively, so exactly one wins; every later call is `409 {"error":"conflict"}`. Create the account right after installing (or seed it with `CHIRP_ADMIN_USER` / `CHIRP_ADMIN_PASSWORD`).
 
 **GET never triggers collection; it always returns the cache.**
 
@@ -77,10 +77,11 @@ Every error body is `{"error": <code>}` (`ErrorResponse`); 429 adds `retryAfter`
 | 400 | `{"error":"invalid_credentials"}` | `InvalidCredentialsResponse` | wrong current password on `POST /auth/password` |
 | 401 | `{"error":"unauthorized"}` | `UnauthorizedResponse` | missing or wrong API key / session; wrong username or password on login |
 | 403 | `{"error":"forbidden"}` | `ForbiddenResponse` | API key on a session-only route; missing `X-Chirp-Csrf` header |
+| 403 | `{"error":"unauthorized"}` | `UnauthorizedResponse` | wrong or missing setup token on `POST /bootstrap/admin` when `CHIRP_SETUP_TOKEN` is configured |
 | 404 | `{"error":"not_found"}` | `NotFoundResponse` | unknown disk id or history metric, unknown `/api/*` path, non-GET request to an unknown path (also any path when no dashboard is installed) |
 | 409 | `{"error":"conflict"}` | `ConflictResponse` | `POST /bootstrap/admin` once an admin exists; regenerating a key set by `CHIRP_API_KEY` |
 | 429 | `{"error":"cooldown","retryAfter":<s>}` | `CooldownResponse` | `POST /refresh` within the cooldown; `Retry-After` header has the same seconds |
-| 429 | `{"error":"rate_limited","retryAfter":<s>}` | `RateLimitedResponse` | too many failed logins / current-password checks |
+| 429 | `{"error":"rate_limited","retryAfter":<s>}` | `RateLimitedResponse` | too many failed logins / current-password checks / invalid setup token attempts |
 | 5xx | `{"error":"internal_error"}` | `InternalErrorResponse` | unexpected server error (details are only logged) |
 
 `ErrorCode` = `bad_request | unauthorized | not_found | cooldown | internal_error | forbidden | conflict | rate_limited | invalid_credentials | weak_password | password_mismatch`. Codes are only ever added; treat an unknown code like its HTTP status.
@@ -91,8 +92,8 @@ All bodies are JSON (`Content-Type: application/json`); schemas are in `schema.t
 
 | Method and path | Auth | Body | Success |
 |---|---|---|---|
-| `GET /api/v1/bootstrap/status` | none | | `200 {"needsBootstrap":bool}` |
-| `POST /api/v1/bootstrap/admin` | none + CSRF | `{"username","password","passwordConfirm"}` | `201 {"username"}` + session cookie |
+| `GET /api/v1/bootstrap/status` | none | | `200 {"needsBootstrap":bool,"setupTokenRequired"?:bool}` |
+| `POST /api/v1/bootstrap/admin` | none + CSRF | `{"username","password","passwordConfirm","setupToken"?:string}` | `201 {"username"}` + session cookie |
 | `POST /api/v1/auth/login` | none + CSRF | `{"username","password"}` | `200 {"username"}` + session cookie |
 | `POST /api/v1/auth/logout` | none + CSRF | | `204`, cookie cleared |
 | `GET /api/v1/auth/me` | session | | `200 {"username"}` |

@@ -72,13 +72,16 @@ fi
 install -m 0755 "${CHIRP_DIR}/update.sh.tmp" /usr/bin/update
 rm -f "${CHIRP_DIR}/update.sh.tmp"
 
+SETUP_TOKEN=""
 if [[ ! -f /etc/chirp/chirp.env ]]; then
+  SETUP_TOKEN="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' || tr -dc 'a-f0-9' </dev/urandom | head -c 32)"
   echo "[chirp-install] Writing /etc/chirp/chirp.env"
-  cat >/etc/chirp/chirp.env <<'EOF2'
+  cat >/etc/chirp/chirp.env <<EOF2
 CHIRP_PORT=80
 CHIRP_HOST=0.0.0.0
 CHIRP_DATA_DIR=/var/lib/chirp
 CHIRP_WEB_DIR=/opt/chirp/current/apps/web/dist
+CHIRP_SETUP_TOKEN=${SETUP_TOKEN}
 
 # Passed-through disks (comma-separated /dev/disk/by-id/... paths).
 # Filled in automatically by chirp-passthrough.sh on the host.
@@ -95,7 +98,7 @@ CHIRP_DEVICES=
 # CHIRP_NET_EXCLUDE=
 EOF2
 fi
-chmod 0640 /etc/chirp/chirp.env
+chmod 0600 /etc/chirp/chirp.env
 
 systemctl daemon-reload
 systemctl enable -q chirp.service
@@ -124,8 +127,13 @@ systemctl restart container-getty@1.service || true
 IP_ADDR="$(hostname -I | awk '{print $1}')"
 echo "[chirp-install] Completed successfully (ref ${REF_RESOLVED})"
 echo "Access URL: http://${IP_ADDR}/"
-echo "Next: open http://${IP_ADDR}/ right away and create the admin account"
-echo "      (until an admin exists, anyone who can reach this address can create it)."
+if [[ -n "${SETUP_TOKEN:-}" ]]; then
+  echo "Setup token : ${SETUP_TOKEN}"
+  echo "Next: open http://${IP_ADDR}/ right away and create the admin account with the setup token above"
+else
+  echo "Next: open http://${IP_ADDR}/ right away and create the admin account"
+  echo "      (if a setup token is required, retrieve it from /etc/chirp/chirp.env)."
+fi
 echo "Then: Settings -> API key -> Copy, and paste it into Home Assistant (hass-chirp)."
 echo "Forgot the admin password? node /opt/chirp/current/apps/server/dist/cli.js admin reset-password"
 echo "      (from the Proxmox host: pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password)"

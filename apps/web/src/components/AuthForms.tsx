@@ -88,16 +88,26 @@ export function LoginForm({
 export const USERNAME_RE = /^[A-Za-z0-9._@-]{1,64}$/;
 
 /** First-run registration: shown while the server has no admin account. */
-export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) => void; onTaken: () => void }) {
+export function BootstrapForm({
+  setupTokenRequired,
+  onDone,
+  onTaken,
+}: {
+  setupTokenRequired?: boolean;
+  onDone: (username: string) => void;
+  onTaken: () => void;
+}) {
   const t = useT();
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (setupTokenRequired && !setupToken.trim()) return setError(t("bootstrap.invalidToken"));
     if (!USERNAME_RE.test(username.trim())) return setError(t("bootstrap.badUsername"));
     const problem = passwordLengthProblem(password);
     if (problem) return setError(passwordRuleText(t, problem));
@@ -105,10 +115,18 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
     setBusy(true);
     setError(null);
     try {
-      const me = await bootstrapAdmin(username.trim(), password, confirm);
+      const me = await bootstrapAdmin(
+        username.trim(),
+        password,
+        confirm,
+        setupTokenRequired ? setupToken.trim() : undefined,
+      );
       onDone(me.username);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) return onTaken();
+      if (err instanceof ApiError && err.code === "unauthorized") {
+        return setError(t("bootstrap.invalidToken"));
+      }
       // bad_request: a field broke the shared schema. Name the username only when it is the culprit.
       if (err instanceof ApiError && err.code === "bad_request" && !USERNAME_RE.test(username.trim())) {
         return setError(t("bootstrap.badUsername"));
@@ -123,11 +141,23 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
     <form className="card gate" onSubmit={submit}>
       <h1>{t("bootstrap.title")}</h1>
       <p className="muted">{t("bootstrap.desc")}</p>
+      {setupTokenRequired && (
+        <>
+          <label htmlFor="bootstrap-token">{t("bootstrap.setupToken")}</label>
+          <input
+            id="bootstrap-token"
+            autoComplete="off"
+            value={setupToken}
+            onChange={(e) => setSetupToken(e.target.value)}
+            placeholder={t("bootstrap.setupTokenPlaceholder")}
+          />
+        </>
+      )}
       <label htmlFor="bootstrap-username">{t("login.username")}</label>
       <input
         id="bootstrap-username"
         autoComplete="username"
-        autoFocus
+        autoFocus={!setupTokenRequired}
         value={username}
         onChange={(e) => setUsername(e.target.value)}
       />
@@ -152,7 +182,11 @@ export function BootstrapForm({ onDone, onTaken }: { onDone: (username: string) 
           {error}
         </p>
       )}
-      <button type="submit" className="primary" disabled={busy || !username.trim() || !password || !confirm}>
+      <button
+        type="submit"
+        className="primary"
+        disabled={busy || !username.trim() || !password || !confirm || (Boolean(setupTokenRequired) && !setupToken.trim())}
+      >
         {t("bootstrap.submit")}
       </button>
     </form>

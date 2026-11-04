@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -595,6 +595,172 @@ describe("first-run registration (bootstrap)", () => {
     await new AdminStore(adminFile(dir), FAST_SCRYPT).create("other", PASS);
     expect(BootstrapStatusResponse.parse((await app.inject("/api/v1/bootstrap/status")).json())).toEqual({ needsBootstrap: false });
     expect((await bootstrap(good)).statusCode).toBe(409);
+  });
+});
+
+describe("setup token for first-run registration", () => {
+  const TOKEN = "test-setup-token-42";
+  const good = { username: USER, password: PASS, passwordConfirm: PASS };
+
+  it("status indicates setupTokenRequired when configured", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const status = (await app.inject("/api/v1/bootstrap/status")).json();
+    expect(BootstrapStatusResponse.parse(status)).toEqual({ needsBootstrap: true, setupTokenRequired: true });
+  });
+
+  it("rejects bootstrap without setup token or with wrong token (403 unauthorized)", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: good,
+    });
+    expect(missing.statusCode).toBe(403);
+    expect(UnauthorizedResponse.parse(missing.json())).toEqual({ error: "unauthorized" });
+
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: "wrong-token" },
+    });
+    expect(wrong.statusCode).toBe(403);
+    expect(UnauthorizedResponse.parse(wrong.json())).toEqual({ error: "unauthorized" });
+    expect(auth.admin.exists()).toBe(false);
+  });
+
+  it("validates setup token before evaluating password", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { username: USER, password: "short", passwordConfirm: "short", setupToken: "wrong" },
+    });
+    // Returns 403 unauthorized, not 400 weak_password
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("accepts correct setup token, creates admin, and cleans up chirp.env", async () => {
+    const envFile = join(dir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o600 });
+    await start({ CHIRP_SETUP_TOKEN: TOKEN, CHIRP_ENV_FILE: envFile }, { admin: false });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: TOKEN },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(auth.admin.exists()).toBe(true);
+    expect(auth.admin.username()).toBe(USER);
+    expect(config.setupToken).toBeNull();
+    const envAfter = readFileSync(envFile, "utf8");
+    expect(envAfter).not.toContain("CHIRP_SETUP_TOKEN");
+    expect(envAfter).toContain("CHIRP_PORT=80");
+
+    // Once admin exists, bootstrap returns 409 conflict
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: TOKEN },
+    });
+    expect(again.statusCode).toBe(409);
+  });
+
+  it("succeeds with 201 and logs warning without leaking token when envFile removal fails", async () => {
+    const envDir = mkdtempSync(join(tmpdir(), "chirp-ro-test-"));
+    const envFile = join(envDir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o400 });
+    chmodSync(envFile, 0o400);
+    chmodSync(envDir, 0o500);
+
+    const noticeLogs: string[] = [];
+    try {
+      await start({ CHIRP_SETUP_TOKEN: TOKEN, CHIRP_ENV_FILE: envFile }, { admin: false });
+      app.addHook("onRequest", async (req) => {
+        const origInfo = req.log.info.bind(req.log);
+        const origWarn = req.log.warn.bind(req.log);
+        req.log.info = ((...args: unknown[]) => {
+          noticeLogs.push(args.map(String).join(" "));
+          return origInfo(...args);
+        }) as typeof req.log.info;
+        req.log.warn = ((...args: unknown[]) => {
+          noticeLogs.push(args.map(String).join(" "));
+          return origWarn(...args);
+        }) as typeof req.log.warn;
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/bootstrap/admin",
+        headers: CSRF,
+        payload: { ...good, setupToken: TOKEN },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(auth.admin.exists()).toBe(true);
+      expect(auth.admin.username()).toBe(USER);
+      expect(config.setupToken).toBeNull();
+
+      expect(noticeLogs.some((m) => m.includes("Could not remove CHIRP_SETUP_TOKEN"))).toBe(true);
+      expect(noticeLogs.some((m) => m.includes(TOKEN))).toBe(false);
+    } finally {
+      chmodSync(envDir, 0o700);
+      chmodSync(envFile, 0o600);
+      rmSync(envDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rate limits repeated failed setup token attempts", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    // 5 free failures before rate-limiting applies
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/bootstrap/admin",
+        headers: CSRF,
+        payload: { ...good, setupToken: "bad" },
+        remoteAddress: "192.0.2.1",
+      });
+      expect(res.statusCode).toBe(403);
+    }
+    const limited = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: "bad" },
+      remoteAddress: "192.0.2.1",
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(RateLimitedResponse.parse(limited.json())).toEqual({ error: "rate_limited", retryAfter: 1 });
+  });
+
+  it("bootstrap warning message adapts to setup token presence", async () => {
+    const withoutToken = await bootstrapAuth({ adminUser: null, adminPassword: null }, auth);
+    expect(withoutToken.some((n) => n.msg.includes("anyone who can reach this server"))).toBe(true);
+
+    const withToken = await bootstrapAuth({ adminUser: null, adminPassword: null, setupToken: TOKEN }, auth);
+    expect(withToken.some((n) => n.msg.includes("using the setup token from installation"))).toBe(true);
+    expect(withToken.some((n) => n.msg.includes(TOKEN))).toBe(false); // never logged
+  });
+
+  it("removes setup token when CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD seeds the admin", async () => {
+    const envFile = join(dir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o600 });
+    const cfg = {
+      adminUser: "seeded",
+      adminPassword: "ValidPassword123!",
+      setupToken: TOKEN as string | null,
+      envFile,
+    };
+    await bootstrapAuth(cfg, auth);
+    expect(auth.admin.exists()).toBe(true);
+    expect(cfg.setupToken).toBeNull();
+    const envAfter = readFileSync(envFile, "utf8");
+    expect(envAfter).not.toContain("CHIRP_SETUP_TOKEN");
   });
 });
 

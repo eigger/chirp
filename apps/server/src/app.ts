@@ -1,7 +1,9 @@
 import cors from "@fastify/cors";
+import { readFileSync } from "node:fs";
+import { createSecureContext } from "node:tls";
 import Fastify, { type FastifyInstance } from "fastify";
 import { authHook, registerAuthRoutes, type Auth } from "./auth.js";
-import type { Config } from "./config.js";
+import { ConfigError, type Config } from "./config.js";
 import { BusyError } from "./password.js";
 import type { Collector } from "./scheduler.js";
 import { registerStatic } from "./static.js";
@@ -40,7 +42,24 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   // `(addr, i) => i < n`); the rest of X-Forwarded-For is client-controlled.
   const hops = config.trustProxy;
   const trustProxy = typeof hops === "number" ? (_addr: string, i: number) => i < hops : hops;
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy, bodyLimit: 64 * 1024 });
+  let https: { cert: Buffer; key: Buffer } | undefined;
+  if (config.tlsCert && config.tlsKey) {
+    try {
+      https = {
+        cert: readFileSync(config.tlsCert),
+        key: readFileSync(config.tlsKey),
+      };
+      createSecureContext(https);
+    } catch (err) {
+      throw new ConfigError(`Failed to configure TLS: ${(err as Error).message}`);
+    }
+  }
+  const app = Fastify({
+    logger: opts.logger ?? false,
+    trustProxy,
+    bodyLimit: 64 * 1024,
+    ...(https ? { https } : {}),
+  });
 
   if (config.corsOrigins.length) {
     // Bearer-key access only: no credentials (cookies) and never the CSRF header,

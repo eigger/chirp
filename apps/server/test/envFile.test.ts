@@ -1,6 +1,9 @@
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { cliEnvironment, DEFAULT_ENV_FILE, parseEnvFile } from "../src/envFile.js";
+import { cliEnvironment, DEFAULT_ENV_FILE, parseEnvFile, removeEnvVar } from "../src/envFile.js";
 
 const FILE = `# chirp.env
 CHIRP_PORT=80
@@ -82,5 +85,50 @@ describe("CLI env file", () => {
     const none = cliEnvironment(["key", "show"], { X: "1" }, () => false, read);
     expect(none).toEqual({ env: { X: "1" }, args: ["key", "show"], file: null });
     expect(() => cliEnvironment(["--env-file"], {}, exists, read)).toThrow(/needs a path/);
+  });
+
+  it("removeEnvVar removes a key atomically (mode 0600) and preserves others", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chirp-env-test-"));
+    const file = join(dir, "chirp.env");
+    try {
+      const content = [
+        "# chirp.env",
+        "CHIRP_PORT=80",
+        "CHIRP_SETUP_TOKEN=secret_token_123",
+        "CHIRP_HOST=0.0.0.0",
+      ].join("\n");
+      writeFileSync(file, content, { mode: 0o600 });
+
+      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toEqual({ removed: true });
+      const after = readFileSync(file, "utf8");
+      expect(after).not.toContain("CHIRP_SETUP_TOKEN");
+      expect(after).toContain("CHIRP_PORT=80");
+      expect(after).toContain("CHIRP_HOST=0.0.0.0");
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+
+      // Second removal returns false because key is already gone
+      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toEqual({ removed: false });
+      // Non-existent file returns false
+      expect(removeEnvVar(join(dir, "missing.env"), "FOO")).toEqual({ removed: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removeEnvVar returns error when file cannot be modified", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chirp-env-ro-"));
+    const file = join(dir, "chirp.env");
+    try {
+      writeFileSync(file, "CHIRP_SETUP_TOKEN=secret\n", { mode: 0o400 });
+      chmodSync(file, 0o400);
+      chmodSync(dir, 0o500);
+      const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+      expect(res.removed).toBe(false);
+      expect(res.error).toBeDefined();
+    } finally {
+      chmodSync(dir, 0o700);
+      chmodSync(file, 0o600);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
