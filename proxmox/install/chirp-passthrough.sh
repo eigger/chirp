@@ -492,7 +492,7 @@ chirp_apply_conf() {
     recorded="$(cat "$state")"
   fi
   if [[ -e "$disks_state" ]]; then
-    if [[ ! -r "$disks_state" ]] || grep -qvE '^[a-zA-Z0-9_.:-]+$' "$disks_state"; then
+    if [[ ! -r "$disks_state" ]] || grep -qvE '^[a-zA-Z0-9_.:#+=@-]+$' "$disks_state"; then
       _cp_err "Cannot read valid owned-disks state: ${disks_state}. Leaving ${conf} unchanged."
       return 1
     fi
@@ -935,6 +935,12 @@ chirp_passthrough_run() {
       "/var/lib/chirp-passthrough/${ctid}.disks"; then
     rm -f "$blockfile"
     return 1
+  fi
+  if [[ "$dev_mode" == "legacy" && ! -s "/var/lib/chirp-passthrough/${ctid}.disks" ]]; then
+    if grep -qE '^dev[0-9]+:[ \t]*/dev/disk/by-id/' "$conf"; then
+      _cp_warn "Found existing devN: /dev/disk/by-id/ entries in ${conf} without chirp ownership state."
+      _cp_warn "If these were created by a previous chirp install (e.g. before backup/restore), remove them manually from ${conf} to prevent container boot failures if disks go offline."
+    fi
   fi
   if [[ -s "$blockfile" ]]; then
     if [[ -n "$sel_tsv" ]]; then

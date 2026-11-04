@@ -46,6 +46,7 @@ dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
 - **모드 선택:** `CHIRP_DEV_PASSTHROUGH=legacy`(기본값) | `dev` | `auto`(부팅 복원력을 위해 `legacy`로 처리됨). 잘못된 값을 입력하면 에러를 내고 즉시 중단한다.
 
 - **줄 관리 및 마이그레이션 방식.** 스크립트는 자기 줄을 내용으로 알아본다: `devN: /dev/disk/by-id/...`(사용자 옵션 `,gid=`, `,mode=` 등이 없고 chirp 관리 디스크에 해당하는 항목만 대상), by-id 마운트와 호스트 메트릭 마운트, 관리 대상 디스크 major의 `lxc.cgroup2.devices.allow: b <major>:* <perm>`이다. 사용자가 정의한 `devN` 항목(옵션 유무 불문)과 사용자의 와일드카드 cgroup 규칙은 삭제하지 않고 안전하게 보존한다. 실행할 때마다 main 섹션 어디에 있든 이 줄들을 지우고, 새 집합을 첫 `[snapshot]` / `[pve:pending]` 섹션 앞에 한 번만 쓴다. 스냅샷 섹션, 사용자의 `lxc.*` 줄, 사용자 `devN` 줄과 나머지는 그대로 유지되며, 변경 사항이 없으면 파일을 다시 쓰지 않는다. 이전 버전의 `# chirp-passthrough:start` / `:end` 주석은 더 이상 쓰지 않고, 남아 있는 마커는 지운다. 관리 디스크의 by-id와 블록 major는 호스트의 `/var/lib/chirp-passthrough/<CTID>.disks` 및 `.majors`에 기록된다. CRLF 줄 끝 파일은 변경하지 않고 거부한다.
+  - **백업 복원 및 호스트 이전 시 유의사항:** 새 호스트에 복원된 컨테이너 설정(`/etc/pve/lxc/<CTID>.conf`)에는 호스트 측 상태 파일(`/var/lib/chirp-passthrough/`)이 없습니다. chirp는 사용자 장치의 오삭제를 방지하기 위해 상태 파일이 없으면 기존 `devN:` 항목을 사용자가 추가한 것으로 보고 보존합니다. 과거 `dev` 모드를 쓰던 컨테이너를 복원한 뒤 `legacy` 모드로 전환할 때는, 추후 디스크 분리 시 부팅 거부를 방지하기 위해 컨테이너 설정 파일에서 이전 `devN: /dev/disk/by-id/...` 항목들을 수동으로 삭제해 주는 것이 좋습니다.
 
 ### 호스트 메트릭(메모리·부하·네트워크)
 

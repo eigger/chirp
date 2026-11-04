@@ -524,6 +524,31 @@ chirp_pve_version >/dev/null
 eq "pveversion invoked only once" "1" "$(wc -l <"$PVE_CALL_FILE" | tr -d ' ')"
 unset -f pveversion
 
+# 13. by-id names with special characters (+, @, =, #) in dev mode across re-runs
+SPECIAL_CONF="$TMP/special.conf"
+cat >"$SPECIAL_CONF" <<'EOF'
+arch: amd64
+EOF
+SPECIAL_SEL=$'ata-Foo+Bar_1\t8:0\tdisk\t\t\t\t\nnvme-eui.0011223344556677#1@sub=0\t259:0\tdisk\t\t\t\t'
+SPECIAL_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$SPECIAL_CONF" <<<"$SPECIAL_SEL")"
+echo "$SPECIAL_BLOCK" >"$TMP/special.block"
+chirp_apply_conf "$SPECIAL_CONF" "$TMP/special.block"; eq "special chars by-id first apply -> rc 0" "0" "$?"
+eq "special chars by-id dev0 added" "1" "$(grep -c '^dev0: /dev/disk/by-id/ata-Foo+Bar_1' "$SPECIAL_CONF")"
+eq "special chars by-id dev1 added" "1" "$(grep -c '^dev1: /dev/disk/by-id/nvme-eui.0011223344556677#1@sub=0' "$SPECIAL_CONF")"
+eq "special chars written to disks state" $'ata-Foo+Bar_1\nnvme-eui.0011223344556677#1@sub=0' "$(cat "$SPECIAL_CONF.chirp-disks" | sort)"
+
+# Second run (idempotent re-run) reads the .disks state file with special characters without error
+chirp_apply_conf "$SPECIAL_CONF" "$TMP/special.block"; eq "special chars by-id second apply -> rc 0" "0" "$?"
+eq "special chars by-id dev0 preserved on re-run" "1" "$(grep -c '^dev0: /dev/disk/by-id/ata-Foo+Bar_1' "$SPECIAL_CONF")"
+eq "special chars by-id dev1 preserved on re-run" "1" "$(grep -c '^dev1: /dev/disk/by-id/nvme-eui.0011223344556677#1@sub=0' "$SPECIAL_CONF")"
+eq "special chars disks state remains intact" $'ata-Foo+Bar_1\nnvme-eui.0011223344556677#1@sub=0' "$(cat "$SPECIAL_CONF.chirp-disks" | sort)"
+
+# Removing with none cleanly deletes the entries and clears state
+CHIRP_DEV_PASSTHROUGH=dev CHIRP_PVE_VERSION=8.1 chirp_render_block "$SPECIAL_CONF" <<<"" >"$TMP/special.none"
+chirp_apply_conf "$SPECIAL_CONF" "$TMP/special.none"; eq "special chars by-id removal -> rc 0" "0" "$?"
+eq "special chars by-id removed" "0" "$(grep -c '^dev[0-9]: /dev/disk/by-id/' "$SPECIAL_CONF")"
+eq "special chars disks state cleared" "" "$(cat "$SPECIAL_CONF.chirp-disks" 2>/dev/null || true)"
+
 echo
 echo "passed=${PASS} failed=${FAILS}"
 [[ "$FAILS" -eq 0 ]]
