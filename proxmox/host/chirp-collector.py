@@ -288,7 +288,13 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
             })
         chip_dirs.sort(key=lambda c: (c["name"], c["key"], c["path"]))
 
-        for chip in chip_dirs:
+        # Match server hwmon.ts: select first matching CPU driver name and filter to chips of that driver
+        primary_cpu_driver = next(
+            (c["name"] for c in chip_dirs if c["name"] in ("coretemp", "k10temp", "zenpower", "cpu_thermal")),
+            None,
+        )
+
+        for chip_order, chip in enumerate(chip_dirs):
             path = chip["path"]
             name = chip["name"]
             key = chip["key"]
@@ -300,24 +306,25 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
             temp_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^temp(\d+)_input$", f))}))
             for idx in temp_indices:
                 t = read_milli(os.path.join(path, f"temp{idx}_input")) if not suspended else None
-                t_max = read_milli(os.path.join(path, f"temp{idx}_max"))
-                t_crit = read_milli(os.path.join(path, f"temp{idx}_crit"))
+                t_max = read_milli(os.path.join(path, f"temp{idx}_max")) if not suspended else None
+                t_crit = read_milli(os.path.join(path, f"temp{idx}_crit")) if not suspended else None
                 label = hwmon_label(path, "temp", idx)
                 entry = {"label": label, "temp": t, "max": t_max, "crit": t_crit, "index": idx}
                 chip_temps.append(entry)
-                if name not in cpu_chips:
-                    sensor_id = hwmon_temp_id(name, key, idx)
-                    sensors_list.append({"id": sensor_id, "chip": name, "label": label, "temp": t})
 
-            if name in cpu_chips:
-                # Find package socket number
-                socket = 0
+            if primary_cpu_driver and name == primary_cpu_driver:
+                # Find package socket number (fallback to chip_order matching server's chipCpu)
+                socket = chip_order
                 for e in chip_temps:
                     sm = re.search(r"Package id (\d+)", e["label"], re.IGNORECASE)
                     if sm:
                         socket = int(sm.group(1))
                         break
                 detected_cpu_chips.append((socket, name, chip_temps))
+            else:
+                for e in chip_temps:
+                    sensor_id = hwmon_temp_id(name, key, e["index"])
+                    sensors_list.append({"id": sensor_id, "chip": name, "label": e["label"], "temp": e["temp"]})
 
             # Fans
             fan_indices = sorted(list({int(m.group(1)) for f in files if (m := re.match(r"^fan(\d+)_input$", f))}))
@@ -366,11 +373,14 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
         primary_source = detected_cpu_chips[0][1]
 
         for socket, _cname, entries in detected_cpu_chips:
-            # Find package/die sensor
+            # Find package/die sensor matching server priority: Package id N > Tdie > Tctl > Package
             pkg_entry = None
-            for e in entries:
-                if re.search(r"^(Package|Tctl|Tdie)", e["label"], re.IGNORECASE) and e["temp"] is not None:
-                    pkg_entry = e
+            for pat in [r"^Package id \d+$", r"^Tdie$", r"^Tctl$", r"^Package"]:
+                for e in entries:
+                    if re.search(pat, e["label"], re.IGNORECASE) and e["temp"] is not None:
+                        pkg_entry = e
+                        break
+                if pkg_entry:
                     break
 
             if pkg_entry and pkg_entry["temp"] is not None:
