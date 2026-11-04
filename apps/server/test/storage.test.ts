@@ -60,8 +60,11 @@ describe("storage and IO API", () => {
   });
 
   it("keeps older status snapshots valid", () => {
-    // Existing shared fixtures have no new fields and remain accepted.
-    expect(StatusSnapshot.safeParse(JSON.parse(readFileSync(new URL("../../../packages/shared/fixtures/status.sample.json", import.meta.url), "utf8"))).success).toBe(true);
+    // Pre-extension fixtures cover both an old server and an existing host-metrics server.
+    for (const name of ["status.legacy.json", "status.container-scope.json"]) {
+      const snapshot = JSON.parse(readFileSync(new URL(`../../../packages/shared/fixtures/${name}`, import.meta.url), "utf8"));
+      expect(StatusSnapshot.safeParse(snapshot).success).toBe(true);
+    }
   });
 
   it("reads filesystem statistics in a separate process", async () => {
