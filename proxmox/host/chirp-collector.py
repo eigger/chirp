@@ -52,15 +52,29 @@ def load_env_file(path: str = "/etc/chirp/chirp.env") -> Optional[Dict[str, str]
     return env
 
 
-def read_config_var(env_file_dict: Optional[Dict[str, str]], key: str, default: str = "") -> str:
+def read_config_var(
+    cur_env_file: Optional[Dict[str, str]],
+    key: str,
+    default: str = "",
+    initial_env_file: Optional[Dict[str, str]] = None,
+) -> str:
     """
-    Get configuration variable with live env file precedence over initial os.environ.
-    Under systemd, EnvironmentFile loads /etc/chirp/chirp.env into os.environ at start.
-    When /etc/chirp/chirp.env is modified at runtime, reading env_file_dict takes
-    precedence so changes take effect without requiring a service restart.
+    Get configuration variable respecting explicit environment overrides while
+    allowing runtime live reloads from /etc/chirp/chirp.env under systemd.
+    - If key in os.environ is an explicit override (set via CLI or systemd drop-in Environment=),
+      it takes highest precedence.
+    - Otherwise, if cur_env_file is provided and has the key, the live file value is used.
+    - Otherwise, falls back to os.environ or default.
     """
-    if env_file_dict is not None:
-        return env_file_dict.get(key, default)
+    init_file = initial_env_file or {}
+    if key in os.environ:
+        val = os.environ[key]
+        if key not in init_file or val != init_file[key]:
+            return val
+
+    if cur_env_file is not None and key in cur_env_file:
+        return cur_env_file[key]
+
     return os.environ.get(key, default)
 
 
@@ -659,56 +673,157 @@ except Exception:
 
 
 def isolated_statvfs(path: str, timeout: float = 5.0) -> Optional[Tuple[int, int, int, int]]:
-    """Run statvfs in an isolated child process with a timeout to prevent hanging the collector on stalled mounts."""
+    """
+    Run statvfs in an isolated child process with -I flag and timeout.
+    Uses Popen directly and NEVER calls synchronous wait() on timeout,
+    preventing hangs on processes blocked in uninterruptible sleep (D-state).
+    """
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", STATVFS_SCRIPT, path],
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", STATVFS_SCRIPT, path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
         )
-        if proc.returncode != 0 or not proc.stdout:
-            return None
-        data = json.loads(proc.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+    try:
+        stdout, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        # CRITICAL: Do NOT call proc.wait() on POSIX when a timeout occurs!
+        # If statvfs is blocked in kernel D-state (e.g. hung hard NFS mount),
+        # SIGKILL remains pending until the syscall returns, and wait() hangs forever.
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+        except OSError:
+            pass
+        return None
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return None
+
+    if proc.returncode != 0 or not stdout:
+        return None
+
+    try:
+        data = json.loads(stdout)
         if isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data):
             return tuple(data)  # (bsize, blocks, bfree, bavail)
+    except (json.JSONDecodeError, ValueError):
         return None
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, json.JSONDecodeError):
-        return None
+    return None
 
 
-def collect_filesystem(path: str) -> Dict[str, Any]:
+def collect_filesystems(paths: List[str], timeout: float = 5.0) -> List[Dict[str, Any]]:
+    """
+    Collect filesystem stats for all paths concurrently with an overall timeout.
+    Even if multiple remote mounts are hung in D-state, the entire batch finishes
+    within timeout seconds and never blocks the collector loop or starves other metrics.
+    """
+    if not paths:
+        return []
+
+    # Spawn statvfs child processes concurrently for all paths
+    procs: List[Tuple[str, Optional[subprocess.Popen]]] = []
+    for p in paths:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", STATVFS_SCRIPT, p],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            procs.append((p, proc))
+        except (subprocess.SubprocessError, OSError, ValueError):
+            procs.append((p, None))
+
+    t_deadline = time.time() + timeout
+    raw_outputs: Dict[str, Optional[str]] = {}
+
+    while time.time() < t_deadline:
+        all_finished = True
+        for p, proc in procs:
+            if proc is None or p in raw_outputs:
+                continue
+            ret = proc.poll()
+            if ret is not None:
+                try:
+                    stdout, _ = proc.communicate()
+                    raw_outputs[p] = stdout if ret == 0 else None
+                except Exception:
+                    raw_outputs[p] = None
+            else:
+                all_finished = False
+        if all_finished:
+            break
+        time.sleep(0.02)
+
+    # For any proc that did not finish before the deadline, abandon without blocking wait()
+    for p, proc in procs:
+        if proc is not None and p not in raw_outputs:
+            raw_outputs[p] = None
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+                if proc.stderr:
+                    proc.stderr.close()
+            except OSError:
+                pass
+
+    # Build filesystem metrics from outputs
+    results: List[Dict[str, Any]] = []
+    for p in paths:
+        fs_id = f"fs_{hashlib.sha256(p.encode('utf-8')).hexdigest()[:16]}"
+        entry: Dict[str, Any] = {
+            "id": fs_id,
+            "path": p,
+            "totalBytes": None,
+            "usedBytes": None,
+            "availableBytes": None,
+            "usedPercent": None,
+        }
+        stdout = raw_outputs.get(p)
+        if stdout:
+            try:
+                data = json.loads(stdout)
+                if isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data):
+                    bsize, blocks, bfree, bavail = data
+                    if bsize > 0 and bfree <= blocks and bavail <= bfree:
+                        total = blocks * bsize
+                        used = (blocks - bfree) * bsize
+                        available = bavail * bsize
+                        used_pct = calc_percent(used, used + available)
+                        entry.update({
+                            "totalBytes": total,
+                            "usedBytes": used,
+                            "availableBytes": available,
+                            "usedPercent": used_pct,
+                        })
+            except (json.JSONDecodeError, ValueError):
+                pass
+        results.append(entry)
+
+    return results
+
+
+def collect_filesystem(path: str, timeout: float = 5.0) -> Dict[str, Any]:
     """Collect filesystem statistics via isolated_statvfs matching chirp storage.ts."""
-    fs_id = f"fs_{hashlib.sha256(path.encode('utf-8')).hexdigest()[:16]}"
-    result: Dict[str, Any] = {
-        "id": fs_id,
-        "path": path,
-        "totalBytes": None,
-        "usedBytes": None,
-        "availableBytes": None,
-        "usedPercent": None,
-    }
-    stats = isolated_statvfs(path, timeout=5.0)
-    if stats is None:
-        return result
-
-    bsize, blocks, bfree, bavail = stats
-    if bsize <= 0 or bfree > blocks or bavail > bfree:
-        return result
-
-    total = blocks * bsize
-    used = (blocks - bfree) * bsize
-    available = bavail * bsize
-    used_pct = calc_percent(used, used + available)
-    result.update({
-        "totalBytes": total,
-        "usedBytes": used,
-        "availableBytes": available,
-        "usedPercent": used_pct,
-    })
-    return result
+    return collect_filesystems([path], timeout=timeout)[0]
 
 
 def parse_zpool(text: str) -> Optional[List[Dict[str, Any]]]:
@@ -784,7 +899,7 @@ def collect_storage(
         return None
 
     now_ms = int(time.time() * 1000)
-    filesystems = [collect_filesystem(p) for p in filesystem_paths] if has_fs else None
+    filesystems = collect_filesystems(filesystem_paths, timeout=5.0) if has_fs and filesystem_paths else None
     zfs_pools = collect_zfs_pools(zpool_bin) if zfs_enabled else None
 
     return {
@@ -879,22 +994,24 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
 
     # Load configuration from environment, falling back to /etc/chirp/chirp.env
-    env_file = load_env_file("/etc/chirp/chirp.env")
-    raw_devices = read_config_var(env_file, "CHIRP_DEVICES")
+    initial_env_file = load_env_file("/etc/chirp/chirp.env")
+    raw_devices = read_config_var(initial_env_file, "CHIRP_DEVICES", initial_env_file=initial_env_file)
     env_devices = [d.strip() for d in raw_devices.split(",") if d.strip()]
     configured_devices = env_devices if env_devices else None
 
-    raw_types = read_config_var(env_file, "CHIRP_DEVICE_TYPES")
+    raw_types = read_config_var(initial_env_file, "CHIRP_DEVICE_TYPES", initial_env_file=initial_env_file)
     device_types = parse_device_types(raw_types)
 
-    raw_fs = read_config_var(env_file, "CHIRP_FILESYSTEM_PATHS")
+    raw_fs = read_config_var(initial_env_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_env_file)
+    last_fs_error: Optional[str] = None
     try:
         filesystem_paths = validate_filesystem_paths(raw_fs)
     except ValueError as err:
-        print(f"chirp-collector: config error: {err}", file=sys.stderr)
-        return 1
+        last_fs_error = str(err)
+        print(f"chirp-collector: config error: {err} (filesystem storage collection disabled until fixed)", file=sys.stderr)
+        filesystem_paths = []
 
-    raw_zfs = read_config_var(env_file, "CHIRP_ZFS_ENABLED").strip().lower()
+    raw_zfs = read_config_var(initial_env_file, "CHIRP_ZFS_ENABLED", initial_env_file=initial_env_file).strip().lower()
     zfs_enabled = raw_zfs in ("1", "true", "yes", "on")
 
     output_path = os.path.join(args.output_dir, args.output_file)
@@ -935,22 +1052,28 @@ def main() -> int:
 
         # Periodically re-check /etc/chirp/chirp.env so runtime config changes are picked up live
         cur_env_file = load_env_file("/etc/chirp/chirp.env")
-        cur_raw_devs = read_config_var(cur_env_file, "CHIRP_DEVICES")
+        cur_raw_devs = read_config_var(cur_env_file, "CHIRP_DEVICES", initial_env_file=initial_env_file)
         cur_env_devs = [d.strip() for d in cur_raw_devs.split(",") if d.strip()]
         cur_configured = cur_env_devs if cur_env_devs else None
 
-        cur_raw_types = read_config_var(cur_env_file, "CHIRP_DEVICE_TYPES")
+        cur_raw_types = read_config_var(cur_env_file, "CHIRP_DEVICE_TYPES", initial_env_file=initial_env_file)
         cur_dev_types = parse_device_types(cur_raw_types)
 
-        cur_raw_fs = read_config_var(cur_env_file, "CHIRP_FILESYSTEM_PATHS")
+        cur_raw_fs = read_config_var(cur_env_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_env_file)
         try:
             cur_fs_paths = validate_filesystem_paths(cur_raw_fs)
+            if last_fs_error is not None:
+                print("chirp-collector: config recovered: filesystem paths valid", file=sys.stderr)
+                last_fs_error = None
             filesystem_paths = cur_fs_paths
         except ValueError as err:
-            print(f"chirp-collector: config error: {err}", file=sys.stderr)
+            err_msg = str(err)
+            if err_msg != last_fs_error:
+                print(f"chirp-collector: config error: {err_msg}", file=sys.stderr)
+                last_fs_error = err_msg
             cur_fs_paths = filesystem_paths
 
-        cur_raw_zfs = read_config_var(cur_env_file, "CHIRP_ZFS_ENABLED").strip().lower()
+        cur_raw_zfs = read_config_var(cur_env_file, "CHIRP_ZFS_ENABLED", initial_env_file=initial_env_file).strip().lower()
         cur_zfs_enabled = cur_raw_zfs in ("1", "true", "yes", "on")
 
         try:

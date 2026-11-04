@@ -477,6 +477,22 @@ describe("Host snapshot integration in CollectorDeps", () => {
         },
       ]);
       expect(staleSample.zfsPools).toBeNull();
+
+      // Corrupt snapshot file (JSON parse error): also preserves scope: "host" with null values
+      writeFileSync(snapPath, "{ invalid json content");
+      const errorSample = await deps.sampleStorage!();
+      expect(errorSample.filesystems).toEqual([
+        {
+          id: "fs_1234567890abcdef",
+          path: "/mnt/storage",
+          scope: "host",
+          totalBytes: null,
+          usedBytes: null,
+          availableBytes: null,
+          usedPercent: null,
+        },
+      ]);
+      expect(errorSample.zfsPools).toBeNull();
     });
   });
 });

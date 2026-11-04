@@ -92,11 +92,28 @@ class TestCollectorStatvfs(unittest.TestCase):
         stats = collector.isolated_statvfs("/path/that/does/not/exist/999999")
         self.assertIsNone(stats)
 
-    @patch("subprocess.run")
-    def test_isolated_statvfs_timeout_handled(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["python3"], timeout=5.0)
+    @patch("subprocess.Popen")
+    def test_isolated_statvfs_timeout_handled(self, mock_popen_cls):
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["python3"], timeout=5.0)
+        mock_popen_cls.return_value = mock_proc
         stats = collector.isolated_statvfs("/stalled/nfs/mount")
         self.assertIsNone(stats)
+        # CRITICAL: kill() was called, but wait() MUST NOT be called (prevents D-state hang)
+        mock_proc.kill.assert_called_once()
+        mock_proc.wait.assert_not_called()
+
+    def test_collect_filesystems_concurrent_with_timeout(self):
+        # Even with hung paths (sleeping), collect_filesystems finishes within timeout and returns null stats for hung path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = collector.collect_filesystems([tmpdir, "/hung_test_path"], timeout=0.2)
+            self.assertEqual(len(res), 2)
+            # Healthy path
+            self.assertEqual(res[0]["path"], tmpdir)
+            self.assertIsInstance(res[0]["totalBytes"], int)
+            # Hung/invalid path
+            self.assertEqual(res[1]["path"], "/hung_test_path")
+            self.assertIsNone(res[1]["totalBytes"])
 
     def test_collect_filesystem_real_dir(self):
         res = collector.collect_filesystem(os.getcwd())
@@ -156,25 +173,65 @@ class TestCollectorZpool(unittest.TestCase):
 
 
 class TestCollectorConfigPrecedence(unittest.TestCase):
-    def test_read_config_var_prefers_file_over_environ(self):
+    def test_read_config_var_precedence_and_live_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             env_path = os.path.join(tmpdir, "chirp.env")
             with open(env_path, "w") as f:
-                f.write('CHIRP_FILESYSTEM_PATHS="/data,/mnt"\n')
-                f.write('CHIRP_ZFS_ENABLED="true"\n')
+                f.write('CHIRP_FILESYSTEM_PATHS="/data"\n')
+                f.write('CHIRP_DEVICES="/dev/sda"\n')
 
-            # os.environ has old/different values (e.g. from systemd startup)
-            with patch.dict(os.environ, {
-                "CHIRP_FILESYSTEM_PATHS": "/old",
-                "CHIRP_ZFS_ENABLED": "false",
+            # Systemd EnvironmentFile populates os.environ at start with chirp.env contents
+            initial_env = {
+                "CHIRP_FILESYSTEM_PATHS": "/data",
                 "CHIRP_DEVICES": "/dev/sda",
+            }
+            initial_file = collector.load_env_file(env_path)
+
+            with patch.dict(os.environ, initial_env):
+                # 1. At start, file and environ match
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_file),
+                    "/data",
+                )
+
+                # 2. Later, admin edits chirp.env live (e.g. added /mnt)
+                with open(env_path, "w") as f:
+                    f.write('CHIRP_FILESYSTEM_PATHS="/data,/mnt"\n')
+                    f.write('CHIRP_DEVICES="/dev/sdb"\n')
+                cur_file = collector.load_env_file(env_path)
+
+                # Live reload: cur_file takes precedence over stale os.environ
+                self.assertEqual(
+                    collector.read_config_var(cur_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_file),
+                    "/data,/mnt",
+                )
+                self.assertEqual(
+                    collector.read_config_var(cur_file, "CHIRP_DEVICES", initial_env_file=initial_file),
+                    "/dev/sdb",
+                )
+
+    def test_read_config_var_explicit_env_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, "chirp.env")
+            with open(env_path, "w") as f:
+                f.write('CHIRP_DEVICES="/dev/sda"\n')
+            initial_file = collector.load_env_file(env_path)
+
+            # User explicitly overrides via CLI or systemd drop-in Environment=
+            with patch.dict(os.environ, {
+                "CHIRP_DEVICES": "/dev/sdc",  # differs from chirp.env
+                "CHIRP_DEVICE_TYPES": "nvme",  # not in chirp.env at all
             }):
-                env_file = collector.load_env_file(env_path)
-                # Defined in file: file wins!
-                self.assertEqual(collector.read_config_var(env_file, "CHIRP_FILESYSTEM_PATHS"), "/data,/mnt")
-                self.assertEqual(collector.read_config_var(env_file, "CHIRP_ZFS_ENABLED"), "true")
-                # Removed/absent from file: returns default (empty), NOT stale os.environ!
-                self.assertEqual(collector.read_config_var(env_file, "CHIRP_DEVICES"), "")
+                # Explicit CLI override wins over chirp.env file!
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_DEVICES", initial_env_file=initial_file),
+                    "/dev/sdc",
+                )
+                # Drop-in env var not in chirp.env wins!
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_DEVICE_TYPES", initial_env_file=initial_file),
+                    "nvme",
+                )
 
     def test_read_config_var_falls_back_when_file_absent(self):
         with patch.dict(os.environ, {"CHIRP_DEVICES": "/dev/sdb"}):
