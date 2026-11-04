@@ -555,11 +555,13 @@ cat >"$UNPRIV_CONF" <<'EOF'
 arch: amd64
 unprivileged: 1
 EOF
+export CHIRP_PASSTHROUGH_TEST=1
 chirp_setup_unprivileged_snapshot 999 "$UNPRIV_CONF"
 eq "unprivileged mount added" "1" "$(grep -c 'lxc.mount.entry: /run/chirp run/chirp' "$UNPRIV_CONF")"
 # Idempotent: running again does not duplicate the mount line
 chirp_setup_unprivileged_snapshot 999 "$UNPRIV_CONF"
 eq "unprivileged mount not duplicated" "1" "$(grep -c 'lxc.mount.entry: /run/chirp run/chirp' "$UNPRIV_CONF")"
+unset CHIRP_PASSTHROUGH_TEST
 
 echo
 echo "passed=${PASS} failed=${FAILS}"

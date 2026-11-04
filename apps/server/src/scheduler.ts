@@ -77,11 +77,17 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
       return snap?.hwmon?.cpuModel ?? readCpuModel();
     },
     discoverDevices: async () => {
+      if (config.devices.length > 0) {
+        return config.devices.map((path) => ({
+          path,
+          type: config.deviceTypes[path],
+        }));
+      }
       const snap = snapshotReader?.read().snapshot;
       if (snap?.smart?.devices && snap.smart.devices.length > 0) {
         return snap.smart.devices.map((d) => ({
           path: d.devicePath,
-          type: d.type ?? undefined,
+          type: config.deviceTypes[d.devicePath] ?? d.type ?? undefined,
         }));
       }
       return discoverDevices(config);
@@ -90,10 +96,15 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
       const snap = snapshotReader?.read().snapshot;
       if (snap?.smart?.devices) {
         const match = snap.smart.devices.find((x) => x.devicePath === d.path);
-        if (match && match.smartctl) {
+        if (match) {
+          if (!match.smartctl || Object.keys(match.smartctl).length === 0) {
+            throw new SmartctlError("open_failed", `host collector reported no smartctl output for ${d.path}`);
+          }
+          const collectedAt = snap.smart.collectedAt ? new Date(snap.smart.collectedAt) : undefined;
           return parseSmartctl(match.smartctl, {
             devicePath: d.path,
             tempWarn: config.tempWarn,
+            now: collectedAt,
           });
         }
       }

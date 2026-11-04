@@ -49,6 +49,7 @@ export class HostMetrics {
     counters: Map<string, { rx: number | null; tx: number | null; ifindex: number | null }>;
   } | null = null;
   private prevRapl: { at: number; energy: Map<string, number | null> } | null = null;
+  private lastSnapTimestamp: number | null = null;
   private failing = new Map<string, string>();
 
   constructor(private readonly opts: HostMetricsOptions) {
@@ -73,13 +74,17 @@ export class HostMetrics {
    */
   sample(nowMs: number): HostSample {
     if (this.last && nowMs >= this.last.at && nowMs - this.last.at < MIN_SAMPLE_INTERVAL_MS) return this.last.sample;
-    const sample = this.read(nowMs);
+    const snap = this.opts.snapshotReader?.read().snapshot;
+    if (snap && this.last && this.lastSnapTimestamp !== null && snap.timestamp <= this.lastSnapTimestamp) {
+      return this.last.sample;
+    }
+    const sample = this.read(nowMs, snap);
     this.last = { at: nowMs, sample };
+    this.lastSnapTimestamp = snap ? snap.timestamp : null;
     return sample;
   }
 
-  private read(nowMs: number): HostSample {
-    const snap = this.opts.snapshotReader?.read().snapshot;
+  private read(nowMs: number, snap?: HostSnapshot | null): HostSample {
     const extras = this.guard(
       "hwmon",
       () => {
@@ -191,8 +196,9 @@ export class HostMetrics {
       this.prevNet = null;
       return null;
     }
+    const sampleAt = snap ? snap.timestamp : nowMs;
     const prev = this.prevNet && this.prevNet.scope === r.scope ? this.prevNet : null;
-    const dt = prev ? (nowMs - prev.at) / 1000 : 0;
+    const dt = prev ? (sampleAt - prev.at) / 1000 : 0;
     const counters = new Map<string, { rx: number | null; tx: number | null; ifindex: number | null }>();
     const shown = r.value.filter((i) => this.matcher.isShown(i.name, i.kind, r.scope));
     const ids = uniqueIds(shown.map((i) => i.name), "if");
@@ -218,15 +224,16 @@ export class HostMetrics {
         txDropped: i.txDropped,
       };
     });
-    this.prevNet = { scope: r.scope, at: nowMs, counters };
+    this.prevNet = { scope: r.scope, at: sampleAt, counters };
     return { scope: r.scope, interfaces };
   }
 
   private power(nowMs: number, hwmon: HwmonPower[], snap?: HostSnapshot | null): Power | null {
     const rawZones = snap?.hwmon?.rapl ? HostSnapshotReader.toRaplZones(snap.hwmon) : readRaplZones(this.opts.sysfsRoot);
     const zones = rawZones.filter((z) => z.energyUj !== null);
+    const sampleAt = snap ? snap.timestamp : nowMs;
     const prev = this.prevRapl;
-    const dt = prev ? (nowMs - prev.at) / 1000 : 0;
+    const dt = prev ? (sampleAt - prev.at) / 1000 : 0;
     const raplSources = zones.map((z) => ({
       label: z.label,
       isPackage: z.isPackage,

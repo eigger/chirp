@@ -513,6 +513,7 @@ export const HostSnapshot = z.object({
       kernel: z.string().nullable().optional(),
       uptimeSeconds: z.number().nullable().optional(),
     })
+    .nullable()
     .optional(),
   proc: z
     .object({
@@ -521,11 +522,13 @@ export const HostSnapshot = z.object({
       loadavg: z.string().nullable().optional(),
       cpuinfo: z.string().nullable().optional(),
     })
+    .nullable()
     .optional(),
   net: z
     .object({
       interfaces: z.array(HostSnapshotNetInterface),
     })
+    .nullable()
     .optional(),
   hwmon: z
     .object({
@@ -539,19 +542,22 @@ export const HostSnapshot = z.object({
           cores: z.array(CpuCore),
           source: z.enum(["coretemp", "k10temp", "zenpower", "cpu_thermal", "thermal_zone"]).nullable(),
         })
+        .nullable()
         .optional(),
-      sensors: z.array(HostSnapshotHwmonSensor).optional(),
-      rapl: z.array(HostSnapshotRaplZone).optional(),
-      power: z.array(HostSnapshotHwmonPower).optional(),
-      fans: z.array(HostSnapshotHwmonFan).optional(),
-      voltages: z.array(HostSnapshotHwmonVoltage).optional(),
+      sensors: z.array(HostSnapshotHwmonSensor).nullable().optional(),
+      rapl: z.array(HostSnapshotRaplZone).nullable().optional(),
+      power: z.array(HostSnapshotHwmonPower).nullable().optional(),
+      fans: z.array(HostSnapshotHwmonFan).nullable().optional(),
+      voltages: z.array(HostSnapshotHwmonVoltage).nullable().optional(),
     })
+    .nullable()
     .optional(),
   smart: z
     .object({
       collectedAt: z.number(),
       devices: z.array(HostSnapshotSmartDevice),
     })
+    .nullable()
     .optional(),
 });
 export type HostSnapshot = z.infer<typeof HostSnapshot>;

@@ -860,25 +860,41 @@ chirp_setup_unprivileged_snapshot() {
     printf '\nlxc.mount.entry: /run/chirp run/chirp none bind,ro,create=dir 0 0\n' >> "$conf"
   fi
 
-  # Install chirp-collector on host if missing
+  if [[ "${CHIRP_PASSTHROUGH_TEST:-0}" == "1" ]]; then
+    _cp_msg "Test mode: skipping host collector download and systemctl commands."
+    return 0
+  fi
+
   local collector_bin="/usr/local/bin/chirp-collector"
   local collector_svc="/etc/systemd/system/chirp-collector.service"
-  local raw_base="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/eigger/chirp/master}"
+  local repo="${CHIRP_REPO:-eigger/chirp}"
+  local ref="${CHIRP_REF:-master}"
+  local raw_base="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/${repo}/${ref}}"
 
-  if [[ ! -f "$collector_bin" ]]; then
-    _cp_msg "Installing ${collector_bin}..."
-    curl -fsSL "${raw_base}/proxmox/host/chirp-collector.py" -o "$collector_bin" 2>/dev/null || true
-    chmod 0755 "$collector_bin" 2>/dev/null || true
+  _cp_msg "Downloading chirp-collector from ${raw_base}..."
+  local tmp_bin tmp_svc
+  tmp_bin="$(mktemp)"
+  tmp_svc="$(mktemp)"
+
+  if ! curl -fsSL "${raw_base}/proxmox/host/chirp-collector.py" -o "$tmp_bin" || [[ ! -s "$tmp_bin" ]]; then
+    _cp_err "Failed to download chirp-collector.py from ${raw_base}"
+    rm -f "$tmp_bin" "$tmp_svc"
+    return 1
   fi
 
-  if [[ ! -f "$collector_svc" ]]; then
-    _cp_msg "Installing ${collector_svc}..."
-    curl -fsSL "${raw_base}/proxmox/host/chirp-collector.service" -o "$collector_svc" 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
+  if ! curl -fsSL "${raw_base}/proxmox/host/chirp-collector.service" -o "$tmp_svc" || [[ ! -s "$tmp_svc" ]]; then
+    _cp_err "Failed to download chirp-collector.service from ${raw_base}"
+    rm -f "$tmp_bin" "$tmp_svc"
+    return 1
   fi
+
+  install -m 0755 "$tmp_bin" "$collector_bin"
+  install -m 0644 "$tmp_svc" "$collector_svc"
+  rm -f "$tmp_bin" "$tmp_svc"
 
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now chirp-collector.service 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable --now chirp-collector.service
   fi
 
   _cp_msg "Unprivileged CT ${ctid} configured successfully with /run/chirp snapshot mount."

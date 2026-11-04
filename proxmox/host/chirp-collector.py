@@ -12,7 +12,6 @@ Standard library only: Python 3.9+ compatible. No pip packages, no external jq n
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import re
@@ -20,8 +19,15 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def slug(s: str) -> str:
+    """Format string into ^[a-z0-9_]+$ slug matching chirp-server conventions."""
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_") or "sensor"
 
 
 def read_text(path: str) -> Optional[str]:
@@ -50,6 +56,12 @@ def read_float(path: str) -> Optional[float]:
         return float(txt.strip())
     except ValueError:
         return None
+
+
+def read_milli(path: str) -> Optional[float]:
+    """Read millidegrees (e.g. 45000 -> 45.0)."""
+    raw = read_float(path)
+    return round(raw / 1000.0, 1) if raw is not None else None
 
 
 def get_uptime_seconds(proc_root: str) -> Optional[float]:
@@ -146,17 +158,39 @@ def collect_net(sysfs_root: str) -> List[Dict[str, Any]]:
     return interfaces
 
 
+def read_thermal_zone(sysfs_root: str) -> Optional[Dict[str, Any]]:
+    thermal_base = os.path.join(sysfs_root, "class", "thermal")
+    if not os.path.isdir(thermal_base):
+        return None
+    for d in sorted(os.listdir(thermal_base)):
+        if not d.startswith("thermal_zone"):
+            continue
+        zdir = os.path.join(thermal_base, d)
+        ztype = (read_text(os.path.join(zdir, "type")) or "").strip()
+        if ztype not in ("x86_pkg_temp", "cpu-thermal", "cpu_thermal"):
+            continue
+        t = read_milli(os.path.join(zdir, "temp"))
+        if t is not None:
+            return {
+                "packageTemp": t,
+                "maxTemp": t,
+                "highTemp": None,
+                "critTemp": None,
+                "cores": [],
+                "source": "thermal_zone",
+            }
+    return None
+
+
 def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
     hwmon_base = os.path.join(sysfs_root, "class", "hwmon")
-    chips: List[Dict[str, Any]] = []
-
     sensors_list: List[Dict[str, Any]] = []
     power_list: List[Dict[str, Any]] = []
     fans_list: List[Dict[str, Any]] = []
     voltages_list: List[Dict[str, Any]] = []
 
-    cpu_readout: Optional[Dict[str, Any]] = None
     cpu_chips = ["coretemp", "k10temp", "zenpower", "cpu_thermal"]
+    detected_cpu_chips: List[Tuple[int, str, List[Dict[str, Any]]]] = []
 
     if os.path.isdir(hwmon_base):
         for d in sorted(os.listdir(hwmon_base)):
@@ -165,55 +199,120 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
             if not name:
                 continue
 
-            # Read temp sensors
-            temps = []
-            for f in sorted(os.listdir(path)):
+            chip_temps: List[Dict[str, Any]] = []
+            files = sorted(os.listdir(path))
+
+            # Temp sensors
+            for f in files:
                 m = re.match(r"^temp(\d+)_input$", f)
-                if m:
-                    idx = m.group(1)
-                    raw_val = read_float(os.path.join(path, f))
-                    val = round(raw_val / 1000.0, 1) if raw_val is not None else None
-                    lbl = (read_text(os.path.join(path, f"temp{idx}_label")) or f"temp{idx}").strip()
-                    temps.append({"label": lbl, "temp": val})
-                    sensors_list.append({"chip": name, "label": lbl, "temp": val})
+                if not m:
+                    continue
+                idx = m.group(1)
+                temp = read_milli(os.path.join(path, f))
+                t_max = read_milli(os.path.join(path, f"temp{idx}_max"))
+                t_crit = read_milli(os.path.join(path, f"temp{idx}_crit"))
+                label = (read_text(os.path.join(path, f"temp{idx}_label")) or f"temp{idx}").strip()
+                entry = {"label": label, "temp": temp, "max": t_max, "crit": t_crit, "index": idx}
+                chip_temps.append(entry)
+                if name not in cpu_chips:
+                    sensors_list.append({"chip": name, "label": label, "temp": temp})
 
-                # Fans
+            if name in cpu_chips:
+                # Find package socket number
+                socket = 0
+                for e in chip_temps:
+                    sm = re.search(r"Package id (\d+)", e["label"], re.IGNORECASE)
+                    if sm:
+                        socket = int(sm.group(1))
+                        break
+                detected_cpu_chips.append((socket, name, chip_temps))
+
+            # Fans
+            for f in files:
                 mf = re.match(r"^fan(\d+)_input$", f)
-                if mf:
-                    idx = mf.group(1)
-                    rpm = read_int(os.path.join(path, f))
-                    lbl = (read_text(os.path.join(path, f"fan{idx}_label")) or f"fan{idx}").strip()
-                    fans_list.append({"id": f"{name}_{lbl}", "chip": name, "label": lbl, "rpm": rpm})
+                if not mf:
+                    continue
+                idx = mf.group(1)
+                rpm = read_int(os.path.join(path, f))
+                label = (read_text(os.path.join(path, f"fan{idx}_label")) or f"fan{idx}").strip()
+                sensor_id = slug(f"{name}_{label}_{idx}")
+                fans_list.append({"id": sensor_id, "chip": name, "label": label, "rpm": rpm})
 
-                # Voltages
+            # Voltages
+            for f in files:
                 mv = re.match(r"^in(\d+)_input$", f)
-                if mv:
-                    idx = mv.group(1)
-                    raw_v = read_float(os.path.join(path, f))
-                    v = round(raw_v / 1000.0, 3) if raw_v is not None else None
-                    lbl = (read_text(os.path.join(path, f"in{idx}_label")) or f"in{idx}").strip()
-                    voltages_list.append({"id": f"{name}_{lbl}", "chip": name, "label": lbl, "volts": v})
+                if not mv:
+                    continue
+                idx = mv.group(1)
+                raw_v = read_float(os.path.join(path, f))
+                v = round(raw_v / 1000.0, 3) if raw_v is not None else None
+                label = (read_text(os.path.join(path, f"in{idx}_label")) or f"in{idx}").strip()
+                sensor_id = slug(f"{name}_{label}_{idx}")
+                voltages_list.append({"id": sensor_id, "chip": name, "label": label, "volts": v})
 
-                # Power
+            # Power
+            for f in files:
                 mp = re.match(r"^power(\d+)_average$", f) or re.match(r"^power(\d+)_input$", f)
-                if mp:
-                    idx = mp.group(1)
-                    raw_p = read_float(os.path.join(path, f))
-                    p = round(raw_p / 1000000.0, 1) if raw_p is not None else None
-                    lbl = (read_text(os.path.join(path, f"power{idx}_label")) or f"power{idx}").strip()
-                    power_list.append({"id": f"{name}_{lbl}", "chip": name, "label": lbl, "watts": p})
+                if not mp:
+                    continue
+                idx = mp.group(1)
+                raw_p = read_float(os.path.join(path, f))
+                p = round(raw_p / 1000000.0, 1) if raw_p is not None else None
+                label = (read_text(os.path.join(path, f"power{idx}_label")) or f"power{idx}").strip()
+                sensor_id = slug(f"{name}_{label}_{idx}")
+                power_list.append({"id": sensor_id, "chip": name, "label": label, "watts": p})
 
-            if name in cpu_chips and not cpu_readout:
-                temp_vals = [t["temp"] for t in temps if t["temp"] is not None]
-                pkg_temp = max(temp_vals) if temp_vals else None
-                cpu_readout = {
-                    "packageTemp": pkg_temp,
-                    "maxTemp": pkg_temp,
-                    "highTemp": None,
-                    "critTemp": None,
-                    "cores": temps,
-                    "source": name,
-                }
+    # Build CPU readout matching server hwmon.ts logic
+    cpu_readout: Optional[Dict[str, Any]] = None
+    if detected_cpu_chips:
+        detected_cpu_chips.sort(key=lambda x: x[0])
+        multi_socket = len(detected_cpu_chips) > 1
+        all_cores: List[Dict[str, Any]] = []
+        pkg_temps: List[float] = []
+        high_limits: List[float] = []
+        crit_limits: List[float] = []
+        primary_source = detected_cpu_chips[0][1]
+
+        for socket, _cname, entries in detected_cpu_chips:
+            # Find package/die sensor
+            pkg_entry = None
+            for e in entries:
+                if re.search(r"^(Package|Tctl|Tdie)", e["label"], re.IGNORECASE) and e["temp"] is not None:
+                    pkg_entry = e
+                    break
+
+            if pkg_entry and pkg_entry["temp"] is not None:
+                pkg_temps.append(pkg_entry["temp"])
+
+            # High & Crit limits
+            for e in entries:
+                if e["max"] is not None:
+                    high_limits.append(e["max"])
+                if e["crit"] is not None:
+                    crit_limits.append(e["crit"])
+
+            for e in entries:
+                if e == pkg_entry or re.search(r"^(Package|Tctl|Tdie)", e["label"], re.IGNORECASE):
+                    continue
+                lbl = f"Package {socket} {e['label']}" if multi_socket else e["label"]
+                all_cores.append({"label": lbl, "temp": e["temp"]})
+
+        core_temps = [c["temp"] for c in all_cores if c["temp"] is not None]
+        core_max = max(core_temps) if core_temps else None
+        pkg_max = max(pkg_temps) if pkg_temps else None
+        package_temp = pkg_max if pkg_max is not None else core_max
+        overall_max = max([t for t in [core_max, pkg_max] if t is not None], default=None)
+
+        cpu_readout = {
+            "packageTemp": package_temp,
+            "maxTemp": overall_max,
+            "highTemp": min(high_limits) if high_limits else None,
+            "critTemp": min(crit_limits) if crit_limits else None,
+            "cores": all_cores,
+            "source": primary_source,
+        }
+    else:
+        cpu_readout = read_thermal_zone(sysfs_root)
 
     # RAPL zones
     rapl_zones: List[Dict[str, Any]] = []
@@ -263,45 +362,82 @@ def scan_by_ids() -> Dict[str, List[str]]:
     return by_ids
 
 
-def collect_smart(smartctl_bin: str) -> Dict[str, Any]:
-    # 1. Discover devices using smartctl --scan (never --scan-open)
-    cmd = [smartctl_bin, "--scan"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        lines = proc.stdout.splitlines()
-    except (subprocess.SubprocessError, OSError):
-        return {"collectedAt": int(time.time() * 1000), "devices": []}
+def parse_device_types(env_str: Optional[str]) -> Dict[str, str]:
+    types: Dict[str, str] = {}
+    if not env_str:
+        return types
+    # Commas can appear in device types (/dev/sda=megaraid,0)
+    for token in env_str.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        idx = token.rfind("=")
+        if idx > 0:
+            dev = token[:idx].strip()
+            dtype = token[idx + 1:].strip()
+            if dev and dtype:
+                types[dev] = dtype
+    return types
+
+
+def collect_smart(
+    smartctl_bin: str,
+    configured_devices: Optional[List[str]] = None,
+    device_types: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    target_devices: List[Tuple[str, Optional[str]]] = []
+    dev_types = device_types or {}
+
+    if configured_devices:
+        for d in configured_devices:
+            target_devices.append((d, dev_types.get(d)))
+    else:
+        # Discover devices using smartctl --scan (never --scan-open)
+        cmd = [smartctl_bin, "--scan"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            lines = proc.stdout.splitlines()
+        except (subprocess.SubprocessError, OSError):
+            lines = []
+
+        for line in lines:
+            cleaned = line.split("#", 1)[0].strip()
+            if not cleaned:
+                continue
+            parts = cleaned.split()
+            if not parts:
+                continue
+            dev_path = parts[0]
+            dev_type = None
+            if len(parts) >= 3 and parts[1] == "-d":
+                dev_type = parts[2]
+                if dev_type == "scsi":
+                    dev_type = None
+            # Allow CHIRP_DEVICE_TYPES override
+            if dev_path in dev_types:
+                dev_type = dev_types[dev_path]
+            target_devices.append((dev_path, dev_type))
 
     by_id_map = scan_by_ids()
     devices: List[Dict[str, Any]] = []
 
-    for line in lines:
-        cleaned = line.split("#", 1)[0].strip()
-        if not cleaned:
-            continue
-        parts = cleaned.split()
-        if not parts:
-            continue
-        dev_path = parts[0]
-        dev_type = None
-        if len(parts) >= 3 and parts[1] == "-d":
-            dev_type = parts[2]
-            # Drop generic 'scsi' type to let smartctl auto-detect SAT
-            if dev_type == "scsi":
-                dev_type = None
-
-        # Run smartctl -a -j -n standby
+    for dev_path, dev_type in target_devices:
         read_cmd = [smartctl_bin, "-a", "-j", "-n", "standby"]
         if dev_type:
             read_cmd.extend(["-d", dev_type])
         read_cmd.append(dev_path)
 
+        raw_json: Optional[Dict[str, Any]] = None
         try:
             r = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15)
-            # Standby exit code 2 still contains valid JSON
-            raw_json = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
+            # Exit status bit 1 (exit & 2) means standby. If stdout has valid json, parse it.
+            out = r.stdout.strip()
+            if out.startswith("{") and (r.returncode == 0 or (r.returncode & 2) != 0):
+                parsed = json.loads(out)
+                if isinstance(parsed, dict) and ("device" in parsed or "smart_status" in parsed or "smartctl" in parsed):
+                    raw_json = parsed
         except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
-            raw_json = {}
+            raw_json = None
 
         by_ids = by_id_map.get(os.path.realpath(dev_path), [])
         wwn = None
@@ -344,6 +480,8 @@ def run_collection(
     sysfs_root: str,
     proc_root: str,
     last_smart: Optional[Dict[str, Any]],
+    configured_devices: Optional[List[str]] = None,
+    device_types: Optional[Dict[str, str]] = None,
     force_smart: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ms = int(time.time() * 1000)
@@ -351,7 +489,7 @@ def run_collection(
 
     smart_data = last_smart
     if force_smart or smart_data is None:
-        smart_data = collect_smart(smartctl_bin)
+        smart_data = collect_smart(smartctl_bin, configured_devices, device_types)
 
     snapshot = {
         "version": 1,
@@ -394,10 +532,23 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    # Load configuration from environment (or /etc/chirp/chirp.env via systemd)
+    env_devices = [d.strip() for d in os.environ.get("CHIRP_DEVICES", "").split(",") if d.strip()]
+    configured_devices = env_devices if env_devices else None
+    device_types = parse_device_types(os.environ.get("CHIRP_DEVICE_TYPES"))
+
     output_path = os.path.join(args.output_dir, args.output_file)
 
     if args.once or not args.daemon:
-        snapshot, _ = run_collection(args.smartctl, args.sysfs_root, args.proc_root, None, force_smart=True)
+        snapshot, _ = run_collection(
+            args.smartctl,
+            args.sysfs_root,
+            args.proc_root,
+            None,
+            configured_devices=configured_devices,
+            device_types=device_types,
+            force_smart=True,
+        )
         write_snapshot_atomic(snapshot, output_path)
         print(f"chirp-collector: written snapshot to {output_path}")
         return 0
@@ -417,6 +568,8 @@ def main() -> int:
                 args.sysfs_root,
                 args.proc_root,
                 last_smart,
+                configured_devices=configured_devices,
+                device_types=device_types,
                 force_smart=need_smart,
             )
             if need_smart:

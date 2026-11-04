@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -243,9 +242,12 @@ function deviceTypeEntries(value: string | undefined): string[] {
 }
 
 function defaultHostSnapshot(envValue: string | undefined): string | null {
-  const v = envValue?.trim();
-  if (v) return v;
-  return existsSync("/run/chirp/host.json") ? "/run/chirp/host.json" : null;
+  if (envValue !== undefined) {
+    const v = envValue.trim();
+    if (v === "" || v.toLowerCase() === "none" || v === "0" || v.toLowerCase() === "false") return null;
+    return v;
+  }
+  return "/run/chirp/host.json";
 }
 
 export function defaultWebDir(): string {

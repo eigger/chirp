@@ -178,6 +178,7 @@ describe("HostSnapshotReader", () => {
 
       const res = reader.read();
       expect(res.stale).toBe(true);
+      expect(res.snapshot).toBeNull();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("stale (70s old > 60s limit)"));
 
       // Fresh snapshot arrives
@@ -186,7 +187,39 @@ describe("HostSnapshotReader", () => {
 
       const res2 = reader.read();
       expect(res2.stale).toBe(false);
+      expect(res2.snapshot).not.toBeNull();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("no longer stale"));
+    });
+  });
+
+  it("handles null hwmon.cpu and converts to empty cpu gracefully", () => {
+    withTempDir((dir) => {
+      const p = join(dir, "host-nocpu.json");
+      const noCpuSnapshot = {
+        ...sampleSnapshot,
+        hwmon: {
+          cpuModel: null,
+          cpu: null,
+          sensors: [{ chip: "nvme", label: "Composite", temp: 35.0 }],
+          rapl: null,
+          power: null,
+          fans: null,
+          voltages: null,
+        },
+      };
+      writeFileSync(p, JSON.stringify(noCpuSnapshot));
+
+      const reader = new HostSnapshotReader({ path: p, now: () => 1000000 });
+      const res = reader.read();
+
+      expect(res.error).toBeNull();
+      expect(res.snapshot).not.toBeNull();
+
+      const readout = HostSnapshotReader.toSensorReadout(res.snapshot?.hwmon);
+      expect(readout?.cpu.packageTemp).toBeNull();
+      expect(readout?.cpu.cores).toEqual([]);
+      expect(readout?.sensors).toHaveLength(1);
+      expect(readout?.sensors[0].temp).toBe(35.0);
     });
   });
 });

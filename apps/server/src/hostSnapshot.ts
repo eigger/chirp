@@ -69,7 +69,10 @@ export class HostSnapshotReader {
         const ageSec = Math.floor((this.now() - this.lastResult.snapshot.timestamp) / 1000);
         const stale = ageSec > this.maxAgeSec;
         this.checkStale(stale, ageSec);
-        return { ...this.lastResult, stale };
+        if (stale) {
+          return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
+        }
+        return { ...this.lastResult, stale: false };
       }
 
       const text = readFileSync(this.path, "utf8");
@@ -85,9 +88,12 @@ export class HostSnapshotReader {
       const ageSec = Math.floor((this.now() - snapshot.timestamp) / 1000);
       const stale = ageSec > this.maxAgeSec;
       this.checkStale(stale, ageSec);
+      if (stale) {
+        return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
+      }
 
       this.lastMtimeMs = stat.mtimeMs;
-      this.lastResult = { snapshot, stale, error: null };
+      this.lastResult = { snapshot, stale: false, error: null };
       if (this.warnedError) {
         this.warn(`host snapshot recovered: parsed valid snapshot (${this.path})`);
         this.warnedError = null;
@@ -138,15 +144,23 @@ export class HostSnapshotReader {
 
   /** Convert snapshot hwmon section into SensorReadout */
   static toSensorReadout(hwmon: HostSnapshot["hwmon"]): SensorReadout | null {
-    if (!hwmon?.cpu) return null;
+    if (!hwmon) return null;
+    const cpu = hwmon.cpu ?? {
+      packageTemp: null,
+      maxTemp: null,
+      highTemp: null,
+      critTemp: null,
+      cores: [],
+      source: null,
+    };
     return {
       cpu: {
-        packageTemp: hwmon.cpu.packageTemp,
-        maxTemp: hwmon.cpu.maxTemp,
-        highTemp: hwmon.cpu.highTemp,
-        critTemp: hwmon.cpu.critTemp,
-        cores: hwmon.cpu.cores,
-        source: hwmon.cpu.source,
+        packageTemp: cpu.packageTemp,
+        maxTemp: cpu.maxTemp,
+        highTemp: cpu.highTemp,
+        critTemp: cpu.critTemp,
+        cores: cpu.cores,
+        source: cpu.source,
       },
       sensors: (hwmon.sensors ?? []).map((s) => ({
         chip: s.chip,
