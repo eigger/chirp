@@ -1,6 +1,6 @@
 # Plan: reduce the privileged-LXC attack surface without losing features
 
-Status: in progress. Phase 1 items 1.2, 1.3, 1.4 implemented; item 1.1 pending live PVE >= 8.1 host verification. Audience: the agent implementing it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
+Status: in progress. Phase 1 fully implemented (1.1 exact devN: passthrough with PVE >= 8.1 detection and legacy fallback, 1.2 setup token, 1.3 built-in TLS, 1.4 docs). Phase 2 collector design pending. Audience: the agent implementing it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
 
 ## Problem
 

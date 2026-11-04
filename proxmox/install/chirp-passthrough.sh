@@ -39,15 +39,13 @@
 #    chirp reads /host first and reports `scope: "host"`; the smoke test compares MemTotal
 #    and checks that a host-only interface is visible under /host/sys/class/net.
 #    Re-running with another mode replaces chirp's lines.
-#  - Device cgroup rules: `b <major>:* rw` for the majors of the selected disks.
-#    * rw, not rwm: the disks are bind-mounted (no mknod needed), and smartctl
-#      opens SCSI/SAT devices O_RDWR for SG_IO. Override with CHIRP_DEV_PERM.
-#    * major wildcard, not exact major:minor: sd minors follow probe order and
-#      NVMe (259, blkext) minors are allocated dynamically, so exact rules would
-#      silently point at the wrong disk (or none) after a host reboot or hotplug,
-#      while the by-id bind mounts are re-resolved on every CT start. The cost:
-#      container root can reach other block devices with the same major (e.g. the
-#      host's boot disk) - no worse than a privileged CT already is (see above).
+#  - Disk passthrough:
+#    * Proxmox VE >= 8.1: uses native exact device passthrough (`devN: /dev/disk/by-id/...`).
+#      Proxmox resolves the exact major:minor on CT start and allows only that device
+#      in cgroups (no major wildcard). Indices (dev0, dev1, ...) avoid user-defined devN.
+#    * Proxmox VE < 8.1: falls back to legacy `lxc.cgroup2.devices.allow: b <major>:* rw`
+#      and `lxc.mount.entry` lines. Override with CHIRP_DEV_PERM (default rw).
+#    * Mode selection: CHIRP_DEV_PASSTHROUGH=auto (default) | dev | legacy.
 #
 # Safe to `source` (defines functions only; with CHIRP_PASSTHROUGH_LIB=1 main does not run).
 
@@ -56,6 +54,7 @@
 # (GUI / pct set), re-encoding ":" as "%3A", so markers cannot delimit anything; chirp no
 # longer writes them and only deletes them (in either form) when migrating an old config.
 CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"
+CHIRP_DEV_PASSTHROUGH="${CHIRP_DEV_PASSTHROUGH:-auto}"
 CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-all}"
 # Host files bind-mounted read-only for the host metrics (source -> <rootfs>/host/<source>).
 CHIRP_HOST_PROC_FILES=(/proc/meminfo /proc/stat /proc/loadavg)
@@ -174,6 +173,84 @@ chirp_resolve_selection() {
   return $rc
 }
 
+# Detect PVE manager version ("major.minor", e.g. "8.1"). Can be overridden with CHIRP_PVE_VERSION.
+chirp_pve_version() {
+  if [[ -n "${CHIRP_PVE_VERSION:-}" ]]; then
+    printf '%s\n' "$CHIRP_PVE_VERSION"
+    return 0
+  fi
+  if ! command -v pveversion >/dev/null 2>&1; then
+    return 1
+  fi
+  local out
+  out="$(pveversion 2>/dev/null)" || return 1
+  if [[ "$out" =~ pve-manager/([0-9]+)\.([0-9]+) ]]; then
+    printf '%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+# Exit 0 if PVE >= 8.1 (supports dev[n]: device passthrough).
+chirp_pve_supports_devn() {
+  local ver maj min
+  ver="$(chirp_pve_version 2>/dev/null)" || return 1
+  if [[ "$ver" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+    maj="${BASH_REMATCH[1]}"
+    min="${BASH_REMATCH[2]}"
+    if (( maj > 8 )) || { (( maj == 8 )) && (( min >= 1 )); }; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Resolve passthrough mode: "dev" (PVE >= 8.1 native devN:) or "legacy" (cgroup wildcard + bind mount).
+chirp_dev_mode() {
+  case "${CHIRP_DEV_PASSTHROUGH:-auto}" in
+    dev) echo "dev" ;;
+    legacy) echo "legacy" ;;
+    auto|"")
+      if chirp_pve_supports_devn; then
+        echo "dev"
+      else
+        echo "legacy"
+      fi
+      ;;
+    *)
+      if chirp_pve_supports_devn; then
+        echo "dev"
+      else
+        echo "legacy"
+      fi
+      ;;
+  esac
+}
+
+# $1: conf file -> stdout: list of devN indices currently used by user-defined entries (not chirp-managed).
+chirp_user_dev_indices() {
+  local conf="$1"
+  [[ -s "$conf" ]] || return 0
+  awk '
+    function trim(x) { sub(/^[ \t]+/, "", x); sub(/[ \t]+$/, "", x); return x }
+    /^\[/ { exit }
+    /^dev[0-9]+[ \t]*[:=]/ {
+      line = $0
+      sub(/[ \t]*[:=].*$/, "", line)
+      sub(/^dev/, "", line)
+      idx = line
+      v = $0
+      sub(/^dev[0-9]+[ \t]*[:=][ \t]*/, "", v)
+      v = trim(v)
+      sub(/^path=/, "", v)
+      split(v, f, /[, \t]/)
+      if (f[1] !~ /^\/dev\/disk\/by-id\/[^\/]+$/) {
+        print idx
+      }
+    }
+  ' "$conf"
+}
+
 # stdin: selected TSV -> stdout: unique major numbers.
 chirp_majors() {
   awk -F'\t' 'NF && $2 ~ /^[0-9]+:/ {split($2,a,":"); print a[1]}' | sort -n -u
@@ -204,20 +281,43 @@ chirp_render_host_mounts() {
 }
 
 # stdin: selected TSV -> stdout: the chirp lines (disk rules + host metric mounts; nothing
-# when both are empty). No marker comments: chirp_apply_conf recognises its lines by content.
+# when both are empty). $1: optional conf file (to avoid collisions with user devN entries).
 chirp_render_block() {
-  local tsv majors m byid host
+  local conf="${1:-}" tsv majors m byid host mode
   tsv="$(cat)"
   host="$(chirp_render_host_mounts)" || return 1
+  mode="$(chirp_dev_mode)"
   if [[ -n "$tsv" ]]; then
-    majors="$(chirp_majors <<<"$tsv")"
-    for m in $majors; do
-      echo "lxc.cgroup2.devices.allow: b ${m}:* ${CHIRP_DEV_PERM}"
-    done
-    while IFS=$'\t' read -r byid _; do
-      [[ -n "$byid" ]] || continue
-      echo "lxc.mount.entry: /dev/disk/by-id/${byid} dev/disk/by-id/${byid} none bind,optional,create=file"
-    done <<<"$tsv"
+    if [[ "$mode" == "dev" ]]; then
+      local used_indices=() idx=0 u collision
+      if [[ -n "$conf" && -s "$conf" ]]; then
+        while IFS= read -r u; do
+          [[ -n "$u" ]] && used_indices+=("$u")
+        done < <(chirp_user_dev_indices "$conf")
+      fi
+      while IFS=$'\t' read -r byid _; do
+        [[ -n "$byid" ]] || continue
+        while true; do
+          collision=0
+          for u in "${used_indices[@]:-}"; do
+            if [[ -n "$u" && "$u" -eq "$idx" ]]; then collision=1; break; fi
+          done
+          if (( ! collision )); then break; fi
+          idx=$((idx + 1))
+        done
+        echo "dev${idx}: /dev/disk/by-id/${byid}"
+        idx=$((idx + 1))
+      done <<<"$tsv"
+    else
+      majors="$(chirp_majors <<<"$tsv")"
+      for m in $majors; do
+        echo "lxc.cgroup2.devices.allow: b ${m}:* ${CHIRP_DEV_PERM}"
+      done
+      while IFS=$'\t' read -r byid _; do
+        [[ -n "$byid" ]] || continue
+        echo "lxc.mount.entry: /dev/disk/by-id/${byid} dev/disk/by-id/${byid} none bind,optional,create=file"
+      done <<<"$tsv"
+    fi
   fi
   [[ -n "$host" ]] && printf '%s\n' "$host"
   return 0
@@ -237,9 +337,10 @@ chirp_byid_major() {
 # may normalise them), plus older chirp formats and marker comments:
 #  - host metric mounts: /proc/{meminfo,stat,loadavg} -> host/proc/..., /sys -> host/sys
 #  - disk mounts: /dev/disk/by-id/X dev/disk/by-id/X none bind,optional,create=file
+#  - native dev passthrough: devN: /dev/disk/by-id/X (or path=/dev/disk/by-id/X)
 #  - `lxc.cgroup2.devices.allow: b <M>:* <perm>` for M in the `majors` variable (the majors
 #    chirp adds now plus those of the disk mounts it removes)
-# mode=list prints the by-id names of the disk mounts; mode=rewrite drops every chirp line
+# mode=list prints the by-id names of the disk mounts/devN lines; mode=rewrite drops every chirp line
 # and inserts the block file once, before the first section.
 CHIRP_CONF_AWK='
   function trim(x) { sub(/^[ \t]+/, "", x); sub(/[ \t]+$/, "", x); return x }
@@ -274,6 +375,15 @@ CHIRP_CONF_AWK='
         if (index("," majors ",", "," okmaj ",")) return 1
       }
     }
+    if (line ~ /^dev[0-9]+[ \t]*[:=]/) {
+      v = line
+      sub(/^dev[0-9]+[ \t]*[:=][ \t]*/, "", v)
+      v = trim(v)
+      sub(/^path=/, "", v)
+      split(v, f, /[, \t]/)
+      if (f[1] ~ /^\/dev\/disk\/by-id\/[^\/]+$/) return 3
+      return 0
+    }
     return 0
   }
   function emit(   l) {
@@ -289,6 +399,10 @@ CHIRP_CONF_AWK='
       t = ours($0)
       if (mode == "list") {
         if (t == 2) { v = kv($0, "lxc.mount.entry"); split(v, f, /[ \t]+/); sub(/^\/dev\/disk\/by-id\//, "", f[1]); print f[1] }
+        if (t == 3) {
+          v = $0; sub(/^dev[0-9]+[ \t]*[:=][ \t]*/, "", v); v = trim(v)
+          sub(/^path=/, "", v); split(v, f, /[, \t]/); sub(/^\/dev\/disk\/by-id\//, "", f[1]); print f[1]
+        }
         next
       }
       if (t) next
@@ -306,7 +420,7 @@ CHIRP_CONF_AWK='
 # after it, it would become part of a snapshot's config). Idempotent; never touches
 # snapshot/pending sections or other lxc.* lines; leaves the file unchanged on any doubt.
 chirp_apply_conf() {
-  local conf="$1" blockfile="$2" state="${3:-$1.chirp-majors}" tmp majors byid m recorded="" newmajors state_tmp missing=0
+  local conf="$1" blockfile="$2" state="${3:-$1.chirp-majors}" tmp majors byid m recorded="" newmajors state_tmp missing=0 has_wildcard=0
   if [[ ! -s "$conf" ]]; then
     _cp_err "${conf} is missing or empty."
     return 1
@@ -329,11 +443,24 @@ chirp_apply_conf() {
   fi
   newmajors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
   majors="$newmajors"$'\n'"$recorded"
+
+  if awk '
+    /^\[/ {exit}
+    {
+      line = $0
+      if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ /^b[ \t]+[0-9]+:\*[ \t]+/) {
+        exit 10
+      }
+    }
+  ' "$conf"; [ $? -eq 10 ]; then
+    has_wildcard=1
+  fi
+
   while IFS= read -r byid; do
     [[ -n "$byid" ]] || continue
     m="$(chirp_byid_major "$byid")"
     [[ -n "$m" ]] || missing=1
-    if [[ -z "$m" && -z "$recorded" ]]; then
+    if [[ -z "$m" && -z "$recorded" && "$has_wildcard" -eq 1 ]]; then
       _cp_err "Cannot identify the old rule for missing disk ${byid}. Remove its stale cgroup rule and mount manually before retrying; leaving ${conf} unchanged."
       return 1
     fi
@@ -342,7 +469,7 @@ chirp_apply_conf() {
   majors="$(printf '%s\n' "$majors" | sed '/^$/d' | sort -n -u | paste -sd, -)"
   # A CT snapshot can restore old rules without restoring this host-side state.
   # With missing disks we cannot attribute an unrecorded wildcard rule safely.
-  if ((missing)); then
+  if ((missing && has_wildcard)); then
     while IFS= read -r m; do
       case ",$majors," in
         *",$m,"*) ;;
@@ -694,8 +821,17 @@ chirp_passthrough_run() {
 
   sel_tsv="$(chirp_resolve_selection "$selection" "$detected")" || return 1
 
+  local dev_mode pve_ver
+  dev_mode="$(chirp_dev_mode)"
+  if [[ "$dev_mode" == "legacy" ]]; then
+    pve_ver="$(chirp_pve_version 2>/dev/null || echo "unknown")"
+    if [[ "$pve_ver" != "unknown" ]]; then
+      _cp_warn "Proxmox VE < 8.1 detected (${pve_ver}). Using legacy wildcard cgroup passthrough."
+    fi
+  fi
+
   blockfile="$(mktemp)"
-  chirp_render_block <<<"$sel_tsv" >"$blockfile"
+  chirp_render_block "$conf" <<<"$sel_tsv" >"$blockfile"
   if ! mkdir -p /var/lib/chirp-passthrough || ! chmod 700 /var/lib/chirp-passthrough; then
     rm -f "$blockfile"
     return 1

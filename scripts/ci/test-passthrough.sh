@@ -323,6 +323,7 @@ eq "unknown -> generic instruction" "1" "$(chirp_account_report 100 10.0.0.5 | g
 unset -f curl
 
 echo "[11] pct stub: TLS and port variations in account report"
+curl() { return 22; }
 FAKE_ENV=""
 pct() {
   if [[ "$1" == "exec" ]]; then
@@ -358,7 +359,110 @@ FAKE_ENV=$'CHIRP_PORT=9000 # custom port\n'
 REPORT="$(chirp_account_report 100 10.0.0.5)"
 eq "inline comment stripped from port" "1" "$(grep -c 'Dashboard : http://10.0.0.5:9000/' <<<"$REPORT")"
 
-unset -f pct
+unset -f pct curl
+
+echo "[13] exact devN: passthrough (PVE >= 8.1)"
+# 1. Version parsing
+pveversion() { echo "pve-manager/8.1-4/3fa9280d (running kernel: 6.8.4-2-pve)"; }
+eq "pve 8.1 parsed" "8.1" "$(chirp_pve_version)"
+eq "pve 8.1 supports devn" "0" "$({ chirp_pve_supports_devn; echo $?; })"
+pveversion() { echo "pve-manager/8.2.1/abc (running kernel: 6.8.4-2-pve)"; }
+eq "pve 8.2 parsed" "8.2" "$(chirp_pve_version)"
+eq "pve 8.2 supports devn" "0" "$({ chirp_pve_supports_devn; echo $?; })"
+pveversion() { echo "pve-manager/9.0.0/abc"; }
+eq "pve 9.0 supports devn" "0" "$({ chirp_pve_supports_devn; echo $?; })"
+pveversion() { echo "pve-manager/8.0-3/xyz"; }
+eq "pve 8.0 does not support devn" "1" "$({ chirp_pve_supports_devn; echo $?; })"
+pveversion() { echo "pve-manager/7.4-1/xyz"; }
+eq "pve 7.4 does not support devn" "1" "$({ chirp_pve_supports_devn; echo $?; })"
+unset -f pveversion
+
+# 2. Mode resolution
+eq "dev mode explicit" "dev" "$(CHIRP_DEV_PASSTHROUGH=dev chirp_dev_mode)"
+eq "legacy mode explicit" "legacy" "$(CHIRP_DEV_PASSTHROUGH=legacy chirp_dev_mode)"
+eq "auto mode on 8.1 -> dev" "dev" "$(CHIRP_PVE_VERSION=8.1 chirp_dev_mode)"
+eq "auto mode on 8.0 -> legacy" "legacy" "$(CHIRP_PVE_VERSION=8.0 chirp_dev_mode)"
+
+# 3. Block rendering
+DEV_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev chirp_render_block <<<"$SEL_ALL")"
+EXPECTED_DEV_BLOCK='dev0: /dev/disk/by-id/wwn-0x5002538e40000001
+dev1: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234
+dev2: /dev/disk/by-id/nvme-eui.0025385b21400001
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/stat host/proc/stat none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /proc/loadavg host/proc/loadavg none bind,ro,optional,create=file 0 0
+lxc.mount.entry: /sys host/sys none bind,ro,nosuid,nodev,noexec,optional,create=dir 0 0'
+eq "dev block content" "$EXPECTED_DEV_BLOCK" "$DEV_BLOCK"
+eq "no cgroup allow rules in dev block" "0" "$(grep -c 'lxc.cgroup2.devices.allow' <<<"$DEV_BLOCK")"
+eq "no disk mount entries in dev block" "0" "$(grep -c 'lxc.mount.entry: /dev/disk' <<<"$DEV_BLOCK")"
+
+# 4. Collision avoidance with user-defined devN
+COLLISION_CONF="$TMP/collision.conf"
+cat >"$COLLISION_CONF" <<'EOF'
+arch: amd64
+dev0: /dev/dri/card0,gid=44
+dev2: /dev/dri/renderD128,gid=104
+EOF
+eq "detected user dev indices" $'0\n2' "$(chirp_user_dev_indices "$COLLISION_CONF")"
+AVOID_BLOCK="$(CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$COLLISION_CONF" <<<"$SEL_ALL")"
+eq "avoids dev0 and dev2" "1" "$(grep -c '^dev1: /dev/disk/by-id/wwn-' <<<"$AVOID_BLOCK")"
+eq "allocates dev3 next" "1" "$(grep -c '^dev3: /dev/disk/by-id/ata-' <<<"$AVOID_BLOCK")"
+eq "allocates dev4 next" "1" "$(grep -c '^dev4: /dev/disk/by-id/nvme-' <<<"$AVOID_BLOCK")"
+
+# 5. Migration from legacy wildcard config to devN
+MIG_CONF="$TMP/mig.conf"
+cat >"$MIG_CONF" <<'EOF'
+arch: amd64
+hostname: chirp
+unprivileged: 0
+lxc.cgroup2.devices.allow: b 8:* rw
+lxc.cgroup2.devices.allow: b 259:* rw
+lxc.cgroup2.devices.allow: c 10:200 rwm
+dev0: /dev/dri/card0
+lxc.mount.entry: /dev/disk/by-id/wwn-0x5002538e40000001 dev/disk/by-id/wwn-0x5002538e40000001 none bind,optional,create=file
+lxc.mount.entry: /dev/disk/by-id/nvme-eui.0025385b21400001 dev/disk/by-id/nvme-eui.0025385b21400001 none bind,optional,create=file
+lxc.mount.entry: /proc/meminfo host/proc/meminfo none bind,ro,optional,create=file 0 0
+
+[snap1]
+hostname: chirp
+lxc.cgroup2.devices.allow: b 8:* rw
+EOF
+snap "$MIG_CONF" >"$TMP/mig.snap"
+CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block"
+chirp_apply_conf "$MIG_CONF" "$TMP/mig.block"
+eq "migration: old wildcard rules dropped (8 and 259)" "0" "$(awk '/^\[/{exit} /b (8|259):\*/' "$MIG_CONF" | wc -l | tr -d ' ')"
+eq "migration: user cgroup kept (10:200)" "1" "$(grep -c 'c 10:200 rwm' "$MIG_CONF")"
+eq "migration: user dev0 kept" "1" "$(grep -c '^dev0: /dev/dri/card0' "$MIG_CONF")"
+eq "migration: old disk mounts dropped" "0" "$(grep -c '^lxc.mount.entry: /dev/disk' "$MIG_CONF")"
+eq "migration: chirp dev entries added" "3" "$(main "$MIG_CONF" | grep -c '^dev[0-9]: /dev/disk/by-id/')"
+eq "migration: dev1 allocated (dev0 user taken)" "1" "$(grep -c '^dev1: /dev/disk/by-id/wwn-' "$MIG_CONF")"
+eq "migration: snapshot kept" "$(cat "$TMP/mig.snap")" "$(snap "$MIG_CONF")"
+eq "migration: state file cleared of block majors" "" "$(cat "$MIG_CONF.chirp-majors" 2>/dev/null || true)"
+
+# 6. Idempotent re-run in devN mode
+cp "$MIG_CONF" "$TMP/mig.once"
+CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"$SEL_ALL" >"$TMP/mig.block2"
+chirp_apply_conf "$MIG_CONF" "$TMP/mig.block2"
+eq "dev mode idempotent re-run" "$(cat "$TMP/mig.once")" "$(cat "$MIG_CONF")"
+
+# 7. Unplugged disk in pure devN mode (no wildcard rules) cleanly removed
+GONE_DEV_CONF="$TMP/gone_dev.conf"
+cat >"$GONE_DEV_CONF" <<'EOF'
+arch: amd64
+dev0: /dev/disk/by-id/wwn-gone
+EOF
+: >"$TMP/gone_dev.block"
+chirp_byid_major() { return 0; }
+chirp_apply_conf "$GONE_DEV_CONF" "$TMP/gone_dev.block"; eq "unplugged disk in dev mode -> rc 0" "0" "$?"
+eq "gone dev entry removed" "0" "$(grep -c 'wwn-gone' "$GONE_DEV_CONF")"
+chirp_byid_major() { case "$1" in wwn-*|ata-*) echo 8 ;; nvme-*) echo 259 ;; esac; }
+
+# 8. Selection none removes devN entries
+CHIRP_DEV_PASSTHROUGH=dev chirp_render_block "$MIG_CONF" <<<"" >"$TMP/mig.none"
+chirp_apply_conf "$MIG_CONF" "$TMP/mig.none"
+eq "none: chirp dev entries removed" "0" "$(main "$MIG_CONF" | grep -c '^dev[0-9]: /dev/disk/by-id/')"
+eq "none: user dev0 kept" "1" "$(grep -c '^dev0: /dev/dri/card0' "$MIG_CONF")"
+eq "none: host mounts kept" "4" "$(main "$MIG_CONF" | grep -c '^lxc.mount.entry: /[ps]')"
 
 echo
 echo "passed=${PASS} failed=${FAILS}"
