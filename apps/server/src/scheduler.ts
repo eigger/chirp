@@ -1,5 +1,5 @@
 import { hostname, release, uptime } from "node:os";
-import { API_VERSION, type Disk, type StatusSnapshot } from "@chirp/shared";
+import { API_VERSION, type Disk, type Filesystem, type StatusSnapshot, type ZfsPool } from "@chirp/shared";
 import { join } from "node:path";
 import type { Config } from "./config.js";
 import { DiskIdentity, provisionalId } from "./diskIdentity.js";
@@ -76,9 +76,45 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
   return {
     sampleHost: (monotonicMs) => host.sample(monotonicMs),
     sampleStorage: async () => {
-      const snap = snapshotReader?.read().snapshot;
-      const snapStorage = snap ? HostSnapshotReader.toStorage(snap.storage) : null;
-      return snapStorage ?? storage.sample();
+      const res = snapshotReader?.read();
+      let snapStorage: StorageSample | null = null;
+      if (res?.snapshot) {
+        snapStorage = HostSnapshotReader.toStorage(res.snapshot.storage);
+      } else if (res?.stale && res.lastParsed?.storage) {
+        // Snapshot is stale: preserve host filesystem identities with scope: "host" and null values
+        snapStorage = HostSnapshotReader.toStorage(res.lastParsed.storage, true);
+      }
+
+      const local = await storage.sample();
+      if (!snapStorage) return local;
+
+      // Merge filesystems section by section (host snapshot takes precedence on ID collisions)
+      let filesystems: Filesystem[] | null = null;
+      if (snapStorage.filesystems !== null || local.filesystems !== null) {
+        const map = new Map<string, Filesystem>();
+        for (const fs of local.filesystems ?? []) {
+          map.set(fs.id, fs);
+        }
+        for (const fs of snapStorage.filesystems ?? []) {
+          map.set(fs.id, fs);
+        }
+        filesystems = Array.from(map.values());
+      }
+
+      // Merge zfsPools section by section (host snapshot takes precedence on ID collisions)
+      let zfsPools: ZfsPool[] | null = null;
+      if (snapStorage.zfsPools !== null || local.zfsPools !== null) {
+        const map = new Map<string, ZfsPool>();
+        for (const zp of local.zfsPools ?? []) {
+          map.set(zp.id, zp);
+        }
+        for (const zp of snapStorage.zfsPools ?? []) {
+          map.set(zp.id, zp);
+        }
+        zfsPools = Array.from(map.values());
+      }
+
+      return { filesystems, zfsPools };
     },
     readSensors: () => {
       const snap = snapshotReader?.read().snapshot;

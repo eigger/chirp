@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -30,16 +31,16 @@ def slug(s: str) -> str:
     return s.strip("_")
 
 
-def load_env_file(path: str = "/etc/chirp/chirp.env") -> Dict[str, str]:
-    """Parse key=value pairs from an env file without shell evaluation."""
-    env: Dict[str, str] = {}
+def load_env_file(path: str = "/etc/chirp/chirp.env") -> Optional[Dict[str, str]]:
+    """Parse key=value pairs from an env file without shell evaluation. Returns None if file does not exist."""
     if not os.path.isfile(path):
-        return env
+        return None
+    env: Dict[str, str] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith("#") or line.startswith(";"):
                     continue
                 if "=" in line:
                     k, v = line.split("=", 1)
@@ -47,8 +48,20 @@ def load_env_file(path: str = "/etc/chirp/chirp.env") -> Dict[str, str]:
                     v = v.strip().strip("\"'")
                     env[k] = v
     except OSError:
-        pass
+        return None
     return env
+
+
+def read_config_var(env_file_dict: Optional[Dict[str, str]], key: str, default: str = "") -> str:
+    """
+    Get configuration variable with live env file precedence over initial os.environ.
+    Under systemd, EnvironmentFile loads /etc/chirp/chirp.env into os.environ at start.
+    When /etc/chirp/chirp.env is modified at runtime, reading env_file_dict takes
+    precedence so changes take effect without requiring a service restart.
+    """
+    if env_file_dict is not None:
+        return env_file_dict.get(key, default)
+    return os.environ.get(key, default)
 
 
 def read_text(path: str) -> Optional[str]:
@@ -600,9 +613,22 @@ def collect_smart(
     }
 
 
-def parse_filesystem_paths(raw: Optional[str]) -> List[str]:
-    """Parse and validate CHIRP_FILESYSTEM_PATHS matching server config rules."""
-    if not raw:
+def js_round(x: float) -> int:
+    """Math.round half-up parity with JavaScript."""
+    return math.floor(x + 0.5)
+
+
+def calc_percent(used: Optional[int], total: Optional[int]) -> Optional[float]:
+    """Calculate percentage with 1 decimal place matching JavaScript storage.ts."""
+    if used is None or total is None or total <= 0:
+        return None
+    val = (used / total) * 1000.0
+    return js_round(val) / 10.0
+
+
+def validate_filesystem_paths(raw: Optional[str]) -> List[str]:
+    """Validate CHIRP_FILESYSTEM_PATHS matching server config rules. Raises ValueError on invalid input."""
+    if not raw or not raw.strip():
         return []
     items = [p.strip() for p in raw.split(",") if p.strip()]
     unique_paths: List[str] = []
@@ -612,17 +638,49 @@ def parse_filesystem_paths(raw: Optional[str]) -> List[str]:
             seen.add(p)
             unique_paths.append(p)
 
-    if len(unique_paths) > 32:
-        unique_paths = unique_paths[:32]
-    # Keep only absolute paths without '..' or null bytes
-    return [
-        p for p in unique_paths
-        if p.startswith("/") and "\0" not in p and ".." not in p.split("/")
-    ]
+    if len(unique_paths) > 32 or any(
+        not p.startswith("/") or "\0" in p or ".." in p.split("/") for p in unique_paths
+    ):
+        raise ValueError(
+            "CHIRP_FILESYSTEM_PATHS (at most 32) must be absolute paths without '..'"
+        )
+    return unique_paths
+
+
+STATVFS_SCRIPT = """
+import os, sys, json
+try:
+    st = os.statvfs(sys.argv[1])
+    bsize = st.f_frsize or st.f_bsize
+    sys.stdout.write(json.dumps([bsize, st.f_blocks, st.f_bfree, st.f_bavail]))
+except Exception:
+    sys.exit(1)
+"""
+
+
+def isolated_statvfs(path: str, timeout: float = 5.0) -> Optional[Tuple[int, int, int, int]]:
+    """Run statvfs in an isolated child process with a timeout to prevent hanging the collector on stalled mounts."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", STATVFS_SCRIPT, path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        data = json.loads(proc.stdout)
+        if isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data):
+            return tuple(data)  # (bsize, blocks, bfree, bavail)
+        return None
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return None
 
 
 def collect_filesystem(path: str) -> Dict[str, Any]:
-    """Collect filesystem statistics via os.statvfs matching chirp storage.ts."""
+    """Collect filesystem statistics via isolated_statvfs matching chirp storage.ts."""
     fs_id = f"fs_{hashlib.sha256(path.encode('utf-8')).hexdigest()[:16]}"
     result: Dict[str, Any] = {
         "id": fs_id,
@@ -632,28 +690,66 @@ def collect_filesystem(path: str) -> Dict[str, Any]:
         "availableBytes": None,
         "usedPercent": None,
     }
-    try:
-        st = os.statvfs(path)
-        bsize = st.f_frsize or st.f_bsize
-        blocks = st.f_blocks
-        bfree = st.f_bfree
-        bavail = st.f_bavail
-        if bsize <= 0 or bfree > blocks or bavail > bfree:
-            return result
-        total = blocks * bsize
-        used = (blocks - bfree) * bsize
-        available = bavail * bsize
-        denom = used + available
-        used_pct = round((used / denom) * 1000) / 10 if denom > 0 else None
-        result.update({
-            "totalBytes": total,
-            "usedBytes": used,
-            "availableBytes": available,
+    stats = isolated_statvfs(path, timeout=5.0)
+    if stats is None:
+        return result
+
+    bsize, blocks, bfree, bavail = stats
+    if bsize <= 0 or bfree > blocks or bavail > bfree:
+        return result
+
+    total = blocks * bsize
+    used = (blocks - bfree) * bsize
+    available = bavail * bsize
+    used_pct = calc_percent(used, used + available)
+    result.update({
+        "totalBytes": total,
+        "usedBytes": used,
+        "availableBytes": available,
+        "usedPercent": used_pct,
+    })
+    return result
+
+
+def parse_zpool(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse zpool list output matching server parseZpool. Returns None on any corrupt/invalid line."""
+    stripped = text.strip()
+    if not stripped or stripped == "no pools available":
+        return []
+
+    pools: List[Dict[str, Any]] = []
+    for line in stripped.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6:
+            return None
+        guid, name, health, size, allocated, free = fields
+        if not re.match(r"^\d+$", guid) or not name or not health:
+            return None
+
+        # Size, allocated, free must be '-' or an unsigned integer within safe integer range
+        for val in (size, allocated, free):
+            if val != "-":
+                if not re.match(r"^\d+$", val):
+                    return None
+                n = int(val)
+                if n < 0 or n > 9007199254740991:
+                    return None
+
+        total_bytes = int(size) if size != "-" else None
+        used_bytes = int(allocated) if allocated != "-" else None
+        free_bytes = int(free) if free != "-" else None
+        used_pct = calc_percent(used_bytes, total_bytes)
+
+        pools.append({
+            "id": guid,
+            "name": name,
+            "health": health,
+            "totalBytes": total_bytes,
+            "usedBytes": used_bytes,
+            "freeBytes": free_bytes,
             "usedPercent": used_pct,
         })
-    except OSError:
-        pass
-    return result
+    return pools
 
 
 def collect_zfs_pools(zpool_bin: str = "zpool") -> Optional[List[Dict[str, Any]]]:
@@ -674,35 +770,7 @@ def collect_zfs_pools(zpool_bin: str = "zpool") -> Optional[List[Dict[str, Any]]
     if proc.returncode != 0:
         return None
 
-    out = proc.stdout.strip()
-    if not out or out == "no pools available":
-        return []
-
-    pools: List[Dict[str, Any]] = []
-    for line in out.splitlines():
-        fields = line.split("\t")
-        if len(fields) != 6:
-            continue
-        guid, name, health, size, allocated, free = fields
-        if not guid.isdigit() or not name or not health:
-            continue
-        total_bytes = int(size) if size.isdigit() else None
-        used_bytes = int(allocated) if allocated.isdigit() else None
-        free_bytes = int(free) if free.isdigit() else None
-        used_pct = None
-        if total_bytes is not None and total_bytes > 0 and used_bytes is not None:
-            used_pct = round((used_bytes / total_bytes) * 1000) / 10
-
-        pools.append({
-            "id": guid,
-            "name": name,
-            "health": health,
-            "totalBytes": total_bytes,
-            "usedBytes": used_bytes,
-            "freeBytes": free_bytes,
-            "usedPercent": used_pct,
-        })
-    return pools
+    return parse_zpool(proc.stdout)
 
 
 def collect_storage(
@@ -751,19 +819,19 @@ def run_collection(
     device_types: Optional[Dict[str, str]] = None,
     filesystem_paths: Optional[List[str]] = None,
     zfs_enabled: bool = False,
-    force_smart: bool = False,
-    force_storage: bool = False,
+    collect_smart_now: bool = False,
+    collect_storage_now: bool = False,
     zpool_bin: str = "zpool",
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     now_ms = int(time.time() * 1000)
     uname = os.uname()
 
     smart_data = last_smart
-    if force_smart or smart_data is None:
+    if collect_smart_now:
         smart_data = collect_smart(smartctl_bin, configured_devices, device_types)
 
     storage_data = last_storage
-    if force_storage or storage_data is None:
+    if collect_storage_now:
         storage_data = collect_storage(filesystem_paths, zfs_enabled, zpool_bin)
 
     snapshot = {
@@ -812,16 +880,21 @@ def main() -> int:
 
     # Load configuration from environment, falling back to /etc/chirp/chirp.env
     env_file = load_env_file("/etc/chirp/chirp.env")
-    raw_devices = os.environ.get("CHIRP_DEVICES") or env_file.get("CHIRP_DEVICES", "")
+    raw_devices = read_config_var(env_file, "CHIRP_DEVICES")
     env_devices = [d.strip() for d in raw_devices.split(",") if d.strip()]
     configured_devices = env_devices if env_devices else None
 
-    raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or env_file.get("CHIRP_DEVICE_TYPES")
+    raw_types = read_config_var(env_file, "CHIRP_DEVICE_TYPES")
     device_types = parse_device_types(raw_types)
 
-    raw_fs = os.environ.get("CHIRP_FILESYSTEM_PATHS") or env_file.get("CHIRP_FILESYSTEM_PATHS", "")
-    filesystem_paths = parse_filesystem_paths(raw_fs)
-    raw_zfs = (os.environ.get("CHIRP_ZFS_ENABLED") or env_file.get("CHIRP_ZFS_ENABLED", "")).strip().lower()
+    raw_fs = read_config_var(env_file, "CHIRP_FILESYSTEM_PATHS")
+    try:
+        filesystem_paths = validate_filesystem_paths(raw_fs)
+    except ValueError as err:
+        print(f"chirp-collector: config error: {err}", file=sys.stderr)
+        return 1
+
+    raw_zfs = read_config_var(env_file, "CHIRP_ZFS_ENABLED").strip().lower()
     zfs_enabled = raw_zfs in ("1", "true", "yes", "on")
 
     output_path = os.path.join(args.output_dir, args.output_file)
@@ -837,8 +910,8 @@ def main() -> int:
             device_types=device_types,
             filesystem_paths=filesystem_paths,
             zfs_enabled=zfs_enabled,
-            force_smart=True,
-            force_storage=True,
+            collect_smart_now=True,
+            collect_storage_now=True,
             zpool_bin=args.zpool,
         )
         write_snapshot_atomic(snapshot, output_path)
@@ -849,25 +922,35 @@ def main() -> int:
 
     last_smart: Optional[Dict[str, Any]] = None
     last_smart_time = 0.0
+    has_collected_smart = False
+
     last_storage: Optional[Dict[str, Any]] = None
     last_storage_time = 0.0
+    has_collected_storage = False
 
     while running:
         t0 = time.time()
-        need_smart = (t0 - last_smart_time) >= args.smart_interval or last_smart is None
-        need_storage = (t0 - last_storage_time) >= args.storage_interval or last_storage is None
+        need_smart = (t0 - last_smart_time) >= args.smart_interval or not has_collected_smart
+        need_storage = (t0 - last_storage_time) >= args.storage_interval or not has_collected_storage
 
-        # Periodically re-check /etc/chirp/chirp.env so runtime config changes are picked up
+        # Periodically re-check /etc/chirp/chirp.env so runtime config changes are picked up live
         cur_env_file = load_env_file("/etc/chirp/chirp.env")
-        cur_raw_devs = os.environ.get("CHIRP_DEVICES") or cur_env_file.get("CHIRP_DEVICES", "")
+        cur_raw_devs = read_config_var(cur_env_file, "CHIRP_DEVICES")
         cur_env_devs = [d.strip() for d in cur_raw_devs.split(",") if d.strip()]
         cur_configured = cur_env_devs if cur_env_devs else None
-        cur_raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or cur_env_file.get("CHIRP_DEVICE_TYPES")
+
+        cur_raw_types = read_config_var(cur_env_file, "CHIRP_DEVICE_TYPES")
         cur_dev_types = parse_device_types(cur_raw_types)
 
-        cur_raw_fs = os.environ.get("CHIRP_FILESYSTEM_PATHS") or cur_env_file.get("CHIRP_FILESYSTEM_PATHS", "")
-        cur_fs_paths = parse_filesystem_paths(cur_raw_fs)
-        cur_raw_zfs = (os.environ.get("CHIRP_ZFS_ENABLED") or cur_env_file.get("CHIRP_ZFS_ENABLED", "")).strip().lower()
+        cur_raw_fs = read_config_var(cur_env_file, "CHIRP_FILESYSTEM_PATHS")
+        try:
+            cur_fs_paths = validate_filesystem_paths(cur_raw_fs)
+            filesystem_paths = cur_fs_paths
+        except ValueError as err:
+            print(f"chirp-collector: config error: {err}", file=sys.stderr)
+            cur_fs_paths = filesystem_paths
+
+        cur_raw_zfs = read_config_var(cur_env_file, "CHIRP_ZFS_ENABLED").strip().lower()
         cur_zfs_enabled = cur_raw_zfs in ("1", "true", "yes", "on")
 
         try:
@@ -881,14 +964,16 @@ def main() -> int:
                 device_types=cur_dev_types,
                 filesystem_paths=cur_fs_paths,
                 zfs_enabled=cur_zfs_enabled,
-                force_smart=need_smart,
-                force_storage=need_storage,
+                collect_smart_now=need_smart,
+                collect_storage_now=need_storage,
                 zpool_bin=args.zpool,
             )
             if need_smart:
                 last_smart_time = t0
+                has_collected_smart = True
             if need_storage:
                 last_storage_time = t0
+                has_collected_storage = True
             write_snapshot_atomic(snapshot, output_path)
         except Exception as e:
             print(f"chirp-collector: collection error: {e}", file=sys.stderr)

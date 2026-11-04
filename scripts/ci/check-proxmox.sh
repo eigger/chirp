@@ -15,10 +15,13 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 step "Deploy files exist"
 for rel in \
   proxmox/ct/chirp.sh \
+  proxmox/host/chirp-collector.py \
+  proxmox/host/chirp-collector.service \
   proxmox/install/chirp-install.sh \
   proxmox/install/chirp.service \
   proxmox/install/update.sh \
   proxmox/install/chirp-passthrough.sh \
+  scripts/ci/test-collector.py \
   scripts/ci/test-passthrough.sh \
   scripts/ci/test-update.sh; do
   [[ -f "$REPO_ROOT/$rel" ]] || fail "missing $rel"
@@ -39,6 +42,11 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   echo "shellcheck not installed; skipping."
 fi
+
+step "Python collector syntax and unit tests"
+python3 -m py_compile "$REPO_ROOT/proxmox/host/chirp-collector.py" || fail "python syntax error in chirp-collector.py"
+python3 "$REPO_ROOT/scripts/ci/test-collector.py" || fail "python collector unit tests failed"
+echo "collector python tests passed"
 
 step "update.sh: sha256 check / health check / rollback"
 UPD="$REPO_ROOT/proxmox/install/update.sh"
