@@ -464,6 +464,7 @@ arch: amd64
 lxc.cgroup2.devices.allow: b 7:* rwm
 dev0: /dev/disk/by-id/wwn-gone
 EOF
+printf 'wwn-gone\n' >"$GONE_DEV_CONF.chirp-disks"
 : >"$TMP/gone_dev.block"
 chirp_byid_major() { return 0; }
 chirp_apply_conf "$GONE_DEV_CONF" "$TMP/gone_dev.block"; eq "unplugged disk in dev mode with user loop rule -> rc 0" "0" "$?"
@@ -478,6 +479,50 @@ eq "none: chirp dev entries removed" "0" "$(main "$MIG_CONF" | grep -c '^dev[0-9
 eq "none: user dev0 kept" "1" "$(grep -c '^dev0: /dev/dri/card0' "$MIG_CONF")"
 eq "none: user dev10 kept" "1" "$(grep -c '^dev10: /dev/disk/by-id/user-disk' "$MIG_CONF")"
 eq "none: host mounts kept" "4" "$(main "$MIG_CONF" | grep -c '^lxc.mount.entry: /[ps]')"
+
+# 9. Legacy mode with no state file preserves user devN without options
+LEGACY_USER_CONF="$TMP/legacy_user.conf"
+cat >"$LEGACY_USER_CONF" <<'EOF'
+arch: amd64
+hostname: chirp
+dev11: /dev/disk/by-id/user-disk-no-opts
+EOF
+CHIRP_DEV_PASSTHROUGH=legacy chirp_render_block <<<"$SEL_SDB" >"$TMP/legacy_user.block"
+chirp_apply_conf "$LEGACY_USER_CONF" "$TMP/legacy_user.block"
+eq "legacy mode with no state file keeps user devN" "1" "$(grep -c '^dev11: /dev/disk/by-id/user-disk-no-opts' "$LEGACY_USER_CONF")"
+eq "legacy mode adds sdb mount" "1" "$(grep -c 'lxc.mount.entry: /dev/disk/by-id/ata-WDC_WD40EFRX_WD-1234' "$LEGACY_USER_CONF")"
+
+# 10. Corrupt .disks state file rejected
+printf 'invalid disk name with spaces\n' >"$LEGACY_USER_CONF.chirp-disks"
+cp "$LEGACY_USER_CONF" "$TMP/legacy_user.orig"
+chirp_apply_conf "$LEGACY_USER_CONF" "$TMP/legacy_user.block" 2>/dev/null; eq "invalid disks state -> rc 1" "1" "$?"
+eq "invalid disks state: config untouched" "$(cat "$TMP/legacy_user.orig")" "$(cat "$LEGACY_USER_CONF")"
+rm -f "$LEGACY_USER_CONF.chirp-disks"
+
+# 11. Old cgroup rule with rwm is detected by has_wildcard even when CHIRP_DEV_PERM=rw
+RWM_CONF="$TMP/rwm_check.conf"
+cat >"$RWM_CONF" <<'EOF'
+arch: amd64
+lxc.cgroup2.devices.allow: b 8:* rwm
+lxc.mount.entry: /dev/disk/by-id/wwn-gone dev/disk/by-id/wwn-gone none bind,optional,create=file
+EOF
+cp "$RWM_CONF" "$TMP/rwm_check.orig"
+chirp_byid_major() { return 0; }
+CHIRP_DEV_PERM=rw chirp_apply_conf "$RWM_CONF" "$TMP/gone.block" 2>/dev/null; eq "missing disk with rwm rule -> rc 1 without state" "1" "$?"
+eq "rwm config unchanged without state" "$(cat "$TMP/rwm_check.orig")" "$(cat "$RWM_CONF")"
+chirp_byid_major() { case "$1" in wwn-*|ata-*) echo 8 ;; nvme-*) echo 259 ;; esac; }
+
+# 12. pveversion cache is effective in parent and child contexts
+PVE_CALL_FILE="$TMP/pve_calls"
+: >"$PVE_CALL_FILE"
+pveversion() { echo 1 >>"$PVE_CALL_FILE"; echo "pve-manager/8.1-4/1234"; }
+_CHIRP_CACHED_PVE_VER=""
+CHIRP_PVE_VERSION=""
+chirp_cache_pve_version
+chirp_pve_version >/dev/null
+chirp_pve_version >/dev/null
+eq "pveversion invoked only once" "1" "$(wc -l <"$PVE_CALL_FILE" | tr -d ' ')"
+unset -f pveversion
 
 echo
 echo "passed=${PASS} failed=${FAILS}"

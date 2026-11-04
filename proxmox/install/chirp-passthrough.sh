@@ -58,7 +58,7 @@
 # (GUI / pct set), re-encoding ":" as "%3A", so markers cannot delimit anything; chirp no
 # longer writes them and only deletes them (in either form) when migrating an old config.
 CHIRP_DEV_PERM="${CHIRP_DEV_PERM:-rw}"
-CHIRP_DEV_PASSTHROUGH="${CHIRP_DEV_PASSTHROUGH:-legacy}"
+CHIRP_DEV_PASSTHROUGH="${CHIRP_DEV_PASSTHROUGH:-}"
 CHIRP_HOST_MOUNTS="${CHIRP_HOST_MOUNTS:-all}"
 # Host files bind-mounted read-only for the host metrics (source -> <rootfs>/host/<source>).
 CHIRP_HOST_PROC_FILES=(/proc/meminfo /proc/stat /proc/loadavg)
@@ -208,20 +208,20 @@ CHIRP_DEV_AWK_FUNCS='
     if (!parse_dev(line, r)) return 0
     if (r["has_opts"]) return 0
     if (!r["is_byid"]) return 0
-    if (disks != "" && !index("," disks ",", "," r["byid"] ",")) return 0
+    if (disks == "") return 0
+    if (!index("," disks ",", "," r["byid"] ",")) return 0
     return 1
   }
 '
 
 # Detect PVE manager version ("major.minor", e.g. "8.1"). Can be overridden with CHIRP_PVE_VERSION.
 _CHIRP_CACHED_PVE_VER=""
-chirp_pve_version() {
+chirp_cache_pve_version() {
   if [[ -n "${CHIRP_PVE_VERSION:-}" ]]; then
-    printf '%s\n' "$CHIRP_PVE_VERSION"
+    _CHIRP_CACHED_PVE_VER="$CHIRP_PVE_VERSION"
     return 0
   fi
   if [[ -n "${_CHIRP_CACHED_PVE_VER:-}" ]]; then
-    printf '%s\n' "$_CHIRP_CACHED_PVE_VER"
     return 0
   fi
   if ! command -v pveversion >/dev/null 2>&1; then
@@ -231,10 +231,14 @@ chirp_pve_version() {
   out="$(pveversion 2>/dev/null)" || return 1
   if [[ "$out" =~ pve-manager/([0-9]+)\.([0-9]+) ]]; then
     _CHIRP_CACHED_PVE_VER="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-    printf '%s\n' "$_CHIRP_CACHED_PVE_VER"
     return 0
   fi
   return 1
+}
+
+chirp_pve_version() {
+  chirp_cache_pve_version || return 1
+  printf '%s\n' "$_CHIRP_CACHED_PVE_VER"
 }
 
 # Exit 0 if PVE >= 8.1 (supports dev[n]: device passthrough).
@@ -323,12 +327,15 @@ chirp_render_host_mounts() {
 }
 
 # stdin: selected TSV -> stdout: the chirp lines (disk rules + host metric mounts; nothing
-# when both are empty). $1: optional conf file (to avoid collisions with user devN entries).
+# when both are empty). $1: optional conf file (to avoid collisions with user devN entries),
+# $2: optional mode ("dev" | "legacy"; resolves automatically when omitted).
 chirp_render_block() {
-  local conf="${1:-}" tsv majors m byid host mode
+  local conf="${1:-}" mode="${2:-}" tsv majors m byid host
   tsv="$(cat)"
   host="$(chirp_render_host_mounts)" || return 1
-  mode="$(chirp_dev_mode)" || return 1
+  if [[ -z "$mode" ]]; then
+    mode="$(chirp_dev_mode)" || return 1
+  fi
   if [[ -n "$tsv" ]]; then
     if [[ "$mode" == "dev" ]]; then
       local used_indices=() idx=0 u collision current_byids
@@ -443,16 +450,27 @@ CHIRP_CONF_AWK='
   END { if (mode == "rewrite") emit() }
 '
 
-# $1: conf file, $2: file with freshly rendered lines, $3: owned-major state file.
-# Tests default the state file beside their temporary config; production supplies
-# /var/lib/chirp-passthrough/<CTID>.majors (outside pmxcfs).
+# $1: conf file, $2: file with freshly rendered lines, $3: owned-major state file,
+# $4: owned-disks state file (defaults beside $state).
+# Tests default the state files beside their temporary config; production supplies
+# /var/lib/chirp-passthrough/<CTID>.majors and <CTID>.disks (outside pmxcfs).
 # Removes every chirp-managed line from the main section wherever it is (Proxmox may have
 # reordered the file) and writes the new set once, before the first `[section]` (appended
 # after it, it would become part of a snapshot's config). Idempotent; never touches
 # snapshot/pending sections or other lxc.* lines; leaves the file unchanged on any doubt.
 chirp_apply_conf() {
-  local conf="$1" blockfile="$2" state="${3:-$1.chirp-majors}" tmp majors byid m recorded="" newmajors state_tmp missing=0 has_wildcard=0
-  local disks_state="${state%.majors}.disks" recorded_disks="" new_disks="" disks="" disks_tmp
+  local conf="$1" blockfile="$2" state="${3:-$1.chirp-majors}" disks_state=""
+  if [[ -n "${4:-}" ]]; then
+    disks_state="$4"
+  elif [[ "$state" == *".chirp-majors" ]]; then
+    disks_state="${state%.chirp-majors}.chirp-disks"
+  elif [[ "$state" == *".majors" ]]; then
+    disks_state="${state%.majors}.disks"
+  else
+    disks_state="${state}.disks"
+  fi
+  local tmp majors byid m recorded="" newmajors state_tmp missing=0 has_wildcard=0
+  local recorded_disks="" new_disks="" disks="" disks_tmp
   if [[ ! -s "$conf" ]]; then
     _cp_err "${conf} is missing or empty."
     return 1
@@ -474,7 +492,11 @@ chirp_apply_conf() {
     recorded="$(cat "$state")"
   fi
   if [[ -e "$disks_state" ]]; then
-    recorded_disks="$(cat "$disks_state" 2>/dev/null || true)"
+    if [[ ! -r "$disks_state" ]] || grep -qvE '^[a-zA-Z0-9_.:-]+$' "$disks_state"; then
+      _cp_err "Cannot read valid owned-disks state: ${disks_state}. Leaving ${conf} unchanged."
+      return 1
+    fi
+    recorded_disks="$(cat "$disks_state")"
   fi
   newmajors="$(sed -nE 's/^lxc\.cgroup2\.devices\.allow: b ([0-9]+):\* .*/\1/p' "$blockfile")"
   majors="$newmajors"$'\n'"$recorded"
@@ -482,11 +504,11 @@ chirp_apply_conf() {
   new_disks="$(sed -nE 's/^dev[0-9]+: \/dev\/disk\/by-id\/([^\/, \t]+)$/\1/p' "$blockfile")"
   disks="$(printf '%s\n%s' "$new_disks" "$recorded_disks" | sed '/^$/d' | sort -u | paste -sd, -)"
 
-  if awk -v perm="${CHIRP_DEV_PERM}" '
+  if awk '
     /^\[/ {exit}
     {
       line = $0
-      if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ ("^b[ \t]+[0-9]+:\\*[ \t]+" perm "$")) {
+      if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ /^b[ \t]+[0-9]+:\*[ \t]+[rwm]+$/) {
         exit 10
       }
     }
@@ -516,11 +538,11 @@ chirp_apply_conf() {
           return 1
           ;;
       esac
-    done < <(awk -v perm="${CHIRP_DEV_PERM}" '
+    done < <(awk '
       /^\[/ {exit}
       {
         line = $0
-        if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ ("^b[ \t]+[0-9]+:\\*[ \t]+" perm "$")) {
+        if (sub(/^lxc[.]cgroup2[.]devices[.]allow[ \t]*[:=][ \t]*/, "", line) && line ~ /^b[ \t]+[0-9]+:\*[ \t]+[rwm]+$/) {
           split(line, f, /[ \t]+/); sub(/:\*$/, "", f[2]); print f[2]
         }
       }
@@ -543,6 +565,11 @@ chirp_apply_conf() {
   state_tmp="$(mktemp "${state}.XXXXXX")" || { rm -f "$tmp"; return 1; }
   if ! { tr ',' '\n' <<<"$majors" | sed '/^$/d' >"$state_tmp" && mv -f "$state_tmp" "$state"; }; then
     rm -f "$tmp" "$state_tmp"
+    return 1
+  fi
+  disks_tmp="$(mktemp "${disks_state}.XXXXXX")" || { rm -f "$tmp"; return 1; }
+  if ! { tr ',' '\n' <<<"$disks" | sed '/^$/d' >"$disks_tmp" && mv -f "$disks_tmp" "$disks_state"; }; then
+    rm -f "$tmp" "$disks_tmp"
     return 1
   fi
   # On pmxcfs (/etc/pve) overwrite in place rather than rename (keeps mode/ownership).
@@ -871,34 +898,41 @@ chirp_passthrough_run() {
 
   sel_tsv="$(chirp_resolve_selection "$selection" "$detected")" || return 1
 
+  chirp_cache_pve_version || true
   local dev_mode pve_ver
+  pve_ver="$(chirp_pve_version 2>/dev/null || echo "unknown")"
   if ! dev_mode="$(chirp_dev_mode)"; then
-    pve_ver="$(chirp_pve_version 2>/dev/null || echo "unknown")"
     _cp_err "CHIRP_DEV_PASSTHROUGH=dev requires Proxmox VE >= 8.1 (detected: ${pve_ver})."
     return 1
   fi
-  if [[ "${CHIRP_DEV_PASSTHROUGH:-legacy}" == "legacy" ]]; then
-    if [[ -n "${CHIRP_DEV_PASSTHROUGH:-}" ]]; then
+  case "${CHIRP_DEV_PASSTHROUGH:-}" in
+    legacy)
       _cp_msg "Using legacy wildcard cgroup passthrough (CHIRP_DEV_PASSTHROUGH=legacy)."
-    fi
-  elif [[ "${CHIRP_DEV_PASSTHROUGH:-}" == "auto" ]]; then
-    pve_ver="$(chirp_pve_version 2>/dev/null || echo "unknown")"
-    if [[ "$pve_ver" == "unknown" ]]; then
-      _cp_warn "Could not determine Proxmox VE version. Using legacy wildcard cgroup passthrough."
-    elif ! chirp_pve_supports_devn; then
-      _cp_warn "Proxmox VE < 8.1 detected (${pve_ver}). Using legacy wildcard cgroup passthrough."
-    fi
-  elif [[ "$dev_mode" == "dev" ]]; then
-    _cp_msg "Using Proxmox VE exact device passthrough (devN:)."
-  fi
+      ;;
+    dev)
+      _cp_msg "Using Proxmox VE exact device passthrough (devN:)."
+      ;;
+    auto)
+      if [[ "$pve_ver" == "unknown" ]]; then
+        _cp_warn "Could not determine Proxmox VE version. Using legacy wildcard cgroup passthrough."
+      elif ! chirp_pve_supports_devn; then
+        _cp_warn "Proxmox VE < 8.1 detected (${pve_ver}). Using legacy wildcard cgroup passthrough."
+      fi
+      ;;
+    "")
+      # Default: silent legacy for boot resilience
+      ;;
+  esac
 
   blockfile="$(mktemp)"
-  chirp_render_block "$conf" <<<"$sel_tsv" >"$blockfile"
+  chirp_render_block "$conf" "$dev_mode" <<<"$sel_tsv" >"$blockfile"
   if ! mkdir -p /var/lib/chirp-passthrough || ! chmod 700 /var/lib/chirp-passthrough; then
     rm -f "$blockfile"
     return 1
   fi
-  if ! chirp_apply_conf "$conf" "$blockfile" "/var/lib/chirp-passthrough/${ctid}.majors"; then
+  if ! chirp_apply_conf "$conf" "$blockfile" \
+      "/var/lib/chirp-passthrough/${ctid}.majors" \
+      "/var/lib/chirp-passthrough/${ctid}.disks"; then
     rm -f "$blockfile"
     return 1
   fi
