@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""
+Unit and regression tests for chirp-collector.py.
+Run locally:
+  python3 scripts/ci/test-collector.py
+"""
+
+import importlib.util
+import json
+import math
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+COLLECTOR_PATH = os.path.join(REPO_ROOT, "proxmox", "host", "chirp-collector.py")
+
+# Import chirp-collector.py dynamically
+spec = importlib.util.spec_from_file_location("chirp_collector", COLLECTOR_PATH)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Could not load {COLLECTOR_PATH}")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+
+
+class TestCollectorPaths(unittest.TestCase):
+    def test_validate_filesystem_paths_empty(self):
+        self.assertEqual(collector.validate_filesystem_paths(None), [])
+        self.assertEqual(collector.validate_filesystem_paths(""), [])
+        self.assertEqual(collector.validate_filesystem_paths("   "), [])
+
+    def test_validate_filesystem_paths_valid(self):
+        self.assertEqual(
+            collector.validate_filesystem_paths("/,/data,/var/log"),
+            ["/", "/data", "/var/log"],
+        )
+        # Deduplication
+        self.assertEqual(
+            collector.validate_filesystem_paths("/,/data,/data"),
+            ["/", "/data"],
+        )
+
+    def test_validate_filesystem_paths_rejects_relative_or_invalid(self):
+        with self.assertRaises(ValueError):
+            collector.validate_filesystem_paths("relative/path")
+        with self.assertRaises(ValueError):
+            collector.validate_filesystem_paths("/data/../secret")
+        with self.assertRaises(ValueError):
+            collector.validate_filesystem_paths("/data\0bad")
+        # Over 32 paths
+        over_32 = ",".join(f"/p{i}" for i in range(33))
+        with self.assertRaises(ValueError):
+            collector.validate_filesystem_paths(over_32)
+
+
+class TestCollectorMath(unittest.TestCase):
+    def test_js_round_half_up_parity(self):
+        # Python's round(2.5) == 2 (banker's rounding)
+        # JS Math.round(2.5) === 3 (half-up)
+        self.assertEqual(collector.js_round(2.5), 3)
+        self.assertEqual(collector.js_round(3.5), 4)
+        self.assertEqual(collector.js_round(12.5), 13)
+        self.assertEqual(collector.js_round(12.4), 12)
+        self.assertEqual(collector.js_round(12.6), 13)
+
+    def test_calc_percent(self):
+        # 1 / 80 * 1000 = 12.5 -> JS Math.round(12.5)/10 = 1.3 (Python round gives 1.2)
+        self.assertEqual(collector.calc_percent(1, 80), 1.3)
+        self.assertEqual(collector.calc_percent(40, 100), 40.0)
+        self.assertEqual(collector.calc_percent(0, 100), 0.0)
+        self.assertIsNone(collector.calc_percent(None, 100))
+        self.assertIsNone(collector.calc_percent(10, None))
+        self.assertIsNone(collector.calc_percent(10, 0))
+        self.assertIsNone(collector.calc_percent(10, -5))
+
+
+class TestCollectorStatvfs(unittest.TestCase):
+    def setUp(self):
+        collector._PENDING_STATVFS.clear()
+
+    def tearDown(self):
+        collector._PENDING_STATVFS.clear()
+
+    @patch("subprocess.Popen")
+    def test_collect_filesystems_hung_child_times_out_without_wait(self, mock_popen_cls):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # never exits (D-state)
+        mock_popen_cls.return_value = mock_proc
+        start = time.monotonic()
+        res = collector.collect_filesystems(["/stalled/a", "/stalled/b"], timeout=0.2)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0)
+        self.assertGreaterEqual(elapsed, 0.15)
+        self.assertEqual([r["path"] for r in res], ["/stalled/a", "/stalled/b"])
+        for r in res:
+            self.assertTrue(r["id"].startswith("fs_"))
+            self.assertIsNone(r["totalBytes"])
+            self.assertIsNone(r["usedBytes"])
+            self.assertIsNone(r["availableBytes"])
+            self.assertIsNone(r["usedPercent"])
+        self.assertEqual(mock_proc.kill.call_count, 2)
+        mock_proc.wait.assert_not_called()
+        mock_proc.communicate.assert_not_called()
+        self.assertEqual(set(collector._PENDING_STATVFS), {"/stalled/a", "/stalled/b"})
+
+    @patch("subprocess.Popen")
+    def test_collect_filesystems_does_not_respawn_while_previous_child_alive(self, mock_popen_cls):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_popen_cls.return_value = mock_proc
+        collector.collect_filesystems(["/stalled/nfs"], timeout=0.1)
+        self.assertEqual(mock_popen_cls.call_count, 1)
+        res = collector.collect_filesystems(["/stalled/nfs"], timeout=0.1)
+        self.assertEqual(mock_popen_cls.call_count, 1)  # no new child
+        self.assertIsNone(res[0]["totalBytes"])
+        mock_proc.wait.assert_not_called()
+
+    @patch("subprocess.Popen")
+    def test_collect_filesystems_reaps_exited_child_then_respawns(self, mock_popen_cls):
+        stuck = MagicMock()
+        stuck.poll.return_value = None
+        mock_popen_cls.return_value = stuck
+        collector.collect_filesystems(["/mnt/x"], timeout=0.1)
+        stuck.poll.return_value = -9  # finally died
+        fresh = MagicMock()
+        fresh.poll.return_value = 0
+        fresh.communicate.return_value = ("[4096, 100, 40, 30]", "")
+        mock_popen_cls.return_value = fresh
+        res = collector.collect_filesystems(["/mnt/x"], timeout=1.0)
+        self.assertEqual(mock_popen_cls.call_count, 2)
+        self.assertEqual(res[0]["totalBytes"], 4096 * 100)
+        self.assertEqual(collector._PENDING_STATVFS, {})
+        stuck.wait.assert_not_called()
+
+    def test_collect_filesystems_concurrent_with_timeout(self):
+        # Even with hung paths (sleeping), collect_filesystems finishes within timeout and returns null stats for hung path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = collector.collect_filesystems([tmpdir, "/hung_test_path"], timeout=0.2)
+            self.assertEqual(len(res), 2)
+            # Healthy path
+            self.assertEqual(res[0]["path"], tmpdir)
+            self.assertIsInstance(res[0]["totalBytes"], int)
+            # Hung/invalid path
+            self.assertEqual(res[1]["path"], "/hung_test_path")
+            self.assertIsNone(res[1]["totalBytes"])
+
+    def test_collect_filesystem_real_dir(self):
+        res = collector.collect_filesystem(os.getcwd())
+        self.assertTrue(res["id"].startswith("fs_"))
+        self.assertEqual(res["path"], os.getcwd())
+        self.assertIsInstance(res["totalBytes"], int)
+        self.assertGreater(res["totalBytes"], 0)
+        self.assertIsInstance(res["usedPercent"], float)
+
+    def test_collect_filesystem_unreadable_dir(self):
+        res = collector.collect_filesystem("/path/that/does/not/exist/999999")
+        self.assertTrue(res["id"].startswith("fs_"))
+        self.assertIsNone(res["totalBytes"])
+        self.assertIsNone(res["usedBytes"])
+        self.assertIsNone(res["availableBytes"])
+        self.assertIsNone(res["usedPercent"])
+
+
+class TestCollectorZpool(unittest.TestCase):
+    def test_parse_zpool_empty(self):
+        self.assertEqual(collector.parse_zpool(""), [])
+        self.assertEqual(collector.parse_zpool("   \n"), [])
+        self.assertEqual(collector.parse_zpool("no pools available\n"), [])
+
+    def test_parse_zpool_valid(self):
+        out = "1234567890123\ttank\tONLINE\t1000000000\t400000000\t600000000\n"
+        pools = collector.parse_zpool(out)
+        self.assertIsNotNone(pools)
+        self.assertEqual(len(pools), 1)
+        self.assertEqual(pools[0]["id"], "1234567890123")
+        self.assertEqual(pools[0]["name"], "tank")
+        self.assertEqual(pools[0]["health"], "ONLINE")
+        self.assertEqual(pools[0]["totalBytes"], 1000000000)
+        self.assertEqual(pools[0]["usedBytes"], 400000000)
+        self.assertEqual(pools[0]["freeBytes"], 600000000)
+        self.assertEqual(pools[0]["usedPercent"], 40.0)
+
+    def test_parse_zpool_unavail_dashes(self):
+        out = "99887766\tdeadpool\tUNAVAIL\t-\t-\t-\n"
+        pools = collector.parse_zpool(out)
+        self.assertIsNotNone(pools)
+        self.assertEqual(len(pools), 1)
+        self.assertEqual(pools[0]["health"], "UNAVAIL")
+        self.assertIsNone(pools[0]["totalBytes"])
+        self.assertIsNone(pools[0]["usedBytes"])
+        self.assertIsNone(pools[0]["freeBytes"])
+        self.assertIsNone(pools[0]["usedPercent"])
+
+    def test_parse_zpool_corrupt_line_returns_none(self):
+        # Parity with server parseZpool: an invalid line causes the whole result to be None
+        # Wrong column count
+        self.assertIsNone(collector.parse_zpool("123\ttank\tONLINE\t1000\n"))
+        # Non-numeric GUID
+        self.assertIsNone(collector.parse_zpool("not_a_guid\ttank\tONLINE\t1000\t400\t600\n"))
+        # Non-numeric size
+        self.assertIsNone(collector.parse_zpool("123\ttank\tONLINE\tinvalid_size\t400\t600\n"))
+
+
+class TestCollectorConfigPrecedence(unittest.TestCase):
+    def test_read_config_var_precedence_and_live_reload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, "chirp.env")
+            with open(env_path, "w") as f:
+                f.write('CHIRP_FILESYSTEM_PATHS="/data"\n')
+                f.write('CHIRP_DEVICES="/dev/sda"\n')
+
+            # Systemd EnvironmentFile populates os.environ at start with chirp.env contents
+            initial_env = {
+                "CHIRP_FILESYSTEM_PATHS": "/data",
+                "CHIRP_DEVICES": "/dev/sda",
+            }
+            initial_file = collector.load_env_file(env_path)
+
+            with patch.dict(os.environ, initial_env):
+                # 1. At start, file and environ match
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_file),
+                    "/data",
+                )
+
+                # 2. Later, admin edits chirp.env live (e.g. added /mnt)
+                with open(env_path, "w") as f:
+                    f.write('CHIRP_FILESYSTEM_PATHS="/data,/mnt"\n')
+                    f.write('CHIRP_DEVICES="/dev/sdb"\n')
+                cur_file = collector.load_env_file(env_path)
+
+                # Live reload: cur_file takes precedence over stale os.environ
+                self.assertEqual(
+                    collector.read_config_var(cur_file, "CHIRP_FILESYSTEM_PATHS", initial_env_file=initial_file),
+                    "/data,/mnt",
+                )
+                self.assertEqual(
+                    collector.read_config_var(cur_file, "CHIRP_DEVICES", initial_env_file=initial_file),
+                    "/dev/sdb",
+                )
+
+    def test_read_config_var_explicit_env_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, "chirp.env")
+            with open(env_path, "w") as f:
+                f.write('CHIRP_DEVICES="/dev/sda"\n')
+            initial_file = collector.load_env_file(env_path)
+
+            # User explicitly overrides via CLI or systemd drop-in Environment=
+            with patch.dict(os.environ, {
+                "CHIRP_DEVICES": "/dev/sdc",  # differs from chirp.env
+                "CHIRP_DEVICE_TYPES": "nvme",  # not in chirp.env at all
+            }):
+                # Explicit CLI override wins over chirp.env file!
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_DEVICES", initial_env_file=initial_file),
+                    "/dev/sdc",
+                )
+                # Drop-in env var not in chirp.env wins!
+                self.assertEqual(
+                    collector.read_config_var(initial_file, "CHIRP_DEVICE_TYPES", initial_env_file=initial_file),
+                    "nvme",
+                )
+
+    def test_read_config_var_key_removed_at_runtime_returns_default(self):
+        initial_file = {"CHIRP_FILESYSTEM_PATHS": "/data"}
+        with patch.dict(os.environ, {"CHIRP_FILESYSTEM_PATHS": "/data"}):
+            # Key removed from the live file
+            self.assertEqual(
+                collector.read_config_var({}, "CHIRP_FILESYSTEM_PATHS", "", initial_env_file=initial_file), ""
+            )
+            # Live file deleted entirely
+            self.assertEqual(
+                collector.read_config_var(None, "CHIRP_FILESYSTEM_PATHS", "none", initial_env_file=initial_file),
+                "none",
+            )
+
+    def test_read_config_var_falls_back_when_file_absent(self):
+        with patch.dict(os.environ, {"CHIRP_DEVICES": "/dev/sdb"}):
+            self.assertEqual(collector.read_config_var(None, "CHIRP_DEVICES"), "/dev/sdb")
+
+
+class TestCollectorStorageCollection(unittest.TestCase):
+    def test_collect_storage_disabled(self):
+        self.assertIsNone(collector.collect_storage([], False))
+        self.assertIsNone(collector.collect_storage(None, False))
+
+    def test_run_collection_reuses_storage_when_not_requested(self):
+        # When collect_storage_now is False, last_storage (even if None) is reused without work
+        with patch.object(collector, "collect_storage") as mock_storage:
+            snap, smart, storage = collector.run_collection(
+                smartctl_bin="smartctl",
+                sysfs_root="/sys",
+                proc_root="/proc",
+                last_smart={"collectedAt": 100, "devices": []},
+                last_storage=None,
+                collect_smart_now=False,
+                collect_storage_now=False,
+            )
+            mock_storage.assert_not_called()
+            self.assertIsNone(storage)
+            self.assertIsNone(snap["storage"])
+
+
+class TestCollectorAtomicWrite(unittest.TestCase):
+    def test_write_snapshot_atomic(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, "host.json")
+            data = {"version": 1, "test": "ok"}
+            collector.write_snapshot_atomic(data, out_file)
+
+            self.assertTrue(os.path.isfile(out_file))
+            mode = os.stat(out_file).st_mode & 0o777
+            self.assertEqual(mode, 0o644)
+            with open(out_file, "r") as f:
+                loaded = json.load(f)
+            self.assertEqual(loaded, data)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,8 +1,16 @@
 import { statSync, readFileSync, existsSync } from "node:fs";
-import { HostSnapshot, type HostSnapshotNetInterface, type HostSnapshotSmartDevice } from "@chirp/shared";
+import {
+  HostSnapshot,
+  type HostSnapshotNetInterface,
+  type HostSnapshotSmartDevice,
+  type HostSnapshotStorage,
+  type Filesystem,
+  type ZfsPool,
+} from "@chirp/shared";
 import type { RawInterface } from "./netdev.js";
 import type { SensorReadout } from "./hwmon.js";
 import type { HwmonExtras, RaplZone } from "./power.js";
+import type { StorageSample } from "./storage.js";
 
 /** Max snapshot file size accepted (10 MB). Prevents memory exhaustion attacks. */
 export const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
@@ -20,6 +28,7 @@ export interface ReadSnapshotResult {
   snapshot: HostSnapshot | null;
   stale: boolean;
   error: string | null;
+  lastParsed?: HostSnapshot | null;
 }
 
 export class HostSnapshotReader {
@@ -70,9 +79,14 @@ export class HostSnapshotReader {
         const stale = ageSec > this.maxAgeSec;
         this.checkStale(stale, ageSec);
         if (stale) {
-          return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
+          return {
+            snapshot: null,
+            stale: true,
+            error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)`,
+            lastParsed: this.lastParsed,
+          };
         }
-        return { snapshot: this.lastParsed, stale: false, error: null };
+        return { snapshot: this.lastParsed, stale: false, error: null, lastParsed: this.lastParsed };
       }
 
       const text = readFileSync(this.path, "utf8");
@@ -81,7 +95,7 @@ export class HostSnapshotReader {
       if (!parsed.success) {
         const err = `snapshot schema validation failed: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ")}`;
         this.logError(err);
-        return { snapshot: null, stale: false, error: err };
+        return { snapshot: null, stale: false, error: err, lastParsed: this.lastParsed };
       }
 
       const snapshot = parsed.data;
@@ -92,18 +106,23 @@ export class HostSnapshotReader {
       const stale = ageSec > this.maxAgeSec;
       this.checkStale(stale, ageSec);
       if (stale) {
-        return { snapshot: null, stale: true, error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)` };
+        return {
+          snapshot: null,
+          stale: true,
+          error: `host snapshot is stale (${ageSec}s old > ${this.maxAgeSec}s limit)`,
+          lastParsed: this.lastParsed,
+        };
       }
 
       if (this.warnedError) {
         this.warn(`host snapshot recovered: parsed valid snapshot (${this.path})`);
         this.warnedError = null;
       }
-      return { snapshot, stale: false, error: null };
+      return { snapshot, stale: false, error: null, lastParsed: snapshot };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logError(`failed to read snapshot: ${msg}`);
-      return { snapshot: null, stale: false, error: msg };
+      return { snapshot: null, stale: false, error: msg, lastParsed: this.lastParsed };
     }
   }
 
@@ -217,5 +236,31 @@ export class HostSnapshotReader {
       map.set(d.devicePath, d);
     }
     return map;
+  }
+
+  /**
+   * Convert snapshot storage section into StorageSample ({ filesystems, zfsPools }).
+   * If stale is true, filesystems from the snapshot retain their ID and path with scope: "host",
+   * but report null byte values to avoid falling back to container root or mixing scopes.
+   */
+  static toStorage(storage: HostSnapshotStorage | null | undefined, stale = false): StorageSample | null {
+    if (!storage) return null;
+    const filesystems = storage.filesystems
+      ? storage.filesystems.map((fs): Filesystem => ({
+          id: fs.id,
+          path: fs.path,
+          scope: "host",
+          totalBytes: stale ? null : fs.totalBytes,
+          usedBytes: stale ? null : fs.usedBytes,
+          availableBytes: stale ? null : fs.availableBytes,
+          usedPercent: stale ? null : fs.usedPercent,
+        }))
+      : null;
+    const zfsPools = stale
+      ? null
+      : storage.zfsPools
+        ? storage.zfsPools.map((zp): ZfsPool => ({ ...zp }))
+        : null;
+    return { filesystems, zfsPools };
   }
 }

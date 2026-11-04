@@ -286,4 +286,213 @@ describe("Host snapshot integration in CollectorDeps", () => {
       expect(s3.power).toBeNull();
     });
   });
+
+  it("supplies storage from snapshot to scheduler and marks scope as host", async () => {
+    await withTempDir(async (dir) => {
+      const snapPath = join(dir, "host.json");
+      const snap: HostSnapshot = {
+        ...getMockSnapshot(),
+        storage: {
+          collectedAt: 1000000,
+          filesystems: [
+            {
+              id: "fs_abcd1234ef567890",
+              path: "/var/lib/vz",
+              totalBytes: 500000000000,
+              usedBytes: 200000000000,
+              availableBytes: 300000000000,
+              usedPercent: 40.0,
+            },
+          ],
+          zfsPools: [
+            {
+              id: "112233445566778899",
+              name: "rpool",
+              health: "ONLINE",
+              totalBytes: 1000000000000,
+              usedBytes: 300000000000,
+              freeBytes: 700000000000,
+              usedPercent: 30.0,
+            },
+          ],
+        },
+      };
+      writeFileSync(snapPath, JSON.stringify(snap));
+
+      const config = loadConfig({
+        CHIRP_HOST_SNAPSHOT: snapPath,
+        CHIRP_DATA_DIR: dir,
+        CHIRP_DEV_PASSTHROUGH: "legacy",
+      });
+
+      const deps = defaultDeps(config);
+      const storageSample = await deps.sampleStorage!();
+
+      expect(storageSample.filesystems).toEqual([
+        {
+          id: "fs_abcd1234ef567890",
+          path: "/var/lib/vz",
+          scope: "host",
+          totalBytes: 500000000000,
+          usedBytes: 200000000000,
+          availableBytes: 300000000000,
+          usedPercent: 40.0,
+        },
+      ]);
+      expect(storageSample.zfsPools).toEqual([
+        {
+          id: "112233445566778899",
+          name: "rpool",
+          health: "ONLINE",
+          totalBytes: 1000000000000,
+          usedBytes: 300000000000,
+          freeBytes: 700000000000,
+          usedPercent: 30.0,
+        },
+      ]);
+    });
+  });
+
+  it("merges storage section by section so host ZFS does not wipe container filesystems", async () => {
+    await withTempDir(async (dir) => {
+      const snapPath = join(dir, "host.json");
+      // Snapshot only contains ZFS, filesystems is null
+      const snap: HostSnapshot = {
+        ...getMockSnapshot(),
+        storage: {
+          collectedAt: 1000000,
+          filesystems: null,
+          zfsPools: [
+            {
+              id: "998877665544",
+              name: "tank",
+              health: "ONLINE",
+              totalBytes: 2000000000,
+              usedBytes: 800000000,
+              freeBytes: 1200000000,
+              usedPercent: 40.0,
+            },
+          ],
+        },
+      };
+      writeFileSync(snapPath, JSON.stringify(snap));
+
+      const config = loadConfig({
+        CHIRP_HOST_SNAPSHOT: snapPath,
+        CHIRP_DATA_DIR: dir,
+        CHIRP_FILESYSTEM_PATHS: process.cwd(),
+      });
+
+      const deps = defaultDeps(config);
+      const storageSample = await deps.sampleStorage!();
+
+      // Container's configured filesystem path is preserved!
+      expect(storageSample.filesystems).not.toBeNull();
+      expect(storageSample.filesystems).toHaveLength(1);
+      expect(storageSample.filesystems![0].path).toBe(process.cwd());
+
+      // Host ZFS pool is preserved!
+      expect(storageSample.zfsPools).toEqual([
+        {
+          id: "998877665544",
+          name: "tank",
+          health: "ONLINE",
+          totalBytes: 2000000000,
+          usedBytes: 800000000,
+          freeBytes: 1200000000,
+          usedPercent: 40.0,
+        },
+      ]);
+    });
+  });
+
+  it("preserves host filesystem identity and scope: host with null values when snapshot is stale", async () => {
+    await withTempDir(async (dir) => {
+      const snapPath = join(dir, "host.json");
+      const t0 = Date.now();
+      const snap: HostSnapshot = {
+        ...getMockSnapshot(t0),
+        storage: {
+          collectedAt: t0,
+          filesystems: [
+            {
+              id: "fs_1234567890abcdef",
+              path: "/mnt/storage",
+              totalBytes: 1000000000000,
+              usedBytes: 400000000000,
+              availableBytes: 600000000000,
+              usedPercent: 40.0,
+            },
+          ],
+          zfsPools: [
+            {
+              id: "998877",
+              name: "rpool",
+              health: "ONLINE",
+              totalBytes: 500000000,
+              usedBytes: 100000000,
+              freeBytes: 400000000,
+              usedPercent: 20.0,
+            },
+          ],
+        },
+      };
+      writeFileSync(snapPath, JSON.stringify(snap));
+
+      const config = loadConfig({
+        CHIRP_HOST_SNAPSHOT: snapPath,
+        CHIRP_DATA_DIR: dir,
+        CHIRP_SNAPSHOT_MAX_AGE_SEC: "60",
+      });
+
+      const deps = defaultDeps(config);
+
+      // First sample when fresh: reports host metrics
+      const fresh = await deps.sampleStorage!();
+      expect(fresh.filesystems![0]).toMatchObject({
+        id: "fs_1234567890abcdef",
+        path: "/mnt/storage",
+        scope: "host",
+        totalBytes: 1000000000000,
+      });
+
+      // Now snapshot is stale: rewrite with old timestamp (>60s)
+      const staleSnap: HostSnapshot = {
+        ...snap,
+        timestamp: t0 - 120000,
+      };
+      writeFileSync(snapPath, JSON.stringify(staleSnap));
+
+      // Sample when stale: preserves scope: "host" with null values, never switches to container scope
+      const staleSample = await deps.sampleStorage!();
+      expect(staleSample.filesystems).toEqual([
+        {
+          id: "fs_1234567890abcdef",
+          path: "/mnt/storage",
+          scope: "host",
+          totalBytes: null,
+          usedBytes: null,
+          availableBytes: null,
+          usedPercent: null,
+        },
+      ]);
+      expect(staleSample.zfsPools).toBeNull();
+
+      // Corrupt snapshot file (JSON parse error): also preserves scope: "host" with null values
+      writeFileSync(snapPath, "{ invalid json content");
+      const errorSample = await deps.sampleStorage!();
+      expect(errorSample.filesystems).toEqual([
+        {
+          id: "fs_1234567890abcdef",
+          path: "/mnt/storage",
+          scope: "host",
+          totalBytes: null,
+          usedBytes: null,
+          availableBytes: null,
+          usedPercent: null,
+        },
+      ]);
+      expect(errorSample.zfsPools).toBeNull();
+    });
+  });
 });

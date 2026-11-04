@@ -190,9 +190,9 @@ During peer review cycles for PR #8, several critical edge cases and failure mod
 - **PR #8 Status:** Merged into `master` via commit `3561970`. All CI suites (`lint`, `build`, `test`, `proxmox`) passing.
 - **Default Container Mode:** `var_unprivileged=0` (privileged) remains the default in `proxmox/ct/chirp.sh` until release `v0.3.0` is tagged, ensuring one-liner installs do not fail against older release tarballs (v0.2.0). Unprivileged mode is opt-in via `var_unprivileged=1`.
 - **v0.3.0 Release Roadmap:**
-  1. Cut `v0.3.0` release tag containing Phase 2 collector assets and server snapshot ingestion.
-  2. Flip `var_unprivileged=1` as the default in `proxmox/ct/chirp.sh` and update deploy documentation.
-  3. Extend `chirp-collector.py` to collect host filesystem / ZFS pool metrics for unprivileged containers.
+  1. Extend `chirp-collector.py` to collect host filesystem / ZFS pool metrics for unprivileged containers (Implemented in current PR).
+  2. Cut `v0.3.0` release tag containing Phase 2 collector assets and server snapshot ingestion.
+  3. Flip `var_unprivileged=1` as the default in `proxmox/ct/chirp.sh` and update deploy documentation.
 
 ## Verification
 

@@ -51,6 +51,18 @@ export interface CollectorOptions {
   concurrency?: number;
 }
 
+function mergeById<T extends { id: string }>(primary: T[] | null, fallback: T[] | null): T[] | null {
+  if (primary === null && fallback === null) return null;
+  const map = new Map<string, T>();
+  for (const item of fallback ?? []) {
+    map.set(item.id, item);
+  }
+  for (const item of primary ?? []) {
+    map.set(item.id, item);
+  }
+  return Array.from(map.values());
+}
+
 export function defaultDeps(config: Config, warn: (msg: string) => void = () => {}): CollectorDeps {
   const snapshotReader = config.hostSnapshot
     ? new HostSnapshotReader({
@@ -75,7 +87,28 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
   });
   return {
     sampleHost: (monotonicMs) => host.sample(monotonicMs),
-    sampleStorage: () => storage.sample(),
+    sampleStorage: async () => {
+      const res = snapshotReader?.read();
+      let snapStorage: StorageSample | null = null;
+      if (res?.snapshot) {
+        snapStorage = HostSnapshotReader.toStorage(res.snapshot.storage);
+        // If snapshot is fresh and provides complete storage metrics, skip local collection
+        if (snapStorage && snapStorage.filesystems !== null && snapStorage.zfsPools !== null) {
+          return snapStorage;
+        }
+      } else if (res?.lastParsed?.storage) {
+        // Snapshot is stale or failed read/parse: preserve host filesystem identities with scope: "host" and null values
+        snapStorage = HostSnapshotReader.toStorage(res.lastParsed.storage, true);
+      }
+
+      const local = await storage.sample();
+      if (!snapStorage) return local;
+
+      return {
+        filesystems: mergeById(snapStorage.filesystems, local.filesystems),
+        zfsPools: mergeById(snapStorage.zfsPools, local.zfsPools),
+      };
+    },
     readSensors: () => {
       const snap = snapshotReader?.read().snapshot;
       const readout = snap ? HostSnapshotReader.toSensorReadout(snap.hwmon) : null;
