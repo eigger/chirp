@@ -22,11 +22,6 @@ Creates a privileged LXC container by default (`var_unprivileged=0`) for compati
 
 `proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) configures device access into the container:
 
-For an unprivileged container, re-run the script on the Proxmox host after updating the container, replacing `<CTID>` with its ID. The container cannot check the host collector version. The script selects the installed release when available and may fall back to `master` for older releases.
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
-```
 
 - **Legacy passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, default):** uses legacy bind mounts and major wildcard rules:
 
@@ -53,6 +48,12 @@ dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
 
 - **How lines and migrations are managed.** The script recognises its own lines by content: `devN: /dev/disk/by-id/...` (strictly without user options like `gid=`, `mode=`, and only matching chirp's managed disks), by-id mounts, host metric mounts, and `lxc.cgroup2.devices.allow: b <major>:* <perm>` for the majors of the disks it manages. It preserves user-defined `devN` entries (with or without options) and user wildcard cgroup rules. On every run it deletes chirp's lines wherever they are in the main section and writes the new set once, before the first `[snapshot]` / `[pve:pending]` section. Snapshot sections, your own `lxc.*` lines, and user `devN` lines stay as they are, and a run that changes nothing does not rewrite the file. Older versions wrapped the lines in `# chirp-passthrough:start` / `:end` comments; Proxmox treats every `#` line as the container description and moves it to the top of the file (encoding `:` as `%3A`) whenever it rewrites the config, so markers cannot be relied on. They are no longer written and old ones are deleted. Managed disk by-ids and block majors are recorded on the host in `/var/lib/chirp-passthrough/<CTID>.disks` and `.majors` for cleanup. Files with CRLF line endings are refused unchanged.
   - **Backup & restore note:** Containers restored onto a new host lack `/var/lib/chirp-passthrough/<CTID>.disks`. To prevent accidental deletion of user devices, chirp preserves existing `devN:` entries when no state file exists. If restoring a container that previously used `dev` mode and switching to `legacy` mode, manually remove any old `devN: /dev/disk/by-id/...` lines from `/etc/pve/lxc/<CTID>.conf` to prevent Proxmox boot aborts if disks go offline.
+
+For an unprivileged container, re-run the script on the Proxmox host after updating the container, replacing `<CTID>` with its ID. The container cannot check the host collector version. The script selects the installed release when available and may fall back to `master` for older releases.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
+```
 
 ### Host metrics (memory, load, network)
 

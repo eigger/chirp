@@ -177,9 +177,8 @@ eq "snapshot upgrade exit 0" "0" "$rc"
 eq "collector notice after upgrade" "1" "$(grep -c 'Host collector version cannot be checked' "$WORK/out.log")"
 
 # Exercise the default directory without touching the real /run/chirp.
-sed -n '/^env_value() {/,/^}/p; /^collector_notice() {/,/^}/p' "$UPDATE_SH" >"$WORK/notice-functions"
-# shellcheck disable=SC1091
-. "$WORK/notice-functions"
+# shellcheck source=../../proxmox/install/update.sh
+CHIRP_UPDATE_LIB=1 source "$UPDATE_SH"
 export ENV_FILE="$ENVF"
 mkdir -p "$WORK/snapshot-dir"
 printf '' >"$ENVF"

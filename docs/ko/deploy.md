@@ -14,7 +14,7 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-기존 릴리스 호환성을 위해 기본적으로 privileged LXC 컨테이너(`var_unprivileged=0`)를 생성합니다. 디바이스 노드나 호스트 `/sys` 마운트 없이 호스트 수집기 데몬(`chirp-collector`)을 통해 `/run/chirp/host.json` 스냅샷을 읽는 unprivileged LXC를 생성하려면 `var_unprivileged=1`을 지정합니다. 호스트 수집기가 포함된 릴리스가 배포된 후 기본값을 전환할 예정이다. 스크립트 상세는 `proxmox/` 참고.
+기존 릴리스 호환성을 위해 기본적으로 privileged LXC 컨테이너(`var_unprivileged=0`)를 생성합니다. 디바이스 노드나 호스트 `/sys` 마운트 없이 호스트 수집기 데몬(`chirp-collector`)을 통해 `/run/chirp/host.json` 스냅샷을 읽는 unprivileged LXC를 생성하려면 `var_unprivileged=1`을 지정합니다. 호스트 수집기가 포함된 릴리스가 배포된 후 기본값을 전환할 예정입니다. 스크립트 상세는 `proxmox/` 참고.
 
 **설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력 및 설치 시 출력된 일회용 `Setup token` 입력). 설치 스크립트는 `/etc/chirp/chirp.env`(`0600`)에 `CHIRP_SETUP_TOKEN`을 작성한다. 계정 생성 시 서버는 env 파일에서 토큰을 최선형(best-effort)으로 삭제하려고 시도한다. systemd 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp`가 읽기 전용이므로 토큰이 `chirp.env`에 남을 수 있으나, 관리자 계정이 존재하는 즉시 최초 등록이 영구적으로 비활성화(`POST /bootstrap/admin`이 `409 conflict` 반환)되므로 무해하다. 설치 중 화면 스크롤로 토큰을 놓친 경우: `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 누구에게나 등록 창이 열려 있으므로 즉시 계정을 생성해야 한다. 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
 
@@ -22,11 +22,6 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/prox
 
 `proxmox/install/chirp-passthrough.sh`(호스트에서 실행, 디스크를 추가/교체한 뒤 다시 실행)는 컨테이너에 디스크 접근 권한을 설정한다:
 
-비권한 컨테이너를 업데이트한 뒤에는 Proxmox 호스트에서 아래 명령의 `<CTID>`를 컨테이너 ID로 바꾸어 실행해 수집기도 갱신한다. 컨테이너에서는 호스트 수집기 버전을 확인할 수 없다. 스크립트는 설치된 릴리스를 우선 사용하며 이전 릴리스에는 수집기가 없어 `master`로 대체할 수 있다.
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
-```
 
 - **레거시 passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, 기본값):** 기존 bind mount와 major 와일드카드 규칙을 사용한다:
 
@@ -53,6 +48,12 @@ dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
 
 - **줄 관리 및 마이그레이션 방식.** 스크립트는 자기 줄을 내용으로 알아본다: `devN: /dev/disk/by-id/...`(사용자 옵션 `,gid=`, `,mode=` 등이 없고 chirp 관리 디스크에 해당하는 항목만 대상), by-id 마운트와 호스트 메트릭 마운트, 관리 대상 디스크 major의 `lxc.cgroup2.devices.allow: b <major>:* <perm>`이다. 사용자가 정의한 `devN` 항목(옵션 유무 불문)과 사용자의 와일드카드 cgroup 규칙은 삭제하지 않고 안전하게 보존한다. 실행할 때마다 main 섹션 어디에 있든 이 줄들을 지우고, 새 집합을 첫 `[snapshot]` / `[pve:pending]` 섹션 앞에 한 번만 쓴다. 스냅샷 섹션, 사용자의 `lxc.*` 줄, 사용자 `devN` 줄과 나머지는 그대로 유지되며, 변경 사항이 없으면 파일을 다시 쓰지 않는다. 이전 버전의 `# chirp-passthrough:start` / `:end` 주석은 더 이상 쓰지 않고, 남아 있는 마커는 지운다. 관리 디스크의 by-id와 블록 major는 호스트의 `/var/lib/chirp-passthrough/<CTID>.disks` 및 `.majors`에 기록된다. CRLF 줄 끝 파일은 변경하지 않고 거부한다.
   - **백업 복원 및 호스트 이전 시 유의사항:** 새 호스트에 복원된 컨테이너 설정(`/etc/pve/lxc/<CTID>.conf`)에는 호스트 측 상태 파일(`/var/lib/chirp-passthrough/`)이 없습니다. chirp는 사용자 장치의 오삭제를 방지하기 위해 상태 파일이 없으면 기존 `devN:` 항목을 사용자가 추가한 것으로 보고 보존합니다. 과거 `dev` 모드를 쓰던 컨테이너를 복원한 뒤 `legacy` 모드로 전환할 때는, 추후 디스크 분리 시 부팅 거부를 방지하기 위해 컨테이너 설정 파일에서 이전 `devN: /dev/disk/by-id/...` 항목들을 수동으로 삭제해 주는 것이 좋습니다.
+
+비권한 컨테이너를 업데이트한 뒤에는 Proxmox 호스트에서 아래 명령의 `<CTID>`를 컨테이너 ID로 바꾸어 실행해 수집기도 갱신한다. 컨테이너에서는 호스트 수집기 버전을 확인할 수 없다. 스크립트는 설치된 릴리스를 우선 사용하며 이전 릴리스에는 수집기가 없어 `master`로 대체할 수 있다.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/install/chirp-passthrough.sh)" _ <CTID>
+```
 
 ### 호스트 메트릭(메모리·부하·네트워크)
 

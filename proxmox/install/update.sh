@@ -6,6 +6,34 @@
 # Integrity only: the .sha256 asset comes from the same GitHub release as the
 # tarball, so it detects corrupted/truncated downloads, not a tampered release.
 # Authenticity rests on HTTPS + GitHub; there is no signature verification.
+env_value() {
+  # Last NAME=value in the env file, without surrounding quotes/whitespace.
+  local v
+  v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
+  v="${v//\"/}"; v="${v//\'/}"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
+collector_notice() {
+  local snapshot
+  if grep -qE '^[[:space:]]*CHIRP_HOST_SNAPSHOT=' "$ENV_FILE"; then
+    snapshot="$(env_value CHIRP_HOST_SNAPSHOT)"
+    case "$(printf '%s' "$snapshot" | tr '[:upper:]' '[:lower:]')" in
+      ""|none|0|false) return ;;
+    esac
+  elif [[ ! -d "$1" ]]; then
+    return
+  fi
+  echo "[update] Host collector version cannot be checked from this container."
+  echo "[update] On the Proxmox host, re-run chirp-passthrough.sh for this CT to update the collector."
+}
+
+
+# Allow tests to source the helpers without running an update.
+if [[ "${CHIRP_UPDATE_LIB:-0}" == "1" ]]; then return 0; fi
+
 set -euo pipefail
 
 CHIRP_DIR="${CHIRP_DIR:-/opt/chirp}"
@@ -100,29 +128,6 @@ if [[ -z "${CHIRP_SELF_UPDATED:-}" ]]; then
   fi
 fi
 
-env_value() {
-  # Last NAME=value in the env file, without surrounding quotes/whitespace.
-  local v
-  v="$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
-  if [[ "$v" != \"* && "$v" != \'* ]]; then v="${v%%#*}"; fi
-  v="${v//\"/}"; v="${v//\'/}"
-  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
-  printf '%s' "$v"
-}
-
-collector_notice() {
-  local snapshot
-  if grep -qE '^[[:space:]]*CHIRP_HOST_SNAPSHOT=' "$ENV_FILE"; then
-    snapshot="$(env_value CHIRP_HOST_SNAPSHOT)"
-    case "$(printf '%s' "$snapshot" | tr '[:upper:]' '[:lower:]')" in
-      ""|none|0|false) return ;;
-    esac
-  elif [[ ! -d "$1" ]]; then
-    return
-  fi
-  echo "[update] Host collector version cannot be checked from this container."
-  echo "[update] On the Proxmox host, re-run chirp-passthrough.sh for this CT to update the collector."
-}
 
 PREV_TARGET=""
 PREV_VER=""
