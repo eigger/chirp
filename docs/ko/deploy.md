@@ -14,7 +14,7 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/proxmox/ct/chirp.sh)"
 ```
 
-privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL을 출력한다. 스크립트 상세는 `proxmox/` 참고.
+기존 릴리스 호환성을 위해 기본적으로 privileged LXC 컨테이너(`var_unprivileged=0`)를 생성합니다. 디바이스 노드나 호스트 `/sys` 마운트 없이 호스트 수집기 데몬(`chirp-collector`)을 통해 `/run/chirp/host.json` 스냅샷을 읽는 unprivileged LXC를 생성하려면 `var_unprivileged=1`을 지정합니다. (unprivileged 모드는 v0.3.0 릴리스부터 기본값으로 전환될 예정입니다). 스크립트 상세는 `proxmox/` 참고.
 
 **설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력 및 설치 시 출력된 일회용 `Setup token` 입력). 설치 스크립트는 `/etc/chirp/chirp.env`(`0600`)에 `CHIRP_SETUP_TOKEN`을 작성한다. 계정 생성 시 서버는 env 파일에서 토큰을 최선형(best-effort)으로 삭제하려고 시도한다. systemd 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp`가 읽기 전용이므로 토큰이 `chirp.env`에 남을 수 있으나, 관리자 계정이 존재하는 즉시 최초 등록이 영구적으로 비활성화(`POST /bootstrap/admin`이 `409 conflict` 반환)되므로 무해하다. 설치 중 화면 스크롤로 토큰을 놓친 경우: `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 누구에게나 등록 창이 열려 있으므로 즉시 계정을 생성해야 한다. 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
 
@@ -158,6 +158,7 @@ Restart=on-failure
 
 | 변수 | 기본값 | 용도 |
 |---|---|---|
+| `CHIRP_HOST_SNAPSHOT` | `/run/chirp/host.json` | 호스트 측 수집기(`chirp-collector`)가 생성한 원자적 호스트 메트릭 및 SMART 스냅샷 파일 경로(unprivileged LXC용). `none`, `0`, `false`로 설정하면 스냅샷을 끄고 직접 읽기 모드로 강제 |
 | `CHIRP_SYSFS_ROOT` | `/sys` | hwmon(CPU 온도, 팬, 전압, hwmon 전력), RAPL powercap, sysfs 디스크 ID. 이 경로만 사용(대체 경로 없음) |
 | `CHIRP_HOST_SYS` | `/host/sys`가 있으면 그것, 없으면 `/sys` | 네트워크 인터페이스(`/sys/class/net`). 먼저 읽고, 다음에 로컬 `/sys`(`scope`로 구분) |
 | `CHIRP_HOST_PROC` | `/host/proc`가 있으면 그것, 없으면 `/proc` | `/proc/meminfo`, `/proc/stat`, `/proc/loadavg`(및 `1/net/dev`). 먼저 읽고, 다음에 로컬 `/proc` |

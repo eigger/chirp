@@ -25,9 +25,13 @@ unset _chirp_build_func
 # Non-interactive disk selection: prefix with CHIRP_DISKS=all|none|<by-id,...>
 #
 # Notes:
-#  - root in a privileged LXC is effectively host root. Use it on trusted networks only.
+#  - Default: privileged direct passthrough (var_unprivileged=0) for compatibility
+#    with current release v0.2.0. Set var_unprivileged=1 to use an unprivileged container
+#    with the host-side snapshot collector (/run/chirp).
 #  - Do not use it for CTs managed by cluster HA (the disks are tied to one node).
-#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
+#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES:
+#    * Unprivileged CT (var_unprivileged=1): configure in /etc/chirp/chirp.env on the Proxmox host (where chirp-collector runs).
+#    * Privileged CT (default): configure in the container's /etc/chirp/chirp.env.
 #
 # Copyright (c) 2021-2026 community-scripts ORG
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE

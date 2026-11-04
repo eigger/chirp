@@ -1,0 +1,20 @@
+[Unit]
+Description=chirp Host Collector (Hardware & Metrics Snapshot)
+Documentation=https://github.com/eigger/chirp
+After=local-fs.target
+Before=pve-guests.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/chirp/chirp.env
+ExecStart=/usr/local/bin/chirp-collector --daemon
+Restart=always
+RestartSec=5s
+ProtectSystem=strict
+ProtectHome=yes
+RuntimeDirectory=chirp
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
