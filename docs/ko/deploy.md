@@ -187,3 +187,9 @@ Proxmox LXC: 기본값 그대로 둔다(설치 스크립트가 `/host/proc`, `/h
 - **CLI는 서비스 설정을 읽는다.** `cli.js`는 `/etc/chirp/chirp.env`가 있으면 읽으므로(또는 `--env-file <경로>` / `CHIRP_ENV_FILE`), `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`가 서비스와 같은 데이터 디렉터리를 쓴다.
 - 세션: HttpOnly + SameSite=Strict 쿠키, 12시간 무활동 / 최대 7일, 메모리 보관(재시작하면 모두 로그아웃), 비밀번호를 바꾸면 모두 종료. 비밀번호는 10~256자이며 흔하거나 추측하기 쉬운 것은 거부된다.
 - privileged 컨테이너 전제이며, 그 root는 사실상 호스트 root다(위 참고).
+
+## 선택적 파일시스템·ZFS 모니터링
+
+`CHIRP_FILESYSTEM_PATHS=/,/data`로 확인할 파일시스템 경로를 지정합니다(최대 32개). `CHIRP_ZFS_ENABLED=true`는 ZFS 풀 건강 상태·용량의 읽기 전용 수집을 켭니다. 두 기능 모두 기본 비활성이며 1분 간격으로 비동기 수집합니다. ZFS는 `zpool`과 기존 장치 접근 권한이 필요하며, Chirp는 도구 설치·권한 추가·풀 변경을 수행하지 않습니다.
+
+컨테이너에서는 자체 마운트의 용량입니다. 호스트 파일시스템이 필요하면 명시적으로 호스트 루트를 `/host/root`에 읽기 전용 마운트하고 `CHIRP_HOST_ROOT=/host/root`를 설정합니다. 이때 `/data`는 `/host/root/data`를 의미하며 읽을 수 없어도 컨테이너 경로로 대체하지 않습니다. [API 문서](../api.md#additional-host-and-storage-metrics)를 참고하세요.

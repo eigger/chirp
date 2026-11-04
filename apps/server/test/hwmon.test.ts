@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -47,7 +47,7 @@ describe("readSensors", () => {
       { label: "Core 0", temp: 45 },
       { label: "Core 1", temp: 52.5 },
     ]);
-    expect(sensors).toEqual([{ chip: "nvme", label: "Composite", temp: 41.9 }]);
+    expect(sensors).toEqual([{ id: expect.stringMatching(/^temp_[a-f0-9]{16}$/), chip: "nvme", label: "Composite", temp: 41.9 }]);
   });
 
   it("coretemp without a package sensor falls back to the hottest core", () => {
@@ -134,6 +134,27 @@ describe("readSensors", () => {
       { label: "Package 1 Core 0", temp: 64 },
     ]);
     // neither coretemp chip leaks into the generic sensor list
-    expect(sensors).toEqual([{ chip: "nvme", label: "Composite", temp: 40 }]);
+    expect(sensors).toEqual([{ id: expect.stringMatching(/^temp_[a-f0-9]{16}$/), chip: "nvme", label: "Composite", temp: 40 }]);
   });
+});
+
+
+it("temperature IDs survive peer removal, hwmon renumbering and label changes", () => {
+  const root = fakeSys({});
+  mkdirSync(join(root, "class", "hwmon"), { recursive: true });
+  for (const [n, address] of [[0, "0000:01:00.0"], [1, "0000:02:00.0"]] as const) {
+    const device = join(root, "devices", address);
+    const chip = join(device, "hwmon", `hwmon${n}`);
+    mkdirSync(chip, { recursive: true });
+    writeFileSync(join(chip, "name"), "jc42");
+    writeFileSync(join(chip, "temp1_input"), "42000");
+    symlinkSync(device, join(chip, "device"));
+    symlinkSync(chip, join(root, "class", "hwmon", `hwmon${n}`));
+  }
+  const before = readSensors(root).sensors;
+  expect(new Set(before.map((s) => s.id)).size).toBe(2);
+  rmSync(join(root, "class", "hwmon", "hwmon0"));
+  renameSync(join(root, "class", "hwmon", "hwmon1"), join(root, "class", "hwmon", "hwmon7"));
+  writeFileSync(join(root, "class", "hwmon", "hwmon7", "temp1_label"), "DIMM B");
+  expect(readSensors(root).sensors[0].id).toBe(before[1].id);
 });

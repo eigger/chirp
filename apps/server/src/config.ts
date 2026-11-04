@@ -14,6 +14,9 @@ export interface TempWarn {
 }
 
 export interface Config {
+  filesystemPaths: string[];
+  hostRoot: string | null;
+  zfsEnabled: boolean;
   port: number;
   /** Print a newly generated API key to the log (CHIRP_PRINT_KEY, opt-in). */
   printKey: boolean;
@@ -256,6 +259,11 @@ export function defaultWebDir(): string {
 }
 
 export function loadConfig(env: Env = process.env): Config {
+  const filesystemPaths = [...new Set(list(env.CHIRP_FILESYSTEM_PATHS))];
+  const hostRoot = env.CHIRP_HOST_ROOT?.trim() || null;
+  if (filesystemPaths.length > 32 || [...filesystemPaths, ...(hostRoot ? [hostRoot] : [])].some(
+    (p) => !p.startsWith("/") || p.includes("\0") || p.split("/").includes(".."),
+  )) throw new ConfigError("CHIRP_FILESYSTEM_PATHS (at most 32) and CHIRP_HOST_ROOT must be absolute paths without '..'");
   const rejected: string[] = [];
   const deviceTypes: Record<string, string> = {};
   for (const entry of deviceTypeEntries(env.CHIRP_DEVICE_TYPES)) {
@@ -280,6 +288,9 @@ export function loadConfig(env: Env = process.env): Config {
   const envFile = env.CHIRP_ENV_FILE?.trim() || null;
   return {
     port: port(env.CHIRP_PORT),
+    filesystemPaths,
+    hostRoot,
+    zfsEnabled: bool(env.CHIRP_ZFS_ENABLED),
     printKey: bool(env.CHIRP_PRINT_KEY),
     host: env.CHIRP_HOST?.trim() || "0.0.0.0",
     apiKey: apiKey(env.CHIRP_API_KEY),

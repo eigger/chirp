@@ -50,6 +50,7 @@ export interface CpuTimes {
   total: number;
   /** idle + iowait. */
   idle: number;
+  ioWait?: number;
   /** Number of `cpuN` lines. */
   cpuCount: number;
 }
@@ -68,7 +69,15 @@ export function parseProcStat(text: string): CpuTimes | null {
   const t = [...times.slice(0, 8)];
   while (t.length < 8) t.push(0);
   const total = t.reduce((a, b) => a + b, 0);
-  return { total, idle: t[3] + t[4], cpuCount };
+  return { total, idle: t[3] + t[4], ioWait: times.length >= 5 ? t[4] : undefined, cpuCount };
+}
+
+export function ioWaitPercent(prev: CpuTimes | null, cur: CpuTimes): number | null {
+  if (!prev || prev.ioWait === undefined || cur.ioWait === undefined) return null;
+  const total = cur.total - prev.total;
+  const wait = cur.ioWait - prev.ioWait;
+  if (total <= 0 || wait < 0 || wait > total) return null;
+  return Math.round(wait / total * 1000) / 10;
 }
 
 /** Busy share (0-100, one decimal) between two samples; null when not computable (first sample, counter reset). */

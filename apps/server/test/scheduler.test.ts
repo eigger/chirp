@@ -168,3 +168,31 @@ describe("Collector", () => {
     expect(c.getSnapshot().disks).toHaveLength(1);
   });
 });
+
+
+it("coalesces storage collection, caches GETs, and refreshes at most once a minute", async () => {
+  let count = 0;
+  let clock = 0;
+  let finish!: (sample: { filesystems: null; zfsPools: null }) => void;
+  c = make([() => read("sata-hdd-ok.json")], {
+    monotonicMs: () => clock,
+    sampleStorage: () => { count++; return new Promise((resolve) => { finish = resolve; }); },
+  });
+  const first = c.collectStorage();
+  const second = c.collectStorage();
+  await Promise.resolve();
+  expect(count).toBe(1);
+  expect(c.getSnapshot().filesystems).toBeUndefined();
+  finish({ filesystems: null, zfsPools: null });
+  await Promise.all([first, second]);
+  expect(c.getSnapshot().filesystems).toBeNull();
+  clock = 59_999;
+  await c.collectStorage();
+  expect(count).toBe(1);
+  clock = 60_000;
+  const third = c.collectStorage();
+  await Promise.resolve();
+  expect(count).toBe(2);
+  finish({ filesystems: null, zfsPools: null });
+  await third;
+});

@@ -4,7 +4,7 @@ import { HostSnapshotReader } from "./hostSnapshot.js";
 import { uniqueIds } from "./ids.js";
 import { MAX_GLOB_LENGTH, MAX_GLOBS, NetMatcher, readInterfaces, type NetFilter, type RawInterface } from "./netdev.js";
 import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones, type HwmonPower } from "./power.js";
-import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
+import { counterRate, cpuUsagePercent, ioWaitPercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
 
 export interface HostSample {
   memory: Memory | null;
@@ -166,9 +166,11 @@ export class HostMetrics {
       return null;
     }
     let usage: number | null = null;
+    let wait: number | null = null;
     if (stat) {
       const prev = this.prevStat && this.prevStat.scope === stat.scope ? this.prevStat.times : null;
       usage = cpuUsagePercent(prev, stat.value);
+      wait = ioWaitPercent(prev, stat.value);
       this.prevStat = { scope: stat.scope, times: stat.value };
     } else {
       this.prevStat = null;
@@ -181,6 +183,7 @@ export class HostMetrics {
       load15: avg?.value.load15 ?? null,
       cpuCount: stat && stat.value.cpuCount > 0 ? stat.value.cpuCount : null,
       cpuUsagePercent: usage,
+      ioWaitPercent: wait,
     };
   }
 
