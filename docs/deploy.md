@@ -130,7 +130,7 @@ Restart=on-failure
 Run `update` inside the container (`pct exec <CTID> -- update`). It downloads the release, checks the sha256, unpacks it into `/opt/chirp/releases/<version>`, switches `/opt/chirp/current` atomically and waits for `/health`:
 
 - it never touches the data directory (`/var/lib/chirp`: API key, admin account, instance ID, disk IDs), so Home Assistant keeps working and the admin account survives updates. Upgrading from a release without accounts keeps the existing API key; open the dashboard afterwards and create the admin account;
-- the probe uses `CHIRP_HOST`/`CHIRP_PORT` from `/etc/chirp/chirp.env` (`127.0.0.1` for `0.0.0.0`/`::`, otherwise the configured address);
+- the probe uses `CHIRP_HOST`/`CHIRP_PORT` from `/etc/chirp/chirp.env` (`127.0.0.1` for `0.0.0.0`/`::`, otherwise the configured address), selects `https` when TLS is configured, and uses `curl -kfsS` for loopback certificate tolerance;
 - if the health check fails, the previous release is restored; on a first install (nothing to roll back to) the service is stopped and the `current` link is removed instead of being left dangling.
 
 ## Environment variables

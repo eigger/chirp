@@ -37,7 +37,7 @@ Replace the major wildcard with Proxmox `devN:` entries.
 - The installer generates a random one-time token and writes `CHIRP_SETUP_TOKEN` to the CT's `chirp.env` (0600) and prints it once at the end of the install output. It is never logged by the server.
 - `POST /bootstrap/admin` requires it while `CHIRP_SETUP_TOKEN` is set: add an optional `setupToken` field to `BootstrapAdminRequest` in `packages/shared/src/schema.ts` (adding a field is compatible; no `API_VERSION` bump), compare in constant time, and answer `403`/`unauthorized` on mismatch. `GET /bootstrap/status` gains optional `setupTokenRequired: boolean` so the dashboard shows the extra input (add `ko` strings to `apps/web/src/i18n.ts`).
 - When `CHIRP_SETUP_TOKEN` is unset (Docker, manual installs, existing installs) behaviour is unchanged, including `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD` seeding.
-- The token is useless once an admin exists; remove it from `chirp.env` after the admin is created (best effort, atomic rewrite via the existing `envFile.ts`/`secureFile.ts`).
+- The token is useless once an admin exists; remove it from `chirp.env` after the admin is created (best effort, atomic rewrite via the existing `envFile.ts`/`secureFile.ts`; under systemd `ProtectSystem=strict`, `/etc/chirp` is read-only so the token remains in the file harmlessly as `POST /bootstrap/admin` returns `409 conflict` once an admin exists; deletion failure logs a warning without leaking the token).
 - Update the `bootstrap.ts` warning text, rate-limit the token attempts through the existing limiter, add tests (missing, wrong, correct, unset, admin already exists) and `scripts/ci/smoke-release.sh` coverage.
 
 ### 1.3 Optional built-in TLS and bind control (fixes #3 partially)

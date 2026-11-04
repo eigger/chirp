@@ -58,9 +58,9 @@ cat >"$BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$STUB_DIR/systemctl.log"
 EOF
-NODE_BIN="$(command -v node || echo node)"
-
-cat >"$BIN/jq" <<EOF
+if ! command -v jq >/dev/null 2>&1; then
+  NODE_BIN="$(command -v node || echo node)"
+  cat >"$BIN/jq" <<EOF
 #!/usr/bin/env bash
 "$NODE_BIN" -e '
 const fs = require("fs");
@@ -81,7 +81,9 @@ if (filter === ".tag_name") {
 }
 ' -- "\$@"
 EOF
-chmod +x "$BIN/curl" "$BIN/systemctl" "$BIN/jq"
+  chmod +x "$BIN/jq"
+fi
+chmod +x "$BIN/curl" "$BIN/systemctl"
 
 export STUB_DIR="$WORK/stub"
 mkdir -p "$STUB_DIR"

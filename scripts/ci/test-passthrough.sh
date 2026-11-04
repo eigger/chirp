@@ -304,15 +304,18 @@ eq "invalid state: config untouched" "$(cat "$TMP/adopt.orig")" "$(cat "$TMP/ado
 echo "[10] final report: create the admin first, no credential printed"
 FAKE_BOOTSTRAP=""
 curl() { [[ -n "$FAKE_BOOTSTRAP" ]] || return 22; printf '%s' "$FAKE_BOOTSTRAP"; }
-FAKE_BOOTSTRAP='{"needsBootstrap":true}'
-eq "state: needs bootstrap" "true" "$(chirp_bootstrap_state 10.0.0.5)"
+FAKE_BOOTSTRAP='{"needsBootstrap":true,"setupTokenRequired":true}'
+eq "state: needs bootstrap with token" "needs_token" "$(chirp_bootstrap_state 10.0.0.5)"
 REPORT="$(chirp_account_report 100 10.0.0.5)"
 eq "tells to create the admin now" "1" "$(grep -c 'Open http://10.0.0.5/ now and create the admin account' <<<"$REPORT")"
 eq "shows setup token retrieval hint" "1" "$(grep -c 'pct exec 100 -- grep -E .*CHIRP_SETUP_TOKEN' <<<"$REPORT")"
 eq "points HA at Settings -> API key" "1" "$(grep -c 'Settings -> API key -> Copy' <<<"$REPORT")"
 eq "prints no key" "0" "$(grep -c 'chp_' <<<"$REPORT")"
+FAKE_BOOTSTRAP='{"needsBootstrap":true}'
+eq "state: legacy needs bootstrap without token" "needs_bootstrap" "$(chirp_bootstrap_state 10.0.0.5)"
+eq "legacy warns about the open window" "1" "$(chirp_account_report 100 10.0.0.5 | grep -c 'anyone who can reach this address')"
 FAKE_BOOTSTRAP='{"needsBootstrap":false}'
-eq "state: admin exists" "false" "$(chirp_bootstrap_state 10.0.0.5)"
+eq "state: admin exists" "ready" "$(chirp_bootstrap_state 10.0.0.5)"
 eq "admin exists -> sign in + reset hint" "1" "$(chirp_account_report 100 10.0.0.5 | grep -c 'pct exec 100 -- node .*admin reset-password')"
 FAKE_BOOTSTRAP=""
 eq "old release / unreachable -> unknown" "unknown" "$(chirp_bootstrap_state 10.0.0.5)"

@@ -440,31 +440,53 @@ chirp_wait_network() {
   return 1
 }
 
-chirp_detect_scheme() {
-  local ctid="$1" ip="$2"
+chirp_ct_env_value() {
+  local ctid="$1" key="$2" v=""
   if [[ -n "$ctid" ]] && command -v pct >/dev/null 2>&1; then
-    local cert
-    cert="$(pct exec "$ctid" -- grep -E '^[[:space:]]*CHIRP_TLS_CERT=' /etc/chirp/chirp.env 2>/dev/null | cut -d= -f2- | tr -d ' "\r\n' || true)"
-    if [[ -n "$cert" ]]; then
-      echo "https"
-      return 0
-    fi
+    v="$(pct exec "$ctid" -- grep -E "^[[:space:]]*${key}=" /etc/chirp/chirp.env 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+    v="${v//\"/}"; v="${v//\'/}"
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
   fi
-  echo "http"
+  printf '%s' "$v"
 }
 
-# Whether the server still needs its first admin account: true | false | unknown.
-# $1 IP. $2 Scheme (optional, default http).
+chirp_detect_scheme() {
+  local ctid="$1" cert key
+  cert="$(chirp_ct_env_value "$ctid" CHIRP_TLS_CERT)"
+  key="$(chirp_ct_env_value "$ctid" CHIRP_TLS_KEY)"
+  if [[ -n "$cert" && -n "$key" ]]; then
+    echo "https"
+  else
+    echo "http"
+  fi
+}
+
+chirp_ct_port() {
+  local ctid="$1" p
+  p="$(chirp_ct_env_value "$ctid" CHIRP_PORT)"
+  echo "${p:-80}"
+}
+
+# Whether the server still needs its first admin account:
+# returns: needs_token | needs_bootstrap | ready | unknown.
+# $1 host[:port]. $2 Scheme (optional, default http).
 chirp_bootstrap_state() {
-  local ip="$1" scheme="${2:-http}" body
-  body="$(curl -kfsS --max-time 5 "${scheme}://${ip}/api/v1/bootstrap/status" 2>/dev/null)" || {
+  local target="$1" scheme="${2:-http}" body
+  body="$(curl -kfsS --max-time 5 "${scheme}://${target}/api/v1/bootstrap/status" 2>/dev/null)" || {
     local alt="https"
     [[ "$scheme" == "https" ]] && alt="http"
-    body="$(curl -kfsS --max-time 5 "${alt}://${ip}/api/v1/bootstrap/status" 2>/dev/null)" || { echo unknown; return 0; }
+    body="$(curl -kfsS --max-time 5 "${alt}://${target}/api/v1/bootstrap/status" 2>/dev/null)" || { echo unknown; return 0; }
   }
-  if [[ "$body" == *'"needsBootstrap":true'* ]]; then echo true
-  elif [[ "$body" == *'"needsBootstrap":false'* ]]; then echo false
-  else echo unknown
+  if [[ "$body" == *'"needsBootstrap":true'* ]]; then
+    if [[ "$body" == *'"setupTokenRequired":true'* ]]; then
+      echo "needs_token"
+    else
+      echo "needs_bootstrap"
+    fi
+  elif [[ "$body" == *'"needsBootstrap":false'* ]]; then
+    echo "ready"
+  else
+    echo "unknown"
   fi
 }
 
@@ -472,33 +494,42 @@ chirp_bootstrap_state() {
 # $1 CTID, $2 IP. No credential is printed: the key lives in the dashboard (Settings -> API key).
 chirp_account_report() {
   local ctid="$1" ip="$2" cli=/opt/chirp/current/apps/server/dist/cli.js
-  local scheme url state
-  scheme="$(chirp_detect_scheme "$ctid" "$ip")"
-  url="${scheme}://${ip}/"
-  state="$(chirp_bootstrap_state "$ip" "$scheme")"
+  local scheme port host_port url state
+  scheme="$(chirp_detect_scheme "$ctid")"
+  port="$(chirp_ct_port "$ctid")"
+  if [[ ("$scheme" == "http" && "$port" == "80") || ("$scheme" == "https" && "$port" == "443") ]]; then
+    host_port="${ip}"
+  else
+    host_port="${ip}:${port}"
+  fi
+  url="${scheme}://${host_port}/"
+  state="$(chirp_bootstrap_state "$host_port" "$scheme")"
   echo "=============================================="
   echo " Dashboard : ${url}"
   echo
   case "$state" in
-    true)
+    needs_token)
       echo " >>> Open ${url} now and create the admin account."
       echo "     A setup token is required for initial registration."
       echo "     Retrieve it with: pct exec ${ctid} -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env"
       ;;
-    false)
+    needs_bootstrap)
+      echo " >>> Open ${url} now and create the admin account."
+      echo "     Until an admin exists, anyone who can reach this address can create it."
+      ;;
+    ready)
       echo " Sign in with your admin account."
       echo " Forgot the password? pct exec ${ctid} -- node ${cli} admin reset-password"
       ;;
     *)
       echo " Open ${url} and create the admin account (or sign in if it exists)."
-      echo " Retrieve the setup token with: pct exec ${ctid} -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env"
       ;;
   esac
   echo
   echo " Home Assistant:"
   echo "   1. In the dashboard: Settings -> API key -> Copy"
   echo "   2. HACS custom repository eigger/hass-chirp, integration domain chirp"
-  echo "   3. Host ${ip} / port 80 / the API key you copied"
+  echo "   3. Host ${ip} / port ${port} / the API key you copied"
 }
 
 # Smoke test + final summary. $1 CTID, $2 IP, $3 selected TSV (not stdin).

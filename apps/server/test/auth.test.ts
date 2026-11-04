@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -669,6 +669,44 @@ describe("setup token for first-run registration", () => {
       payload: { ...good, setupToken: TOKEN },
     });
     expect(again.statusCode).toBe(409);
+  });
+
+  it("succeeds with 201 and logs warning without leaking token when envFile removal fails", async () => {
+    const envDir = mkdtempSync(join(tmpdir(), "chirp-ro-test-"));
+    const envFile = join(envDir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o400 });
+    chmodSync(envFile, 0o400);
+    chmodSync(envDir, 0o500);
+
+    const warnLogs: string[] = [];
+    try {
+      await start({ CHIRP_SETUP_TOKEN: TOKEN, CHIRP_ENV_FILE: envFile }, { admin: false });
+      app.addHook("onRequest", async (req) => {
+        const origWarn = req.log.warn.bind(req.log);
+        req.log.warn = ((...args: unknown[]) => {
+          warnLogs.push(args.map(String).join(" "));
+          return origWarn(...args);
+        }) as typeof req.log.warn;
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/bootstrap/admin",
+        headers: CSRF,
+        payload: { ...good, setupToken: TOKEN },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(auth.admin.exists()).toBe(true);
+      expect(auth.admin.username()).toBe(USER);
+      expect(config.setupToken).toBeNull();
+
+      expect(warnLogs.some((m) => m.includes("Could not remove CHIRP_SETUP_TOKEN"))).toBe(true);
+      expect(warnLogs.some((m) => m.includes(TOKEN))).toBe(false);
+    } finally {
+      chmodSync(envDir, 0o700);
+      chmodSync(envFile, 0o600);
+      rmSync(envDir, { recursive: true, force: true });
+    }
   });
 
   it("rate limits repeated failed setup token attempts", async () => {

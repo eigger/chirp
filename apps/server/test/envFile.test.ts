@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -111,6 +111,23 @@ describe("CLI env file", () => {
       // Non-existent file returns false
       expect(removeEnvVar(join(dir, "missing.env"), "FOO")).toEqual({ removed: false });
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removeEnvVar returns error when file cannot be modified", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chirp-env-ro-"));
+    const file = join(dir, "chirp.env");
+    try {
+      writeFileSync(file, "CHIRP_SETUP_TOKEN=secret\n", { mode: 0o400 });
+      chmodSync(file, 0o400);
+      chmodSync(dir, 0o500);
+      const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+      expect(res.removed).toBe(false);
+      expect(res.error).toBeDefined();
+    } finally {
+      chmodSync(dir, 0o700);
+      chmodSync(file, 0o600);
       rmSync(dir, { recursive: true, force: true });
     }
   });

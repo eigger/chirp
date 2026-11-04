@@ -130,7 +130,7 @@ Restart=on-failure
 컨테이너 안에서 `update`를 실행한다(`pct exec <CTID> -- update`). 릴리스를 내려받아 sha256을 확인하고 `/opt/chirp/releases/<version>`에 푼 뒤 `/opt/chirp/current`를 원자적으로 바꾸고 `/health`를 기다린다.
 
 - 데이터 디렉터리(`/var/lib/chirp`: API 키, 관리자 계정, 인스턴스 ID, 디스크 ID)는 건드리지 않으므로 Home Assistant 연동과 관리자 계정이 업데이트 후에도 유지된다. 계정 기능이 없던 릴리스에서 올리면 기존 API 키는 그대로 쓰이고, 업데이트 후 대시보드에서 관리자 계정을 만들면 된다.
-- 확인 주소는 `/etc/chirp/chirp.env`의 `CHIRP_HOST`/`CHIRP_PORT`를 따른다(`0.0.0.0`/`::`이면 `127.0.0.1`, 그 외에는 설정한 주소).
+- 확인 주소는 `/etc/chirp/chirp.env`의 `CHIRP_HOST`/`CHIRP_PORT`를 따르고(`0.0.0.0`/`::`이면 `127.0.0.1`, 그 외에는 설정한 주소), TLS가 설정되어 있으면 `https`를 선택하며, 루프백 인증서 허용을 위해 `curl -kfsS`를 쓴다.
 - 헬스체크가 실패하면 이전 릴리스로 되돌린다. 첫 설치처럼 되돌릴 릴리스가 없으면 서비스를 멈추고 `current` 링크를 지워, 존재하지 않는 곳을 가리키는 링크를 남기지 않는다.
 
 ## 환경 변수
