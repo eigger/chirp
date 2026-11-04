@@ -166,6 +166,29 @@ run_update ok; rc=$?
 eq "exit 0" "0" "$rc"
 eq "tls probe url" "https://127.0.0.1:8443/health" "$(grep '/health$' "$STUB_DIR/curl.log" | head -n1)"
 
+echo "[7] snapshot users receive a host collector update notice"
+printf 'CHIRP_HOST_SNAPSHOT=/run/chirp/host.json\n' >"$ENVF"
+run_update ok; rc=$?
+eq "up-to-date exit 0" "0" "$rc"
+eq "no repeated notice when up-to-date" "0" "$(grep -c 'Host collector version cannot be checked' "$WORK/out.log")"
+make_release 1.5.0
+run_update ok; rc=$?
+eq "snapshot upgrade exit 0" "0" "$rc"
+eq "collector notice after upgrade" "1" "$(grep -c 'Host collector version cannot be checked' "$WORK/out.log")"
+
+# Exercise the default directory without touching the real /run/chirp.
+# shellcheck source=../../proxmox/install/update.sh
+CHIRP_UPDATE_LIB=1 source "$UPDATE_SH"
+export ENV_FILE="$ENVF"
+mkdir -p "$WORK/snapshot-dir"
+printf '' >"$ENVF"
+eq "default snapshot directory triggers notice" "1" "$(collector_notice "$WORK/snapshot-dir" | grep -c 'Host collector version cannot be checked')"
+eq "missing default directory has no notice" "0" "$(collector_notice "$WORK/missing" | grep -c 'Host collector version cannot be checked')"
+for value in '' none NONE 0 false False; do
+  printf 'CHIRP_HOST_SNAPSHOT=%s\n' "$value" >"$ENVF"
+  eq "disabled snapshot '$value' has no notice" "0" "$(collector_notice "$WORK/snapshot-dir" | grep -c 'Host collector version cannot be checked')"
+done
+
 echo
 echo "passed=${PASS} failed=${FAILS}"
 [[ "$FAILS" -eq 0 ]]
