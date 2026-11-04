@@ -535,6 +535,34 @@ export const HostSnapshotHwmonVoltage = z.object({
   volts: z.number().nullable(),
 });
 
+export const HostSnapshotFilesystem = z.object({
+  id: z.string(),
+  path: z.string(),
+  totalBytes: num,
+  usedBytes: num,
+  availableBytes: num,
+  usedPercent: num,
+});
+export type HostSnapshotFilesystem = z.infer<typeof HostSnapshotFilesystem>;
+
+export const HostSnapshotZfsPool = z.object({
+  id: z.string(),
+  name: z.string(),
+  health: z.string(),
+  totalBytes: num,
+  usedBytes: num,
+  freeBytes: num,
+  usedPercent: num,
+});
+export type HostSnapshotZfsPool = z.infer<typeof HostSnapshotZfsPool>;
+
+export const HostSnapshotStorage = z.object({
+  collectedAt: z.number().optional(),
+  filesystems: z.array(HostSnapshotFilesystem).nullable().optional(),
+  zfsPools: z.array(HostSnapshotZfsPool).nullable().optional(),
+});
+export type HostSnapshotStorage = z.infer<typeof HostSnapshotStorage>;
+
 export const HostSnapshot = z.object({
   version: z.literal(1),
   timestamp: z.number(),
@@ -590,5 +618,6 @@ export const HostSnapshot = z.object({
     })
     .nullable()
     .optional(),
+  storage: HostSnapshotStorage.nullable().optional(),
 });
 export type HostSnapshot = z.infer<typeof HostSnapshot>;

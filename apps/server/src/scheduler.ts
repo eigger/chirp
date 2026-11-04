@@ -75,7 +75,11 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
   });
   return {
     sampleHost: (monotonicMs) => host.sample(monotonicMs),
-    sampleStorage: () => storage.sample(),
+    sampleStorage: async () => {
+      const snap = snapshotReader?.read().snapshot;
+      const snapStorage = snap ? HostSnapshotReader.toStorage(snap.storage) : null;
+      return snapStorage ?? storage.sample();
+    },
     readSensors: () => {
       const snap = snapshotReader?.read().snapshot;
       const readout = snap ? HostSnapshotReader.toSensorReadout(snap.hwmon) : null;

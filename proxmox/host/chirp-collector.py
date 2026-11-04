@@ -600,6 +600,132 @@ def collect_smart(
     }
 
 
+def parse_filesystem_paths(raw: Optional[str]) -> List[str]:
+    """Parse and validate CHIRP_FILESYSTEM_PATHS matching server config rules."""
+    if not raw:
+        return []
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    unique_paths: List[str] = []
+    seen = set()
+    for p in items:
+        if p not in seen:
+            seen.add(p)
+            unique_paths.append(p)
+
+    if len(unique_paths) > 32:
+        unique_paths = unique_paths[:32]
+    # Keep only absolute paths without '..' or null bytes
+    return [
+        p for p in unique_paths
+        if p.startswith("/") and "\0" not in p and ".." not in p.split("/")
+    ]
+
+
+def collect_filesystem(path: str) -> Dict[str, Any]:
+    """Collect filesystem statistics via os.statvfs matching chirp storage.ts."""
+    fs_id = f"fs_{hashlib.sha256(path.encode('utf-8')).hexdigest()[:16]}"
+    result: Dict[str, Any] = {
+        "id": fs_id,
+        "path": path,
+        "totalBytes": None,
+        "usedBytes": None,
+        "availableBytes": None,
+        "usedPercent": None,
+    }
+    try:
+        st = os.statvfs(path)
+        bsize = st.f_frsize or st.f_bsize
+        blocks = st.f_blocks
+        bfree = st.f_bfree
+        bavail = st.f_bavail
+        if bsize <= 0 or bfree > blocks or bavail > bfree:
+            return result
+        total = blocks * bsize
+        used = (blocks - bfree) * bsize
+        available = bavail * bsize
+        denom = used + available
+        used_pct = round((used / denom) * 1000) / 10 if denom > 0 else None
+        result.update({
+            "totalBytes": total,
+            "usedBytes": used,
+            "availableBytes": available,
+            "usedPercent": used_pct,
+        })
+    except OSError:
+        pass
+    return result
+
+
+def collect_zfs_pools(zpool_bin: str = "zpool") -> Optional[List[Dict[str, Any]]]:
+    """Collect ZFS pool health and space usage via zpool list."""
+    try:
+        proc = subprocess.run(
+            [zpool_bin, "list", "-Hp", "-o", "guid,name,health,size,allocated,free"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5.0,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    out = proc.stdout.strip()
+    if not out or out == "no pools available":
+        return []
+
+    pools: List[Dict[str, Any]] = []
+    for line in out.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        guid, name, health, size, allocated, free = fields
+        if not guid.isdigit() or not name or not health:
+            continue
+        total_bytes = int(size) if size.isdigit() else None
+        used_bytes = int(allocated) if allocated.isdigit() else None
+        free_bytes = int(free) if free.isdigit() else None
+        used_pct = None
+        if total_bytes is not None and total_bytes > 0 and used_bytes is not None:
+            used_pct = round((used_bytes / total_bytes) * 1000) / 10
+
+        pools.append({
+            "id": guid,
+            "name": name,
+            "health": health,
+            "totalBytes": total_bytes,
+            "usedBytes": used_bytes,
+            "freeBytes": free_bytes,
+            "usedPercent": used_pct,
+        })
+    return pools
+
+
+def collect_storage(
+    filesystem_paths: Optional[List[str]],
+    zfs_enabled: bool,
+    zpool_bin: str = "zpool",
+) -> Optional[Dict[str, Any]]:
+    """Collect opt-in host filesystem and ZFS pool statistics."""
+    has_fs = bool(filesystem_paths)
+    if not has_fs and not zfs_enabled:
+        return None
+
+    now_ms = int(time.time() * 1000)
+    filesystems = [collect_filesystem(p) for p in filesystem_paths] if has_fs else None
+    zfs_pools = collect_zfs_pools(zpool_bin) if zfs_enabled else None
+
+    return {
+        "collectedAt": now_ms,
+        "filesystems": filesystems,
+        "zfsPools": zfs_pools,
+    }
+
+
 def write_snapshot_atomic(data: Dict[str, Any], output_path: str) -> None:
     parent = os.path.dirname(output_path)
     if parent:
@@ -620,16 +746,25 @@ def run_collection(
     sysfs_root: str,
     proc_root: str,
     last_smart: Optional[Dict[str, Any]],
+    last_storage: Optional[Dict[str, Any]] = None,
     configured_devices: Optional[List[str]] = None,
     device_types: Optional[Dict[str, str]] = None,
+    filesystem_paths: Optional[List[str]] = None,
+    zfs_enabled: bool = False,
     force_smart: bool = False,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    force_storage: bool = False,
+    zpool_bin: str = "zpool",
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     now_ms = int(time.time() * 1000)
     uname = os.uname()
 
     smart_data = last_smart
     if force_smart or smart_data is None:
         smart_data = collect_smart(smartctl_bin, configured_devices, device_types)
+
+    storage_data = last_storage
+    if force_storage or storage_data is None:
+        storage_data = collect_storage(filesystem_paths, zfs_enabled, zpool_bin)
 
     snapshot = {
         "version": 1,
@@ -643,8 +778,9 @@ def run_collection(
         "net": {"interfaces": collect_net(sysfs_root)},
         "hwmon": collect_hwmon(sysfs_root, proc_root),
         "smart": smart_data,
+        "storage": storage_data,
     }
-    return snapshot, smart_data
+    return snapshot, smart_data, storage_data
 
 
 running = True
@@ -663,7 +799,9 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="Run once and exit")
     parser.add_argument("--metric-interval", type=int, default=10, help="Seconds between metric snapshots (default: 10)")
     parser.add_argument("--smart-interval", type=int, default=300, help="Seconds between SMART queries (default: 300)")
+    parser.add_argument("--storage-interval", type=int, default=60, help="Seconds between storage queries (default: 60)")
     parser.add_argument("--smartctl", default="smartctl", help="Path to smartctl binary")
+    parser.add_argument("--zpool", default="zpool", help="Path to zpool binary")
     parser.add_argument("--sysfs-root", default="/sys", help="Sysfs mount path")
     parser.add_argument("--proc-root", default="/proc", help="Procfs mount path")
 
@@ -681,30 +819,43 @@ def main() -> int:
     raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or env_file.get("CHIRP_DEVICE_TYPES")
     device_types = parse_device_types(raw_types)
 
+    raw_fs = os.environ.get("CHIRP_FILESYSTEM_PATHS") or env_file.get("CHIRP_FILESYSTEM_PATHS", "")
+    filesystem_paths = parse_filesystem_paths(raw_fs)
+    raw_zfs = (os.environ.get("CHIRP_ZFS_ENABLED") or env_file.get("CHIRP_ZFS_ENABLED", "")).strip().lower()
+    zfs_enabled = raw_zfs in ("1", "true", "yes", "on")
+
     output_path = os.path.join(args.output_dir, args.output_file)
 
     if args.once or not args.daemon:
-        snapshot, _ = run_collection(
+        snapshot, _, _ = run_collection(
             args.smartctl,
             args.sysfs_root,
             args.proc_root,
             None,
+            None,
             configured_devices=configured_devices,
             device_types=device_types,
+            filesystem_paths=filesystem_paths,
+            zfs_enabled=zfs_enabled,
             force_smart=True,
+            force_storage=True,
+            zpool_bin=args.zpool,
         )
         write_snapshot_atomic(snapshot, output_path)
         print(f"chirp-collector: written snapshot to {output_path}")
         return 0
 
-    print(f"chirp-collector: starting daemon (output: {output_path}, metrics: {args.metric_interval}s, smart: {args.smart_interval}s)")
+    print(f"chirp-collector: starting daemon (output: {output_path}, metrics: {args.metric_interval}s, smart: {args.smart_interval}s, storage: {args.storage_interval}s)")
 
     last_smart: Optional[Dict[str, Any]] = None
     last_smart_time = 0.0
+    last_storage: Optional[Dict[str, Any]] = None
+    last_storage_time = 0.0
 
     while running:
         t0 = time.time()
         need_smart = (t0 - last_smart_time) >= args.smart_interval or last_smart is None
+        need_storage = (t0 - last_storage_time) >= args.storage_interval or last_storage is None
 
         # Periodically re-check /etc/chirp/chirp.env so runtime config changes are picked up
         cur_env_file = load_env_file("/etc/chirp/chirp.env")
@@ -714,18 +865,30 @@ def main() -> int:
         cur_raw_types = os.environ.get("CHIRP_DEVICE_TYPES") or cur_env_file.get("CHIRP_DEVICE_TYPES")
         cur_dev_types = parse_device_types(cur_raw_types)
 
+        cur_raw_fs = os.environ.get("CHIRP_FILESYSTEM_PATHS") or cur_env_file.get("CHIRP_FILESYSTEM_PATHS", "")
+        cur_fs_paths = parse_filesystem_paths(cur_raw_fs)
+        cur_raw_zfs = (os.environ.get("CHIRP_ZFS_ENABLED") or cur_env_file.get("CHIRP_ZFS_ENABLED", "")).strip().lower()
+        cur_zfs_enabled = cur_raw_zfs in ("1", "true", "yes", "on")
+
         try:
-            snapshot, last_smart = run_collection(
+            snapshot, last_smart, last_storage = run_collection(
                 args.smartctl,
                 args.sysfs_root,
                 args.proc_root,
                 last_smart,
+                last_storage,
                 configured_devices=cur_configured,
                 device_types=cur_dev_types,
+                filesystem_paths=cur_fs_paths,
+                zfs_enabled=cur_zfs_enabled,
                 force_smart=need_smart,
+                force_storage=need_storage,
+                zpool_bin=args.zpool,
             )
             if need_smart:
                 last_smart_time = t0
+            if need_storage:
+                last_storage_time = t0
             write_snapshot_atomic(snapshot, output_path)
         except Exception as e:
             print(f"chirp-collector: collection error: {e}", file=sys.stderr)

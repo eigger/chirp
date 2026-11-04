@@ -1,8 +1,16 @@
 import { statSync, readFileSync, existsSync } from "node:fs";
-import { HostSnapshot, type HostSnapshotNetInterface, type HostSnapshotSmartDevice } from "@chirp/shared";
+import {
+  HostSnapshot,
+  type HostSnapshotNetInterface,
+  type HostSnapshotSmartDevice,
+  type HostSnapshotStorage,
+  type Filesystem,
+  type ZfsPool,
+} from "@chirp/shared";
 import type { RawInterface } from "./netdev.js";
 import type { SensorReadout } from "./hwmon.js";
 import type { HwmonExtras, RaplZone } from "./power.js";
+import type { StorageSample } from "./storage.js";
 
 /** Max snapshot file size accepted (10 MB). Prevents memory exhaustion attacks. */
 export const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
@@ -217,5 +225,18 @@ export class HostSnapshotReader {
       map.set(d.devicePath, d);
     }
     return map;
+  }
+
+  /** Convert snapshot storage section into StorageSample ({ filesystems, zfsPools }) */
+  static toStorage(storage: HostSnapshotStorage | null | undefined): StorageSample | null {
+    if (!storage) return null;
+    const filesystems = storage.filesystems
+      ? storage.filesystems.map((fs): Filesystem => ({
+          ...fs,
+          scope: "host",
+        }))
+      : null;
+    const zfsPools = storage.zfsPools ? storage.zfsPools.map((zp): ZfsPool => ({ ...zp })) : null;
+    return { filesystems, zfsPools };
   }
 }

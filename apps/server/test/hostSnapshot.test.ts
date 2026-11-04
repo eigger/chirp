@@ -280,4 +280,58 @@ describe("HostSnapshotReader", () => {
       expect(res4.snapshot).toBeNull();
     });
   });
+
+  it("converts snapshot storage to StorageSample with scope host", () => {
+    expect(HostSnapshotReader.toStorage(null)).toBeNull();
+    expect(HostSnapshotReader.toStorage(undefined)).toBeNull();
+
+    const sample = HostSnapshotReader.toStorage({
+      collectedAt: 1000000,
+      filesystems: [
+        {
+          id: "fs_1234567890abcdef",
+          path: "/mnt/storage",
+          totalBytes: 1000000000,
+          usedBytes: 400000000,
+          availableBytes: 600000000,
+          usedPercent: 40.0,
+        },
+      ],
+      zfsPools: [
+        {
+          id: "9876543210",
+          name: "tank",
+          health: "ONLINE",
+          totalBytes: 2000000000,
+          usedBytes: 800000000,
+          freeBytes: 1200000000,
+          usedPercent: 40.0,
+        },
+      ],
+    });
+
+    expect(sample).not.toBeNull();
+    expect(sample?.filesystems).toEqual([
+      {
+        id: "fs_1234567890abcdef",
+        path: "/mnt/storage",
+        scope: "host",
+        totalBytes: 1000000000,
+        usedBytes: 400000000,
+        availableBytes: 600000000,
+        usedPercent: 40.0,
+      },
+    ]);
+    expect(sample?.zfsPools).toEqual([
+      {
+        id: "9876543210",
+        name: "tank",
+        health: "ONLINE",
+        totalBytes: 2000000000,
+        usedBytes: 800000000,
+        freeBytes: 1200000000,
+        usedPercent: 40.0,
+      },
+    ]);
+  });
 });

@@ -192,4 +192,4 @@ Proxmox LXC: 기본값 그대로 둔다(설치 스크립트가 `/host/proc`, `/h
 
 `CHIRP_FILESYSTEM_PATHS=/,/data`로 확인할 파일시스템 경로를 지정합니다(최대 32개). `CHIRP_ZFS_ENABLED=true`는 ZFS 풀 건강 상태·용량의 읽기 전용 수집을 켭니다. 두 기능 모두 기본 비활성이며 1분 간격으로 비동기 수집합니다. ZFS는 `zpool`과 기존 장치 접근 권한이 필요하며, Chirp는 도구 설치·권한 추가·풀 변경을 수행하지 않습니다.
 
-컨테이너에서는 자체 마운트의 용량입니다. 호스트 파일시스템이 필요하면 명시적으로 호스트 루트를 `/host/root`에 읽기 전용 마운트하고 `CHIRP_HOST_ROOT=/host/root`를 설정합니다. 이때 `/data`는 `/host/root/data`를 의미하며 읽을 수 없어도 컨테이너 경로로 대체하지 않습니다. [API 문서](../api.md#additional-host-and-storage-metrics)를 참고하세요.
+컨테이너에서는 자체 마운트의 용량입니다. 호스트 수집기를 사용하는 unprivileged 컨테이너(`var_unprivileged=1`)의 경우 Proxmox 호스트의 `/etc/chirp/chirp.env`에 `CHIRP_FILESYSTEM_PATHS` 및 `CHIRP_ZFS_ENABLED`를 설정하면 `chirp-collector`가 호스트에서 직접 수집하여 `scope: "host"`로 스냅샷에 포함합니다. Privileged 컨테이너에서 호스트 파일시스템이 필요하면 명시적으로 호스트 루트를 `/host/root`에 읽기 전용 마운트하고 `CHIRP_HOST_ROOT=/host/root`를 설정합니다. 이때 `/data`는 `/host/root/data`를 의미하며 읽을 수 없어도 컨테이너 경로로 대체하지 않습니다. [API 문서](../api.md#additional-host-and-storage-metrics)를 참고하세요.

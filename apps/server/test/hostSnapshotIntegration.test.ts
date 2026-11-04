@@ -286,4 +286,70 @@ describe("Host snapshot integration in CollectorDeps", () => {
       expect(s3.power).toBeNull();
     });
   });
+
+  it("supplies storage from snapshot to scheduler and marks scope as host", async () => {
+    await withTempDir(async (dir) => {
+      const snapPath = join(dir, "host.json");
+      const snap: HostSnapshot = {
+        ...getMockSnapshot(),
+        storage: {
+          collectedAt: 1000000,
+          filesystems: [
+            {
+              id: "fs_abcd1234ef567890",
+              path: "/var/lib/vz",
+              totalBytes: 500000000000,
+              usedBytes: 200000000000,
+              availableBytes: 300000000000,
+              usedPercent: 40.0,
+            },
+          ],
+          zfsPools: [
+            {
+              id: "112233445566778899",
+              name: "rpool",
+              health: "ONLINE",
+              totalBytes: 1000000000000,
+              usedBytes: 300000000000,
+              freeBytes: 700000000000,
+              usedPercent: 30.0,
+            },
+          ],
+        },
+      };
+      writeFileSync(snapPath, JSON.stringify(snap));
+
+      const config = loadConfig({
+        CHIRP_HOST_SNAPSHOT: snapPath,
+        CHIRP_DATA_DIR: dir,
+        CHIRP_DEV_PASSTHROUGH: "legacy",
+      });
+
+      const deps = defaultDeps(config);
+      const storageSample = await deps.sampleStorage!();
+
+      expect(storageSample.filesystems).toEqual([
+        {
+          id: "fs_abcd1234ef567890",
+          path: "/var/lib/vz",
+          scope: "host",
+          totalBytes: 500000000000,
+          usedBytes: 200000000000,
+          availableBytes: 300000000000,
+          usedPercent: 40.0,
+        },
+      ]);
+      expect(storageSample.zfsPools).toEqual([
+        {
+          id: "112233445566778899",
+          name: "rpool",
+          health: "ONLINE",
+          totalBytes: 1000000000000,
+          usedBytes: 300000000000,
+          freeBytes: 700000000000,
+          usedPercent: 30.0,
+        },
+      ]);
+    });
+  });
 });
