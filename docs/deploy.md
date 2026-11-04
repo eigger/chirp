@@ -20,17 +20,33 @@ Creates a privileged LXC, installs the release tarball, passes the selected disk
 
 ### Disk passthrough and its permissions
 
-`proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) bind-mounts each selected disk's `/dev/disk/by-id/...` node into the container and adds one cgroup rule per device major:
+`proxmox/install/chirp-passthrough.sh` (run on the host; re-run after adding or replacing disks) configures device access into the container:
+
+- **Legacy passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, default):** uses legacy bind mounts and major wildcard rules:
 
 ```
 lxc.cgroup2.devices.allow: b 8:* rw
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x5000c500a1b2c3d4 none bind,optional,create=file
 ```
 
-- **`rw`, not `rwm`.** The disks are bind-mounted, so the container never needs `mknod`; smartctl opens SCSI/SAT devices read-write for SG_IO, so `r` alone is not enough. Override with `CHIRP_DEV_PERM` (e.g. `CHIRP_DEV_PERM=rwm`).
-- **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a rule for an exact minor would point at the wrong disk, or none, after a host reboot or hotplug. The by-id bind mounts are re-resolved on every container start; static cgroup rules are not, and Proxmox offers no hook that can rewrite them before the container starts.
-- **How the lines are managed.** The script recognises its own lines by content: the by-id mounts and host metric mounts in exactly the format above, and `lxc.cgroup2.devices.allow: b <major>:* <perm>` for the majors of the disks it adds or removes. On every run it deletes those lines wherever they are in the main section and writes the new set once, before the first `[snapshot]` / `[pve:pending]` section. Snapshot sections, your own `lxc.*` lines and everything else stay as they are, and a run that changes nothing does not rewrite the file. Older versions wrapped the lines in `# chirp-passthrough:start` / `:end` comments; Proxmox treats every `#` line as the container description and moves it to the top of the file (encoding `:` as `%3A`) whenever it rewrites the config, so markers cannot be relied on. They are no longer written and old ones are deleted. A rule of yours in exactly chirp's format for a major chirp manages (e.g. `b 8:* rw`) is treated as chirp's. Owned major numbers are recorded on the host in `/var/lib/chirp-passthrough/<CTID>.majors`, so rules can be removed even after a disk is unplugged. Keep this file with the CT configuration when moving or restoring the installation. For legacy configurations without this record, if an old disk is already missing, the script refuses to change the configuration: remove the missing disk's stale cgroup rule and mount manually before retrying. After a Proxmox snapshot rollback, missing disks combined with wildcard rules outside the recorded majors also cause an unchanged failure; reconcile those rules with the restored CT configuration before retrying. Files with CRLF line endings are refused unchanged.
-- **Risk:** root in the container can reach other block devices with the same major, including the host's boot disk if it is also `sd*`/NVMe. That is no worse than a privileged container already is (its root is effectively host root), but keep the container on a trusted network and do not run anything else in it.
+  - **Boot resilience with `optional`:** Proxmox LXC `devN:` entries lack an `optional` flag and abort container startup if a host path is missing. `legacy` mode with `bind,optional` allows the container to boot normally even if a disk is unplugged or fails, ensuring the monitoring container stays online when disk issues occur.
+  - **`rw`, not `rwm`.** Disks are bind-mounted, so the container never needs `mknod`; smartctl opens SCSI/SAT devices read-write for SG_IO, so `r` alone is not enough. Override with `CHIRP_DEV_PERM` (e.g. `CHIRP_DEV_PERM=rwm`).
+  - **Major wildcard (`8:*`), not exact `major:minor`.** `sd` minors follow probe order and NVMe namespaces (major 259) get dynamic minors, so a static rule for an exact minor would point at the wrong disk after reboot. The cost: container root can reach other block devices with the same major (e.g. host boot disk).
+
+- **Exact device passthrough (`CHIRP_DEV_PASSTHROUGH=dev`, requires Proxmox VE >= 8.1):** native exact device passthrough using `devN:` entries:
+
+```
+dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
+```
+
+  - Proxmox automatically resolves the exact `major:minor` on every container start and allows only the selected devices in cgroups (no wildcard rules). Other devices sharing the same block major (such as the host boot disk) are not accessible from the container.
+  - Indices (`dev0`, `dev1`, ...) are allocated dynamically to avoid colliding with user-defined `devN` entries (including pending entries in `[pve:pending]`).
+  - **Caveat:** Proxmox `devN:` has no `optional` flag; if a disk is removed or dies, Proxmox will refuse to start the container until the config is updated.
+
+- **Mode selection:** `CHIRP_DEV_PASSTHROUGH=legacy` (default) | `dev` | `auto` (resolves to `legacy` for boot resilience). Invalid values exit with an error.
+
+- **How lines and migrations are managed.** The script recognises its own lines by content: `devN: /dev/disk/by-id/...` (strictly without user options like `gid=`, `mode=`, and only matching chirp's managed disks), by-id mounts, host metric mounts, and `lxc.cgroup2.devices.allow: b <major>:* <perm>` for the majors of the disks it manages. It preserves user-defined `devN` entries (with or without options) and user wildcard cgroup rules. On every run it deletes chirp's lines wherever they are in the main section and writes the new set once, before the first `[snapshot]` / `[pve:pending]` section. Snapshot sections, your own `lxc.*` lines, and user `devN` lines stay as they are, and a run that changes nothing does not rewrite the file. Older versions wrapped the lines in `# chirp-passthrough:start` / `:end` comments; Proxmox treats every `#` line as the container description and moves it to the top of the file (encoding `:` as `%3A`) whenever it rewrites the config, so markers cannot be relied on. They are no longer written and old ones are deleted. Managed disk by-ids and block majors are recorded on the host in `/var/lib/chirp-passthrough/<CTID>.disks` and `.majors` for cleanup. Files with CRLF line endings are refused unchanged.
+  - **Backup & restore note:** Containers restored onto a new host lack `/var/lib/chirp-passthrough/<CTID>.disks`. To prevent accidental deletion of user devices, chirp preserves existing `devN:` entries when no state file exists. If restoring a container that previously used `dev` mode and switching to `legacy` mode, manually remove any old `devN: /dev/disk/by-id/...` lines from `/etc/pve/lxc/<CTID>.conf` to prevent Proxmox boot aborts if disks go offline.
 
 ### Host metrics (memory, load, network)
 

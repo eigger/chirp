@@ -20,17 +20,33 @@ privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스
 
 ### 디스크 passthrough와 권한
 
-`proxmox/install/chirp-passthrough.sh`(호스트에서 실행, 디스크를 추가/교체한 뒤 다시 실행)는 선택한 디스크의 `/dev/disk/by-id/...` 노드를 컨테이너에 bind mount하고, 장치 major마다 cgroup 규칙을 하나씩 추가한다.
+`proxmox/install/chirp-passthrough.sh`(호스트에서 실행, 디스크를 추가/교체한 뒤 다시 실행)는 컨테이너에 디스크 접근 권한을 설정한다:
+
+- **레거시 passthrough (`CHIRP_DEV_PASSTHROUGH=legacy`, 기본값):** 기존 bind mount와 major 와일드카드 규칙을 사용한다:
 
 ```
 lxc.cgroup2.devices.allow: b 8:* rw
 lxc.mount.entry: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4 dev/disk/by-id/wwn-0x5000c500a1b2c3d4 none bind,optional,create=file
 ```
 
-- **`rwm`이 아니라 `rw`.** 디스크는 bind mount되므로 컨테이너가 `mknod`를 할 필요가 없다. smartctl은 SG_IO를 위해 SCSI/SAT 장치를 읽기·쓰기로 열기 때문에 `r`만으로는 부족하다. `CHIRP_DEV_PERM`으로 덮어쓸 수 있다(예: `CHIRP_DEV_PERM=rwm`).
-- **정확한 `major:minor`가 아니라 major 와일드카드(`8:*`).** `sd`의 minor는 장치 인식 순서를 따르고 NVMe 네임스페이스(major 259)의 minor는 동적으로 배정되므로, 정확한 minor 규칙은 호스트 재부팅이나 핫플러그 후 엉뚱한 디스크를 가리키거나 아무것도 가리키지 않게 된다. by-id bind mount는 컨테이너가 시작할 때마다 다시 해석되지만 정적 cgroup 규칙은 그렇지 않고, Proxmox에는 컨테이너 시작 전에 이 규칙을 다시 쓸 수 있는 훅이 없다.
-- **줄 관리 방식.** 스크립트는 자기 줄을 내용으로 알아본다. 위 형식 그대로의 by-id 마운트와 호스트 메트릭 마운트, 그리고 추가하거나 제거하는 디스크 major의 `lxc.cgroup2.devices.allow: b <major>:* <perm>`이다. 실행할 때마다 main 섹션 어디에 있든 이 줄들을 지우고, 새 집합을 첫 `[snapshot]` / `[pve:pending]` 섹션 앞에 한 번만 쓴다. 스냅샷 섹션, 사용자 자신의 `lxc.*` 줄과 나머지는 그대로 두며, 바뀌는 것이 없으면 파일을 다시 쓰지 않는다. 이전 버전은 이 줄들을 `# chirp-passthrough:start` / `:end` 주석으로 감쌌는데, Proxmox는 모든 `#` 줄을 컨테이너 설명(description)으로 취급해 설정을 다시 쓸 때마다 파일 맨 위로 옮긴다(`:`는 `%3A`로 인코딩). 그래서 마커는 믿을 수 없으므로 더 이상 쓰지 않고, 남아 있는 마커는 지운다. chirp가 관리하는 major에 대해 chirp와 똑같은 형식으로 쓴 사용자 규칙(예: `b 8:* rw`)은 chirp의 것으로 취급된다. 관리하는 major는 호스트의 `/var/lib/chirp-passthrough/<CTID>.majors`에 기록하므로 디스크가 제거된 뒤에도 규칙을 정리할 수 있다. 설치를 이동하거나 복원할 때는 CT 설정과 이 파일을 함께 보관한다. 소유 기록이 없는 구버전 설정에서 기존 디스크까지 사라졌다면 설정 변경을 거부한다. 해당 디스크의 오래된 cgroup 규칙과 마운트를 수동으로 제거한 뒤 다시 실행한다. Proxmox 스냅샷을 롤백한 뒤 디스크가 없고 기록 밖의 major 와일드카드 규칙이 함께 발견되어도 변경 없이 실패한다. 복원된 CT 설정과 해당 규칙을 정리한 뒤 다시 실행한다. CRLF 줄 끝 파일은 변경하지 않고 거부한다.
-- **위험:** 컨테이너 root는 같은 major의 다른 블록 장치(호스트 부트 디스크도 `sd*`/NVMe라면 포함)에 접근할 수 있다. privileged 컨테이너의 root는 이미 사실상 호스트 root이므로 위험이 더 커지지는 않지만, 신뢰하는 네트워크에 두고 다른 서비스를 함께 돌리지 말 것.
+  - **`optional` 마운트로 부팅 복원력 확보:** Proxmox LXC의 `devN:` 항목에는 `optional` 옵션이 없어서, 연결된 디스크가 빠지거나 고장 나면 Proxmox가 컨테이너 시작 자체를 거부한다. 반면 `legacy` 방식은 `bind,optional`이 적용되어 디스크가 분리되거나 망가져도 정상 부팅되므로, 디스크 장애 발생 시 모니터링 컨테이너가 함께 다운되는 위험을 방지한다.
+  - **`rwm`이 아니라 `rw`.** 디스크는 bind mount되므로 컨테이너가 `mknod`를 할 필요가 없다. smartctl은 SG_IO를 위해 SCSI/SAT 장치를 읽기·쓰기로 열기 때문에 `r`만으로는 부족하다. `CHIRP_DEV_PERM`으로 덮어쓸 수 있다(예: `CHIRP_DEV_PERM=rwm`).
+  - **정확한 `major:minor`가 아니라 major 와일드카드(`8:*`).** `sd`의 minor는 장치 인식 순서를 따르고 NVMe 네임스페이스(major 259)의 minor는 동적으로 배정되므로, 정적 규칙은 재부팅 후 엉뚱한 장치를 가리킬 수 있다. 한계: 컨테이너 root가 같은 major의 다른 블록 장치(호스트 부트 디스크 등)에 접근할 수 있다.
+
+- **정확한 장치 passthrough (`CHIRP_DEV_PASSTHROUGH=dev`, Proxmox VE >= 8.1 필요):** 네이티브 `devN:` 장치 passthrough를 사용한다:
+
+```
+dev0: /dev/disk/by-id/wwn-0x5000c500a1b2c3d4
+```
+
+  - Proxmox가 컨테이너 시작 시마다 실제 `major:minor`를 해석하여 선택된 장치만을 정확히 cgroup에 허용하므로, 와일드카드 규칙이 필요 없다. 같은 블록 major를 공유하는 다른 장치(예: 호스트 부트 디스크)는 컨테이너에서 접근할 수 없다.
+  - 인덱스(`dev0`, `dev1`, ...)는 사용자가 정의한 기존 `devN` 항목(및 `[pve:pending]` 대기 항목)과 충돌하지 않도록 동적으로 배정된다.
+  - **주의 사항:** Proxmox `devN:`에는 `optional` 플래그가 없으므로, 디스크가 고장 나거나 분리되면 컨테이너 설정을 정리하기 전까지 CT 부팅이 거부된다.
+
+- **모드 선택:** `CHIRP_DEV_PASSTHROUGH=legacy`(기본값) | `dev` | `auto`(부팅 복원력을 위해 `legacy`로 처리됨). 잘못된 값을 입력하면 에러를 내고 즉시 중단한다.
+
+- **줄 관리 및 마이그레이션 방식.** 스크립트는 자기 줄을 내용으로 알아본다: `devN: /dev/disk/by-id/...`(사용자 옵션 `,gid=`, `,mode=` 등이 없고 chirp 관리 디스크에 해당하는 항목만 대상), by-id 마운트와 호스트 메트릭 마운트, 관리 대상 디스크 major의 `lxc.cgroup2.devices.allow: b <major>:* <perm>`이다. 사용자가 정의한 `devN` 항목(옵션 유무 불문)과 사용자의 와일드카드 cgroup 규칙은 삭제하지 않고 안전하게 보존한다. 실행할 때마다 main 섹션 어디에 있든 이 줄들을 지우고, 새 집합을 첫 `[snapshot]` / `[pve:pending]` 섹션 앞에 한 번만 쓴다. 스냅샷 섹션, 사용자의 `lxc.*` 줄, 사용자 `devN` 줄과 나머지는 그대로 유지되며, 변경 사항이 없으면 파일을 다시 쓰지 않는다. 이전 버전의 `# chirp-passthrough:start` / `:end` 주석은 더 이상 쓰지 않고, 남아 있는 마커는 지운다. 관리 디스크의 by-id와 블록 major는 호스트의 `/var/lib/chirp-passthrough/<CTID>.disks` 및 `.majors`에 기록된다. CRLF 줄 끝 파일은 변경하지 않고 거부한다.
+  - **백업 복원 및 호스트 이전 시 유의사항:** 새 호스트에 복원된 컨테이너 설정(`/etc/pve/lxc/<CTID>.conf`)에는 호스트 측 상태 파일(`/var/lib/chirp-passthrough/`)이 없습니다. chirp는 사용자 장치의 오삭제를 방지하기 위해 상태 파일이 없으면 기존 `devN:` 항목을 사용자가 추가한 것으로 보고 보존합니다. 과거 `dev` 모드를 쓰던 컨테이너를 복원한 뒤 `legacy` 모드로 전환할 때는, 추후 디스크 분리 시 부팅 거부를 방지하기 위해 컨테이너 설정 파일에서 이전 `devN: /dev/disk/by-id/...` 항목들을 수동으로 삭제해 주는 것이 좋습니다.
 
 ### 호스트 메트릭(메모리·부하·네트워크)
 
