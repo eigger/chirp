@@ -1,0 +1,16 @@
+[Unit]
+Description=chirp Host Collector (Hardware & Metrics Snapshot)
+Documentation=https://github.com/eigger/chirp
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/chirp-collector --daemon
+Restart=always
+RestartSec=5s
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/chirp
+
+[Install]
+WantedBy=multi-user.target

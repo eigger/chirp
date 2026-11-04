@@ -437,3 +437,121 @@ export const ApiKeyResponse = z.object({
 
 /** POST /api/v1/admin/api-key/regenerate (session only): the new key; the old one is dead at once. */
 export const ApiKeyRegenerateResponse = z.object({ key: z.string().startsWith(API_KEY_PREFIX) });
+
+/**
+ * Host Snapshot schema (Phase 2 host collector).
+ * Atomic snapshot produced by the host collector (runs as root on Proxmox host)
+ * and consumed read-only by unprivileged chirp containers or when CHIRP_HOST_SNAPSHOT is configured.
+ */
+export const HostSnapshotNetInterface = z.object({
+  name: z.string(),
+  kind: NetInterfaceKind,
+  operState: z.string().nullable(),
+  up: z.boolean(),
+  ifindex: z.number().nullable(),
+  speedMbps: z.number().nullable(),
+  rxBytes: z.number().nullable(),
+  txBytes: z.number().nullable(),
+  rxErrors: z.number().nullable(),
+  txErrors: z.number().nullable(),
+  rxDropped: z.number().nullable(),
+  txDropped: z.number().nullable(),
+});
+export type HostSnapshotNetInterface = z.infer<typeof HostSnapshotNetInterface>;
+
+export const HostSnapshotSmartDevice = z.object({
+  devicePath: z.string(),
+  type: z.string().nullable(),
+  byIds: z.array(z.string()),
+  wwn: z.string().nullable(),
+  smartctl: z.record(z.string(), z.unknown()),
+});
+export type HostSnapshotSmartDevice = z.infer<typeof HostSnapshotSmartDevice>;
+
+export const HostSnapshotRaplZone = z.object({
+  zone: z.string(),
+  label: z.string(),
+  isPackage: z.boolean(),
+  energyUj: z.number().nullable(),
+  maxEnergyRangeUj: z.number().nullable(),
+});
+export type HostSnapshotRaplZone = z.infer<typeof HostSnapshotRaplZone>;
+
+export const HostSnapshotHwmonSensor = z.object({
+  chip: z.string(),
+  label: z.string(),
+  temp,
+});
+
+export const HostSnapshotHwmonPower = z.object({
+  id: z.string(),
+  chip: z.string(),
+  label: z.string(),
+  watts: z.number().nullable(),
+});
+
+export const HostSnapshotHwmonFan = z.object({
+  id: z.string(),
+  chip: z.string(),
+  label: z.string(),
+  rpm: z.number().nullable(),
+});
+
+export const HostSnapshotHwmonVoltage = z.object({
+  id: z.string(),
+  chip: z.string(),
+  label: z.string(),
+  volts: z.number().nullable(),
+});
+
+export const HostSnapshot = z.object({
+  version: z.literal(1),
+  timestamp: z.number(),
+  host: z
+    .object({
+      hostname: z.string().optional(),
+      kernel: z.string().nullable().optional(),
+      uptimeSeconds: z.number().nullable().optional(),
+    })
+    .optional(),
+  proc: z
+    .object({
+      meminfo: z.string().nullable().optional(),
+      stat: z.string().nullable().optional(),
+      loadavg: z.string().nullable().optional(),
+      cpuinfo: z.string().nullable().optional(),
+    })
+    .optional(),
+  net: z
+    .object({
+      interfaces: z.array(HostSnapshotNetInterface),
+    })
+    .optional(),
+  hwmon: z
+    .object({
+      cpuModel: z.string().nullable().optional(),
+      cpu: z
+        .object({
+          packageTemp: temp,
+          maxTemp: temp,
+          highTemp: temp,
+          critTemp: temp,
+          cores: z.array(CpuCore),
+          source: z.enum(["coretemp", "k10temp", "zenpower", "cpu_thermal", "thermal_zone"]).nullable(),
+        })
+        .optional(),
+      sensors: z.array(HostSnapshotHwmonSensor).optional(),
+      rapl: z.array(HostSnapshotRaplZone).optional(),
+      power: z.array(HostSnapshotHwmonPower).optional(),
+      fans: z.array(HostSnapshotHwmonFan).optional(),
+      voltages: z.array(HostSnapshotHwmonVoltage).optional(),
+    })
+    .optional(),
+  smart: z
+    .object({
+      collectedAt: z.number(),
+      devices: z.array(HostSnapshotSmartDevice),
+    })
+    .optional(),
+});
+export type HostSnapshot = z.infer<typeof HostSnapshot>;

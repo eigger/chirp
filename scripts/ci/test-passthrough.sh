@@ -549,6 +549,18 @@ chirp_apply_conf "$SPECIAL_CONF" "$TMP/special.none"; eq "special chars by-id re
 eq "special chars by-id removed" "0" "$(grep -c '^dev[0-9]: /dev/disk/by-id/' "$SPECIAL_CONF")"
 eq "special chars disks state cleared" "" "$(cat "$SPECIAL_CONF.chirp-disks" 2>/dev/null || true)"
 
+# 14. unprivileged container snapshot setup
+UNPRIV_CONF="$TMP/unpriv.conf"
+cat >"$UNPRIV_CONF" <<'EOF'
+arch: amd64
+unprivileged: 1
+EOF
+chirp_setup_unprivileged_snapshot 999 "$UNPRIV_CONF"
+eq "unprivileged mount added" "1" "$(grep -c 'lxc.mount.entry: /run/chirp run/chirp' "$UNPRIV_CONF")"
+# Idempotent: running again does not duplicate the mount line
+chirp_setup_unprivileged_snapshot 999 "$UNPRIV_CONF"
+eq "unprivileged mount not duplicated" "1" "$(grep -c 'lxc.mount.entry: /run/chirp run/chirp' "$UNPRIV_CONF")"
+
 echo
 echo "passed=${PASS} failed=${FAILS}"
 [[ "$FAILS" -eq 0 ]]

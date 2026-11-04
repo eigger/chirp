@@ -1,6 +1,6 @@
 # Plan: reduce the privileged-LXC attack surface without losing features
 
-Status: in progress. Phase 1 fully implemented (1.1 exact devN: passthrough with PVE >= 8.1 detection and legacy fallback, 1.2 setup token, 1.3 built-in TLS, 1.4 docs). Phase 2 collector design pending. Audience: the agent implementing it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
+Status: completed. Phase 1 (1.1 exact devN: passthrough with PVE >= 8.1 detection and legacy fallback, 1.2 setup token, 1.3 built-in TLS, 1.4 docs) and Phase 2 (host collector, snapshot schema, server ingestion, unprivileged LXC support) fully implemented. Audience: the agent maintaining it. Read `CLAUDE.md` first (schema-first, never wake a disk, English only, no new native dependencies).
 
 ## Problem
 
@@ -54,18 +54,110 @@ Update `docs/PROJECT.md` (security section), `docs/deploy.md` and `docs/ko/deplo
 
 ## Phase 2 - remove the need for privilege (fixes #1 and #5)
 
-Design first; implement only after the Phase 1 PRs land and the design is approved by the maintainer.
+### 2.1 Overview & Architecture
 
-Idea: a **host-side read-only collector** feeds an unprivileged chirp container, so the container needs no device nodes, no cgroup rules, no `/host/sys`.
+An unprivileged chirp container (`unprivileged: 1`) runs with no host device nodes (`devN:` or `/dev/sd*`), no `lxc.cgroup2.devices.allow` rules, and no `/host/sys` bind-mount. Instead, a host-side collector running as root gathers read-only snapshots and writes them atomically to `/run/chirp/host.json`. The host directory `/run/chirp` is bind-mounted read-only into the container.
 
-- Host component: a small script plus a systemd service/timer in `proxmox/host/` (no network listener, no dependencies beyond what Proxmox ships; shell + `smartctl -j`, or a prebuilt single file if a runtime is unavoidable). It runs as root on the host and writes a snapshot atomically (0644, tmp + rename) to `/run/chirp/host.json`:
-  - SMART per disk via `smartctl -n standby -j` (same never-wake-a-disk rules as `smartctl.ts`; device discovery with `--scan`, no `--scan-open`), including the `wwn`/by-id data needed by `diskIdentity.ts`.
-  - host `/proc/meminfo`, `/proc/stat`, `/proc/loadavg` content and per-interface `/sys/class/net` data (operstate, speed, counters).
-  - hwmon/fans/voltages and RAPL if not already readable from inside the CT.
-- Container side: bind-mount `/run/chirp` read-only; the container is created `unprivileged: 1`, with no `devN`, no device cgroup rules and no `/host/sys`. Add a snapshot-file reader beside `hostPaths.ts` and make `smartctl`/`netdev`/`hostMetrics` prefer it when `CHIRP_HOST_SNAPSHOT` is set; fall back to current behaviour otherwise (Docker and tarball users unaffected). The API contract in `schema.ts` does not change; values read from the snapshot report `scope: "host"`.
-- The snapshot is untrusted input to the server: validate with a zod schema, bound its size, ignore stale files (age limit), and fail each section in isolation like the existing collectors.
-- The collector is a new host-root trust boundary: keep it minimal, validate nothing it does not need, and document that it is the only code chirp runs as host root.
-- Open questions for the maintainer: scripting language for the collector; update path (extend `proxmox/` update script vs separate package); migration of existing privileged installs (offer `chirp-passthrough.sh --unprivileged`, requires CT re-creation because `unprivileged` cannot be flipped in place); whether `POST /refresh` should trigger the collector (needs a socket or a trigger file; default: no, scheduler cadence only).
+```
++-------------------------------------------------------------------+
+| Proxmox Host (root)                                               |
+|                                                                   |
+| [ chirp-collector (Python 3, stdlib only) ]                       |
+|   - smartctl --scan & smartctl -a -j -n standby (never wake disk) |
+|   - /proc/meminfo, /proc/stat, /proc/loadavg                      |
+|   - /sys/class/net/* & /sys/class/hwmon/*                         |
+|      |                                                            |
+|      v (atomic tmp + rename, mode 0644)                           |
+|   /run/chirp/host.json                                            |
++------------------------------+------------------------------------+
+                               | (bind-mount :ro)
++------------------------------v------------------------------------+
+| Unprivileged LXC (chirp server)                                   |
+|                                                                   |
+|   /run/chirp/host.json (CHIRP_HOST_SNAPSHOT)                      |
+|      |                                                            |
+|      v (HostSnapshot zod validation, size & staleness checks)     |
+|   [ hostSnapshot.ts ]                                             |
+|      |                                                            |
+|      +---> smartctl.ts (disk metrics & health)                    |
+|      +---> hostMetrics.ts (mem, load, net, power, hwmon)          |
+|      +---> scheduler.ts (serves snapshot with scope: "host")      |
++-------------------------------------------------------------------+
+```
+
+### 2.2 Host Collector Design (`proxmox/host/chirp-collector.py`)
+
+- **Language & Runtime:** Python 3 using standard library only (`json`, `subprocess`, `os`, `sys`, `time`, `pathlib`, `glob`). Proxmox VE (Debian) ships with Python 3 out of the box. No external dependencies, no `pip`, no `jq` required.
+- **Privilege:** Runs as host `root` via systemd. No network listener, no interactive inputs, strictly read-only hardware inspection.
+- **Collection Cadence:**
+  - Sensor & host metrics (procfs, netdev, hwmon, rapl): sampled every 10 seconds.
+  - SMART readouts: sampled every 300 seconds (5 minutes) using `smartctl -a -j -n standby`. Uses `smartctl --scan` for discovery (never `--scan-open`). Standby exit code 2 is preserved so disks in standby are never woken.
+- **Execution Modes:**
+  - Daemon mode: `chirp-collector.py --daemon` (runs loop, handles SIGTERM/SIGINT cleanly, writes snapshot every 10s with 300s SMART intervals).
+  - One-shot mode: `chirp-collector.py --once [--smart]` (for debugging or cron/systemd timer).
+- **Atomic Output:**
+  - Directory: `/run/chirp` (created mode 0755 if missing).
+  - Writes to `/run/chirp/host.json.tmp.<pid>`, flushes, and renames atomically with `os.replace` to `/run/chirp/host.json` (mode 0644).
+
+### 2.3 Snapshot Schema (`HostSnapshot`)
+
+The snapshot is treated as untrusted input by the container. Defined in shared schema:
+- `version`: integer schema version (starts at 1).
+- `timestamp`: monotonic epoch milliseconds when the snapshot was written.
+- `host`: `{ hostname: string, kernel: string, uptimeSeconds: number }`.
+- `proc`:
+  - `meminfo`: raw string of `/proc/meminfo` (parsed by existing `parseMeminfo`).
+  - `stat`: raw string of `/proc/stat` (parsed by existing `parseProcStat`).
+  - `loadavg`: raw string of `/proc/loadavg` (parsed by existing `parseLoadavg`).
+- `net`: list of interface objects:
+  - `name`, `operstate`, `speed`, `type`, `statistics` (`rx_bytes`, `tx_bytes`, `rx_errors`, `tx_errors`, `rx_dropped`, `tx_dropped`).
+- `hwmon`:
+  - `cpuModel`: string or null.
+  - `chips`: list of `{ name: string, path: string, temps: [...], fans: [...], voltages: [...], power: [...] }`.
+  - `rapl`: list of `{ name: string, energyUj: number, maxEnergyRangeUj: number }`.
+- `smart`:
+  - `collectedAt`: timestamp ms of the last SMART run.
+  - `devices`: list of `{ devicePath: string, type: string | null, byIds: string[], wwn: string | null, smartctl: Record<string, unknown> }`.
+
+### 2.4 Container-Side Ingestion (`hostSnapshot.ts`)
+
+- **Configuration:** `CHIRP_HOST_SNAPSHOT` points to snapshot file path (default: `/run/chirp/host.json` if present; fallback to direct reading if absent).
+- **Validation & Security Guards:**
+  - Max file size bound (e.g. 10 MB limit) to prevent memory exhaustion attacks.
+  - Staleness limit: snapshot older than `CHIRP_SNAPSHOT_MAX_AGE_SEC` (default 60s) is flagged as stale; if stale, a warning is logged and metrics indicate degradation.
+  - Section isolation: invalid or missing sections (`proc`, `net`, `hwmon`, `smart`) fail independently without crashing the server.
+- **Metric Scoping:** All metrics derived from the snapshot report `scope: "host"`.
+- **Standby & Health:** Disk health evaluation remains strictly in `health.ts` using data parsed through `parseSmartctl()`.
+
+### 2.5 Proxmox Integration & Packaging
+
+- `proxmox/host/chirp-collector.py`: the host collection script.
+- `proxmox/host/chirp-collector.service`: systemd unit (`Type=simple`, `ExecStart=/usr/local/bin/chirp-collector --daemon`, `Restart=always`).
+- `proxmox/ct/chirp.sh`:
+  - Introduces unprivileged container option: `var_unprivileged=1`.
+  - Configures container mount entry: `mp0: /run/chirp,mp=/run/chirp,ro=1` (or `lxc.mount.entry: /run/chirp run/chirp none bind,ro,create=dir 0 0`).
+  - Automatically installs/enables host collector service if not already present.
+- `proxmox/install/update.sh`:
+  - Updates container server as usual.
+  - Provides a check/notice if host collector version is out of sync.
+
+### 2.6 Implementation Tasks & PR Breakdown
+
+1. **PR 2.1 - Shared Schema & Host Snapshot Reader:**
+   - Define `HostSnapshot` zod schema in `packages/shared/src/schema.ts` (or snapshot schema module).
+   - Implement `apps/server/src/hostSnapshot.ts` with size bound, staleness check, error isolation.
+   - Wire `CHIRP_HOST_SNAPSHOT` config in `apps/server/src/config.ts`.
+   - Comprehensive tests for valid, malformed, oversize, and stale snapshots.
+2. **PR 2.2 - Server Collector Integration:**
+   - Adapt `scheduler.ts`, `smartctl.ts`, `hostMetrics.ts`, and `hwmon.ts` to source data from `hostSnapshot` when available.
+   - Maintain 100% backward compatibility with direct read mode (Docker / bare metal).
+3. **PR 2.3 - Host Collector Script & Systemd Unit:**
+   - Implement `proxmox/host/chirp-collector.py` (Python 3 stdlib, atomic write, safe smartctl execution).
+   - Unit/integration tests for the collector script against mock sysfs/procfs and mock smartctl.
+   - Add `chirp-collector.service`.
+4. **PR 2.4 - Proxmox Scripts & Unprivileged CT Support:**
+   - Update `proxmox/ct/chirp.sh` and `proxmox/install/chirp-passthrough.sh` to support unprivileged mode with `/run/chirp` mount.
+   - Update documentation (`docs/deploy.md`, `docs/ko/deploy.md`, `docs/PROJECT.md`).
 
 ## Verification
 

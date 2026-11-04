@@ -849,6 +849,42 @@ chirp_check_host_mounts() {
   fi
 }
 
+chirp_setup_unprivileged_snapshot() {
+  local ctid="$1" conf="$2"
+  _cp_msg "CT ${ctid} is unprivileged: configuring host-side snapshot via /run/chirp (no devN or cgroup rules needed)."
+  install -d -m 0755 /run/chirp 2>/dev/null || true
+
+  # Add /run/chirp bind mount if not present
+  if ! grep -q 'run/chirp' "$conf"; then
+    _cp_msg "Adding /run/chirp read-only mount to ${conf}..."
+    printf '\nlxc.mount.entry: /run/chirp run/chirp none bind,ro,create=dir 0 0\n' >> "$conf"
+  fi
+
+  # Install chirp-collector on host if missing
+  local collector_bin="/usr/local/bin/chirp-collector"
+  local collector_svc="/etc/systemd/system/chirp-collector.service"
+  local raw_base="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/eigger/chirp/master}"
+
+  if [[ ! -f "$collector_bin" ]]; then
+    _cp_msg "Installing ${collector_bin}..."
+    curl -fsSL "${raw_base}/proxmox/host/chirp-collector.py" -o "$collector_bin" 2>/dev/null || true
+    chmod 0755 "$collector_bin" 2>/dev/null || true
+  fi
+
+  if [[ ! -f "$collector_svc" ]]; then
+    _cp_msg "Installing ${collector_svc}..."
+    curl -fsSL "${raw_base}/proxmox/host/chirp-collector.service" -o "$collector_svc" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now chirp-collector.service 2>/dev/null || true
+  fi
+
+  _cp_msg "Unprivileged CT ${ctid} configured successfully with /run/chirp snapshot mount."
+  return 0
+}
+
 chirp_passthrough_run() {
   local ctid="${1:-}" conf detected selection="" sel_tsv listing lsblk_text blockfile ip devices
   if [[ -z "$ctid" || ! "$ctid" =~ ^[0-9]+$ ]]; then
@@ -876,8 +912,8 @@ chirp_passthrough_run() {
     return 1
   fi
   if grep -q '^unprivileged: 1' "$conf"; then
-    _cp_err "CT ${ctid} is unprivileged. Disk passthrough needs a privileged CT (var_unprivileged=0)."
-    return 1
+    chirp_setup_unprivileged_snapshot "$ctid" "$conf" || return 1
+    return 0
   fi
   if command -v ha-manager >/dev/null 2>&1 && ha-manager status 2>/dev/null | grep -q "ct:${ctid}\b"; then
     _cp_warn "CT ${ctid} is managed by HA. The disks are tied to this node, so migration will fail."

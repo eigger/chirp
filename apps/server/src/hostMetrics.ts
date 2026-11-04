@@ -1,7 +1,8 @@
-import type { Fan, Load, MetricScope, Memory, Network, Power, PowerSource, Voltage } from "@chirp/shared";
-import { readProc, type HostRoots } from "./hostPaths.js";
+import type { Fan, Load, MetricScope, Memory, Network, Power, PowerSource, Voltage, HostSnapshot } from "@chirp/shared";
+import { readProc, type HostRoots, type Scoped } from "./hostPaths.js";
+import { HostSnapshotReader } from "./hostSnapshot.js";
 import { uniqueIds } from "./ids.js";
-import { MAX_GLOB_LENGTH, MAX_GLOBS, NetMatcher, readInterfaces, type NetFilter } from "./netdev.js";
+import { MAX_GLOB_LENGTH, MAX_GLOBS, NetMatcher, readInterfaces, type NetFilter, type RawInterface } from "./netdev.js";
 import { CPU_POWER_CHIPS, energyWatts, readHwmonExtras, readRaplZones, type HwmonPower } from "./power.js";
 import { counterRate, cpuUsagePercent, parseLoadavg, parseMeminfo, parseProcStat, type CpuTimes } from "./procfs.js";
 
@@ -19,6 +20,8 @@ export interface HostMetricsOptions {
   /** sysfs root for hwmon/powercap (CHIRP_SYSFS_ROOT): host sensors are visible from a container too. */
   sysfsRoot: string;
   netFilter: NetFilter;
+  /** Optional reader for host collector snapshots (unprivileged containers). */
+  snapshotReader?: HostSnapshotReader;
   warn?: (msg: string) => void;
 }
 
@@ -76,12 +79,25 @@ export class HostMetrics {
   }
 
   private read(nowMs: number): HostSample {
-    const extras = this.guard("hwmon", () => readHwmonExtras(this.opts.sysfsRoot), { power: [], fans: [], voltages: [] });
+    const snap = this.opts.snapshotReader?.read().snapshot;
+    const extras = this.guard(
+      "hwmon",
+      () => {
+        if (snap?.hwmon) {
+          const fromSnap = HostSnapshotReader.toHwmonExtras(snap.hwmon);
+          if (fromSnap.power.length || fromSnap.fans.length || fromSnap.voltages.length) {
+            return fromSnap;
+          }
+        }
+        return readHwmonExtras(this.opts.sysfsRoot);
+      },
+      { power: [], fans: [], voltages: [] },
+    );
     return {
-      memory: this.guard("memory", () => this.memory(), null),
-      load: this.guard("load", () => this.load(), null),
-      network: this.guard("network", () => this.network(nowMs), null),
-      power: this.guard("power", () => this.power(nowMs, extras.power), null),
+      memory: this.guard("memory", () => this.memory(snap), null),
+      load: this.guard("load", () => this.load(snap), null),
+      network: this.guard("network", () => this.network(nowMs, snap), null),
+      power: this.guard("power", () => this.power(nowMs, extras.power, snap), null),
       fans: extras.fans,
       voltages: extras.voltages,
     };
@@ -102,8 +118,13 @@ export class HostMetrics {
     }
   }
 
-  private memory(): Memory | null {
-    const r = readProc(this.opts.roots, "meminfo", parseMeminfo);
+  private memory(snap?: HostSnapshot | null): Memory | null {
+    let r: Scoped<NonNullable<ReturnType<typeof parseMeminfo>>> | null = null;
+    if (snap?.proc?.meminfo) {
+      const parsed = parseMeminfo(snap.proc.meminfo);
+      if (parsed) r = { value: parsed, scope: "host" };
+    }
+    if (!r) r = readProc(this.opts.roots, "meminfo", parseMeminfo);
     if (!r) return null;
     const m = r.value;
     const used = m.availableBytes === null ? null : m.totalBytes - m.availableBytes;
@@ -121,9 +142,19 @@ export class HostMetrics {
     };
   }
 
-  private load(): Load | null {
-    const avg = readProc(this.opts.roots, "loadavg", parseLoadavg);
-    const stat = readProc(this.opts.roots, "stat", parseProcStat);
+  private load(snap?: HostSnapshot | null): Load | null {
+    let avg: Scoped<NonNullable<ReturnType<typeof parseLoadavg>>> | null = null;
+    let stat: Scoped<NonNullable<ReturnType<typeof parseProcStat>>> | null = null;
+    if (snap?.proc?.loadavg) {
+      const parsed = parseLoadavg(snap.proc.loadavg);
+      if (parsed) avg = { value: parsed, scope: "host" };
+    }
+    if (snap?.proc?.stat) {
+      const parsed = parseProcStat(snap.proc.stat);
+      if (parsed) stat = { value: parsed, scope: "host" };
+    }
+    if (!avg) avg = readProc(this.opts.roots, "loadavg", parseLoadavg);
+    if (!stat) stat = readProc(this.opts.roots, "stat", parseProcStat);
     if (!avg && !stat) {
       this.prevStat = null;
       return null;
@@ -147,9 +178,15 @@ export class HostMetrics {
     };
   }
 
-  private network(nowMs: number): Network | null {
-    // Name-only pre-filter: hidden guest devices (tap*, veth*, fw*) are never read.
-    const r = readInterfaces(this.opts.roots, (name) => this.matcher.byName(name) !== false);
+  private network(nowMs: number, snap?: HostSnapshot | null): Network | null {
+    let r: Scoped<RawInterface[]> | null = null;
+    if (snap?.net?.interfaces) {
+      r = { value: HostSnapshotReader.toRawInterfaces(snap.net.interfaces), scope: "host" };
+    }
+    if (!r) {
+      // Name-only pre-filter: hidden guest devices (tap*, veth*, fw*) are never read.
+      r = readInterfaces(this.opts.roots, (name) => this.matcher.byName(name) !== false);
+    }
     if (!r) {
       this.prevNet = null;
       return null;
@@ -185,8 +222,9 @@ export class HostMetrics {
     return { scope: r.scope, interfaces };
   }
 
-  private power(nowMs: number, hwmon: HwmonPower[]): Power | null {
-    const zones = readRaplZones(this.opts.sysfsRoot).filter((z) => z.energyUj !== null);
+  private power(nowMs: number, hwmon: HwmonPower[], snap?: HostSnapshot | null): Power | null {
+    const rawZones = snap?.hwmon?.rapl ? HostSnapshotReader.toRaplZones(snap.hwmon) : readRaplZones(this.opts.sysfsRoot);
+    const zones = rawZones.filter((z) => z.energyUj !== null);
     const prev = this.prevRapl;
     const dt = prev ? (nowMs - prev.at) / 1000 : 0;
     const raplSources = zones.map((z) => ({

@@ -6,9 +6,11 @@ import { DiskIdentity, provisionalId } from "./diskIdentity.js";
 import { History } from "./history.js";
 import { detectContainer } from "./hostPaths.js";
 import { HostMetrics, type HostSample } from "./hostMetrics.js";
+import { HostSnapshotReader } from "./hostSnapshot.js";
 import { readCpuModel, readSensors, type SensorReadout } from "./hwmon.js";
 import {
   discoverDevices,
+  parseSmartctl,
   readDisk,
   SmartctlError,
   unreadDisk,
@@ -48,18 +50,55 @@ export interface CollectorOptions {
 }
 
 export function defaultDeps(config: Config, warn: (msg: string) => void = () => {}): CollectorDeps {
+  const snapshotReader = config.hostSnapshot
+    ? new HostSnapshotReader({
+        path: config.hostSnapshot,
+        maxAgeSec: config.snapshotMaxAgeSec,
+        warn,
+      })
+    : undefined;
+
   const host = new HostMetrics({
     roots: { hostProc: config.hostProc, hostSys: config.hostSys, proc: "/proc", sys: "/sys", inContainer: detectContainer() },
     sysfsRoot: config.sysfsRoot,
     netFilter: { include: config.netInclude, exclude: config.netExclude },
+    snapshotReader,
     warn,
   });
   return {
     sampleHost: (monotonicMs) => host.sample(monotonicMs),
-    readSensors: () => readSensors(config.sysfsRoot),
-    readCpuModel: () => readCpuModel(),
-    discoverDevices: () => discoverDevices(config),
-    readDisk: (d) => readDisk(config, d.path, d.type),
+    readSensors: () => {
+      const snap = snapshotReader?.read().snapshot;
+      const readout = snap ? HostSnapshotReader.toSensorReadout(snap.hwmon) : null;
+      return readout ?? readSensors(config.sysfsRoot);
+    },
+    readCpuModel: () => {
+      const snap = snapshotReader?.read().snapshot;
+      return snap?.hwmon?.cpuModel ?? readCpuModel();
+    },
+    discoverDevices: async () => {
+      const snap = snapshotReader?.read().snapshot;
+      if (snap?.smart?.devices && snap.smart.devices.length > 0) {
+        return snap.smart.devices.map((d) => ({
+          path: d.devicePath,
+          type: d.type ?? undefined,
+        }));
+      }
+      return discoverDevices(config);
+    },
+    readDisk: async (d) => {
+      const snap = snapshotReader?.read().snapshot;
+      if (snap?.smart?.devices) {
+        const match = snap.smart.devices.find((x) => x.devicePath === d.path);
+        if (match && match.smartctl) {
+          return parseSmartctl(match.smartctl, {
+            devicePath: d.path,
+            tempWarn: config.tempWarn,
+          });
+        }
+      }
+      return readDisk(config, d.path, d.type);
+    },
     now: () => new Date(),
     identity: new DiskIdentity({
       cacheFile: join(config.dataDir, "disk-ids.json"),

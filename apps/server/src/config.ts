@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -49,6 +50,10 @@ export interface Config {
   hostProc: string;
   /** Host /sys for network interfaces (CHIRP_HOST_SYS; default /host/sys if it exists, else /sys). */
   hostSys: string;
+  /** Host snapshot path for unprivileged containers (CHIRP_HOST_SNAPSHOT; default /run/chirp/host.json if present). */
+  hostSnapshot: string | null;
+  /** Max acceptable age of a host snapshot before it is flagged stale (CHIRP_SNAPSHOT_MAX_AGE_SEC, default 60). */
+  snapshotMaxAgeSec: number;
   /** Network interface globs always shown (CHIRP_NET_INCLUDE). */
   netInclude: string[];
   /** Network interface globs always hidden, on top of the defaults (CHIRP_NET_EXCLUDE). */
@@ -237,6 +242,12 @@ function deviceTypeEntries(value: string | undefined): string[] {
   return out;
 }
 
+function defaultHostSnapshot(envValue: string | undefined): string | null {
+  const v = envValue?.trim();
+  if (v) return v;
+  return existsSync("/run/chirp/host.json") ? "/run/chirp/host.json" : null;
+}
+
 export function defaultWebDir(): string {
   // apps/server/{src,dist} -> apps/web/dist
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
@@ -288,6 +299,8 @@ export function loadConfig(env: Env = process.env): Config {
     sysfsRoot: env.CHIRP_SYSFS_ROOT?.trim() || "/sys",
     hostProc: defaultHostRoot(env.CHIRP_HOST_PROC, "/host/proc", "/proc"),
     hostSys: defaultHostRoot(env.CHIRP_HOST_SYS, "/host/sys", "/sys"),
+    hostSnapshot: defaultHostSnapshot(env.CHIRP_HOST_SNAPSHOT),
+    snapshotMaxAgeSec: num(env.CHIRP_SNAPSHOT_MAX_AGE_SEC, 60, 5),
     netInclude: list(env.CHIRP_NET_INCLUDE),
     netExclude: list(env.CHIRP_NET_EXCLUDE),
     tempWarn: {

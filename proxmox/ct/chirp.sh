@@ -25,7 +25,9 @@ unset _chirp_build_func
 # Non-interactive disk selection: prefix with CHIRP_DISKS=all|none|<by-id,...>
 #
 # Notes:
-#  - root in a privileged LXC is effectively host root. Use it on trusted networks only.
+#  - By default, chirp creates an unprivileged container (var_unprivileged=1) which
+#    reads hardware & SMART snapshots via the host collector (/run/chirp).
+#  - For legacy privileged direct passthrough, set var_unprivileged=0.
 #  - Do not use it for CTs managed by cluster HA (the disks are tied to one node).
 #  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
 #
@@ -41,7 +43,7 @@ var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_arm64="${var_arm64:-no}"
-var_unprivileged="${var_unprivileged:-0}"
+var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
 variables
