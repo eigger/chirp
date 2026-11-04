@@ -1,6 +1,7 @@
 import { AdminExistsError } from "./admin.js";
 import type { Auth } from "./auth.js";
 import type { Config } from "./config.js";
+import { DEFAULT_ENV_FILE, removeEnvVar } from "./envFile.js";
 import { cliPath } from "./keyNotice.js";
 
 export interface Notice {
@@ -37,7 +38,8 @@ export function trustProxyNotice(config: Pick<Config, "trustProxy" | "host">): N
 }
 
 export async function bootstrapAuth(
-  config: Pick<Config, "adminUser" | "adminPassword"> & Partial<Pick<Config, "trustProxy" | "host" | "setupToken">>,
+  config: Pick<Config, "adminUser" | "adminPassword"> &
+    Partial<Pick<Config, "trustProxy" | "host" | "setupToken" | "envFile">>,
   auth: Auth,
 ): Promise<Notice[]> {
   const out: Notice[] = [];
@@ -50,6 +52,17 @@ export async function bootstrapAuth(
       try {
         await auth.admin.create(config.adminUser, config.adminPassword);
         out.push({ level: "info", msg: `Created admin account "${config.adminUser}" from CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD` });
+        if (config.setupToken) {
+          config.setupToken = null;
+          const file = config.envFile ?? DEFAULT_ENV_FILE;
+          const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+          if (res.error) {
+            out.push({
+              level: "warn",
+              msg: `Could not remove CHIRP_SETUP_TOKEN from ${file}: ${res.error.message}`,
+            });
+          }
+        }
       } catch (err) {
         if (!(err instanceof AdminExistsError)) throw err;
       }

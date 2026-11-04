@@ -124,7 +124,7 @@ export function BootstrapForm({
       onDone(me.username);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) return onTaken();
-      if (err instanceof ApiError && (err.status === 403 || err.code === "unauthorized")) {
+      if (err instanceof ApiError && err.code === "unauthorized") {
         return setError(t("bootstrap.invalidToken"));
       }
       // bad_request: a field broke the shared schema. Name the username only when it is the culprit.

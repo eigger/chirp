@@ -69,7 +69,7 @@ Requires Node.js 24 and `smartmontools`. The `.sha256` asset verifies download i
 
 ## First run
 
-1. Open `http://<chirp address>/`. While no admin account exists, the dashboard shows **Create the admin account**: pick a username, enter the password twice (at least 10 characters), and provide the one-time setup token (printed during Proxmox installation). You are signed in right away.
+1. Open `http://<chirp address>/`. While no admin account exists, the dashboard shows **Create the admin account**: pick a username, enter the password twice (at least 10 characters), and provide the one-time setup token (retrievable with `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env` on Proxmox). You are signed in right away.
    **Do this immediately after installing:** when no setup token is set, *whoever opens the dashboard first* can create the admin. (Docker/automation: set `CHIRP_ADMIN_USER` and `CHIRP_ADMIN_PASSWORD` instead.)
 2. Go to **Settings -> API key**, click **Copy** and paste the key into Home Assistant (see below).
 3. Forgot the password? Proxmox (on the host): `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`; Docker: `docker exec chirp node apps/server/dist/cli.js admin reset-password`. It prints a new random password and signs out every session. (The CLI reads `/etc/chirp/chirp.env` when present; elsewhere pass `--env-file <path>` if your settings live in a file.)

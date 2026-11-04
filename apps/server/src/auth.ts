@@ -239,8 +239,6 @@ export function registerAuthRoutes(
     const body = BootstrapAdminRequest.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, bodyError(body.error));
     if (auth.admin.exists()) return sendError(reply, 409, "conflict");
-    const problem = passwordProblem(body.data.password, body.data.username);
-    if (problem) return weakPassword(reply, problem);
     if (config.setupToken) {
       const decision = auth.limiter.check(request.ip, null);
       if (!decision.ok) return rateLimited(reply, decision.waitMs);
@@ -252,6 +250,8 @@ export function registerAuthRoutes(
       }
       auth.limiter.succeed(attempt);
     }
+    const problem = passwordProblem(body.data.password, body.data.username);
+    if (problem) return weakPassword(reply, problem);
     const created = await bootstrapLock(async () => {
       if (auth.admin.exists()) return false;
       try {
@@ -266,7 +266,10 @@ export function registerAuthRoutes(
     if (config.setupToken) {
       config.setupToken = null;
       const file = config.envFile ?? DEFAULT_ENV_FILE;
-      removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+      const res = removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+      if (res.error) {
+        request.log.warn(`Could not remove CHIRP_SETUP_TOKEN from ${file}: ${res.error.message}`);
+      }
     }
     request.log.info(`Admin account "${body.data.username}" created from the dashboard (${request.ip})`);
     return reply.code(201).send(startSession(request, reply));

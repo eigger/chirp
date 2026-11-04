@@ -36,7 +36,16 @@ const collector = new Collector(defaultDeps(config, (m) => warn(m)), {
   concurrency: 2,
 });
 
-const app = await buildApp({ config, collector, auth, logger: true });
+let app;
+try {
+  app = await buildApp({ config, collector, auth, logger: true });
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`chirp: invalid configuration: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 warn = (m) => app.log.warn(m);
 
 if (config.rejected.length) {

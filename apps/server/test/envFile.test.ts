@@ -99,7 +99,7 @@ describe("CLI env file", () => {
       ].join("\n");
       writeFileSync(file, content, { mode: 0o600 });
 
-      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toBe(true);
+      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toEqual({ removed: true });
       const after = readFileSync(file, "utf8");
       expect(after).not.toContain("CHIRP_SETUP_TOKEN");
       expect(after).toContain("CHIRP_PORT=80");
@@ -107,9 +107,9 @@ describe("CLI env file", () => {
       expect(statSync(file).mode & 0o777).toBe(0o600);
 
       // Second removal returns false because key is already gone
-      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toBe(false);
+      expect(removeEnvVar(file, "CHIRP_SETUP_TOKEN")).toEqual({ removed: false });
       // Non-existent file returns false
-      expect(removeEnvVar(join(dir, "missing.env"), "FOO")).toBe(false);
+      expect(removeEnvVar(join(dir, "missing.env"), "FOO")).toEqual({ removed: false });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -630,6 +630,18 @@ describe("setup token for first-run registration", () => {
     expect(auth.admin.exists()).toBe(false);
   });
 
+  it("validates setup token before evaluating password", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { username: USER, password: "short", passwordConfirm: "short", setupToken: "wrong" },
+    });
+    // Returns 403 unauthorized, not 400 weak_password
+    expect(res.statusCode).toBe(403);
+  });
+
   it("accepts correct setup token, creates admin, and cleans up chirp.env", async () => {
     const envFile = join(dir, "chirp.env");
     writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o600 });
@@ -690,6 +702,22 @@ describe("setup token for first-run registration", () => {
     const withToken = await bootstrapAuth({ adminUser: null, adminPassword: null, setupToken: TOKEN }, auth);
     expect(withToken.some((n) => n.msg.includes("using the setup token from installation"))).toBe(true);
     expect(withToken.some((n) => n.msg.includes(TOKEN))).toBe(false); // never logged
+  });
+
+  it("removes setup token when CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD seeds the admin", async () => {
+    const envFile = join(dir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o600 });
+    const cfg = {
+      adminUser: "seeded",
+      adminPassword: "ValidPassword123!",
+      setupToken: TOKEN as string | null,
+      envFile,
+    };
+    await bootstrapAuth(cfg, auth);
+    expect(auth.admin.exists()).toBe(true);
+    expect(cfg.setupToken).toBeNull();
+    const envAfter = readFileSync(envFile, "utf8");
+    expect(envAfter).not.toContain("CHIRP_SETUP_TOKEN");
   });
 });
 

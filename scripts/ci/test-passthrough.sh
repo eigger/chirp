@@ -308,7 +308,7 @@ FAKE_BOOTSTRAP='{"needsBootstrap":true}'
 eq "state: needs bootstrap" "true" "$(chirp_bootstrap_state 10.0.0.5)"
 REPORT="$(chirp_account_report 100 10.0.0.5)"
 eq "tells to create the admin now" "1" "$(grep -c 'Open http://10.0.0.5/ now and create the admin account' <<<"$REPORT")"
-eq "warns about the open window" "1" "$(grep -c 'anyone who can reach this address' <<<"$REPORT")"
+eq "shows setup token retrieval hint" "1" "$(grep -c 'pct exec 100 -- grep -E .*CHIRP_SETUP_TOKEN' <<<"$REPORT")"
 eq "points HA at Settings -> API key" "1" "$(grep -c 'Settings -> API key -> Copy' <<<"$REPORT")"
 eq "prints no key" "0" "$(grep -c 'chp_' <<<"$REPORT")"
 FAKE_BOOTSTRAP='{"needsBootstrap":false}'

@@ -148,9 +148,9 @@ done
 kill "$PID" 2>/dev/null || true
 PID=""
 
-echo "[smoke] TLS server on https://127.0.0.1:${PORT}"
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -days 1 -subj "/CN=localhost" 2>/dev/null
 PORT_TLS=$((PORT + 1))
+echo "[smoke] TLS server on https://127.0.0.1:${PORT_TLS}"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -days 1 -subj "/CN=localhost" 2>/dev/null
 CHIRP_PORT="$PORT_TLS" CHIRP_TLS_CERT="$WORK/cert.pem" CHIRP_TLS_KEY="$WORK/key.pem" node "$APP/apps/server/dist/index.js" >"$WORK/tls-server.log" 2>&1 &
 PID="$!"
 

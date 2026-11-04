@@ -1,3 +1,5 @@
+import http from "node:http";
+import https from "node:https";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadConfig, type Config } from "./config.js";
@@ -22,11 +24,19 @@ export async function main(): Promise<number> {
   try {
     const config = loadConfig();
     const url = healthUrl(config);
-    if (url.startsWith("https://") && process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-    }
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    return res.ok ? 0 : 1;
+    return await new Promise<number>((resolve) => {
+      const isHttps = url.startsWith("https:");
+      const client = isHttps ? https : http;
+      const options = isHttps ? { rejectUnauthorized: false, timeout: 4000 } : { timeout: 4000 };
+      const req = client.get(url, options, (res) => {
+        resolve(res.statusCode && res.statusCode >= 200 && res.statusCode < 300 ? 0 : 1);
+      });
+      req.on("error", () => resolve(1));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(1);
+      });
+    });
   } catch {
     return 1;
   }

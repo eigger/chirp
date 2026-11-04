@@ -440,11 +440,28 @@ chirp_wait_network() {
   return 1
 }
 
+chirp_detect_scheme() {
+  local ctid="$1" ip="$2"
+  if [[ -n "$ctid" ]] && command -v pct >/dev/null 2>&1; then
+    local cert
+    cert="$(pct exec "$ctid" -- grep -E '^[[:space:]]*CHIRP_TLS_CERT=' /etc/chirp/chirp.env 2>/dev/null | cut -d= -f2- | tr -d ' "\r\n' || true)"
+    if [[ -n "$cert" ]]; then
+      echo "https"
+      return 0
+    fi
+  fi
+  echo "http"
+}
+
 # Whether the server still needs its first admin account: true | false | unknown.
-# $1 IP. Asks the public GET /api/v1/bootstrap/status (older releases: unknown).
+# $1 IP. $2 Scheme (optional, default http).
 chirp_bootstrap_state() {
-  local body
-  body="$(curl -fsS --max-time 5 "http://${1}/api/v1/bootstrap/status" 2>/dev/null)" || { echo unknown; return 0; }
+  local ip="$1" scheme="${2:-http}" body
+  body="$(curl -kfsS --max-time 5 "${scheme}://${ip}/api/v1/bootstrap/status" 2>/dev/null)" || {
+    local alt="https"
+    [[ "$scheme" == "https" ]] && alt="http"
+    body="$(curl -kfsS --max-time 5 "${alt}://${ip}/api/v1/bootstrap/status" 2>/dev/null)" || { echo unknown; return 0; }
+  }
   if [[ "$body" == *'"needsBootstrap":true'* ]]; then echo true
   elif [[ "$body" == *'"needsBootstrap":false'* ]]; then echo false
   else echo unknown
@@ -455,20 +472,26 @@ chirp_bootstrap_state() {
 # $1 CTID, $2 IP. No credential is printed: the key lives in the dashboard (Settings -> API key).
 chirp_account_report() {
   local ctid="$1" ip="$2" cli=/opt/chirp/current/apps/server/dist/cli.js
+  local scheme url state
+  scheme="$(chirp_detect_scheme "$ctid" "$ip")"
+  url="${scheme}://${ip}/"
+  state="$(chirp_bootstrap_state "$ip" "$scheme")"
   echo "=============================================="
-  echo " Dashboard : http://${ip}/"
+  echo " Dashboard : ${url}"
   echo
-  case "$(chirp_bootstrap_state "$ip")" in
+  case "$state" in
     true)
-      echo " >>> Open http://${ip}/ now and create the admin account."
-      echo "     Until an admin exists, anyone who can reach this address can create it."
+      echo " >>> Open ${url} now and create the admin account."
+      echo "     A setup token is required for initial registration."
+      echo "     Retrieve it with: pct exec ${ctid} -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env"
       ;;
     false)
       echo " Sign in with your admin account."
       echo " Forgot the password? pct exec ${ctid} -- node ${cli} admin reset-password"
       ;;
     *)
-      echo " Open http://${ip}/ and create the admin account (or sign in if it exists)."
+      echo " Open ${url} and create the admin account (or sign in if it exists)."
+      echo " Retrieve the setup token with: pct exec ${ctid} -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env"
       ;;
   esac
   echo

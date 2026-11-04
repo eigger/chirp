@@ -23,7 +23,6 @@ if ! mv --version >/dev/null 2>&1; then
     exit 0
   fi
 fi
-command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not available"; exit 0; }
 
 PASS=0; FAILS=0
 eq() { # name expected actual
@@ -59,7 +58,30 @@ cat >"$BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$STUB_DIR/systemctl.log"
 EOF
-chmod +x "$BIN/curl" "$BIN/systemctl"
+NODE_BIN="$(command -v node || echo node)"
+
+cat >"$BIN/jq" <<EOF
+#!/usr/bin/env bash
+"$NODE_BIN" -e '
+const fs = require("fs");
+const args = process.argv.slice(1);
+const file = args[args.length - 1];
+const filter = args.find(a => a.startsWith(".") || a.startsWith("["));
+const json = JSON.parse(fs.readFileSync(file, "utf8"));
+if (filter === ".tag_name") {
+  console.log(json.tag_name || "");
+} else if (filter && filter.includes("^chirp-")) {
+  const a = (json.assets || []).find(x => /^chirp-.+\\.tar\\.gz\$/.test(x.name));
+  console.log(a ? a.name : "");
+} else if (filter && filter.includes(".browser_download_url")) {
+  const nIdx = args.indexOf("--arg");
+  const name = nIdx !== -1 ? args[nIdx + 2] : "";
+  const a = (json.assets || []).find(x => x.name === name);
+  console.log(a ? a.browser_download_url : "");
+}
+' -- "\$@"
+EOF
+chmod +x "$BIN/curl" "$BIN/systemctl" "$BIN/jq"
 
 export STUB_DIR="$WORK/stub"
 mkdir -p "$STUB_DIR"
@@ -134,6 +156,13 @@ run_update ok; rc=$?
 eq "exit 1" "1" "$rc"
 eq "mismatch reported" "1" "$(grep -c 'sha256 mismatch' "$WORK/out.log")"
 eq "current unchanged" "$BEFORE" "$(readlink -f "$CHIRP/current")"
+
+echo "[6] TLS configuration probes https"
+printf 'CHIRP_PORT=8443\nCHIRP_TLS_CERT=/etc/chirp/cert.pem\nCHIRP_TLS_KEY=/etc/chirp/key.pem\n' >"$ENVF"
+make_release 1.4.0
+run_update ok; rc=$?
+eq "exit 0" "0" "$rc"
+eq "tls probe url" "https://127.0.0.1:8443/health" "$(grep '/health$' "$STUB_DIR/curl.log" | head -n1)"
 
 echo
 echo "passed=${PASS} failed=${FAILS}"

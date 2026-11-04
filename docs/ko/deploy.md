@@ -16,7 +16,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/eigger/chirp/master/prox
 
 privileged LXC를 만들고 릴리스 tarball을 설치한 뒤, 선택한 디스크를 passthrough하고 대시보드 URL을 출력한다. 스크립트 상세는 `proxmox/` 참고.
 
-**설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력 및 설치 시 출력된 일회용 `Setup token` 입력). 설치 스크립트는 `/etc/chirp/chirp.env`(`0600`)에 `CHIRP_SETUP_TOKEN`을 작성하며, 관리자 계정이 생성되면 이 토큰은 파일에서 자동 삭제된다. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 누구에게나 등록 창이 열려 있으므로 즉시 계정을 생성해야 한다. 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
+**설치 직후 `http://<컨테이너 IP>/`를 열어 관리자 계정을 만든다**(사용자명, 비밀번호 2회 입력 및 설치 시 출력된 일회용 `Setup token` 입력). 설치 스크립트는 `/etc/chirp/chirp.env`(`0600`)에 `CHIRP_SETUP_TOKEN`을 작성한다. 계정 생성 시 서버는 env 파일에서 토큰을 최선형(best-effort)으로 삭제하려고 시도한다. systemd 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp`가 읽기 전용이므로 토큰이 `chirp.env`에 남을 수 있으나, 관리자 계정이 존재하는 즉시 최초 등록이 영구적으로 비활성화(`POST /bootstrap/admin`이 `409 conflict` 반환)되므로 무해하다. 설치 중 화면 스크롤로 토큰을 놓친 경우: `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 누구에게나 등록 창이 열려 있으므로 즉시 계정을 생성해야 한다. 그다음 **설정 -> API 키**에서 키를 복사해 Home Assistant에 넣는다. 비밀번호를 잊으면 `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`(새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃).
 
 ### 디스크 passthrough와 권한
 
@@ -156,7 +156,7 @@ Proxmox LXC: 기본값 그대로 둔다(설치 스크립트가 `/host/proc`, `/h
 
 ## 보안
 
-- **최초 등록 창.** Proxmox 설치 스크립트를 사용한 경우, 최초 관리자 계정 생성에는 설치 완료 시 출력되고 `/etc/chirp/chirp.env`(`0600`)에 기록된 일회용 `CHIRP_SETUP_TOKEN`이 필요하다. 관리자 계정이 생성된 후에는 토큰이 `chirp.env`에서 자동 삭제된다. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
+- **최초 등록 창.** Proxmox 설치 스크립트를 사용한 경우, 최초 관리자 계정 생성에는 `/etc/chirp/chirp.env`(`0600`)에 기록된 일회용 `CHIRP_SETUP_TOKEN`이 필요하다. 관리자 계정이 생성되면 서버는 env 파일에서 토큰을 최선형으로 삭제하려 시도한다. systemd의 엄격한 샌드박스(`ProtectSystem=strict`)에서는 `/etc/chirp/chirp.env`가 읽기 전용이므로 파일에 토큰이 남을 수 있으나, 관리자 계정이 생성된 후에는 `POST /bootstrap/admin`이 409 conflict를 반환하므로 토큰은 무효화(inert)된다. 등록 전 토큰을 확인해야 할 경우 `pct exec <CTID> -- grep -E '^CHIRP_SETUP_TOKEN=' /etc/chirp/chirp.env`로 조회할 수 있다. `CHIRP_SETUP_TOKEN`이 설정되지 않은 경우(Docker, 수동 설치)에는 대시보드를 먼저 연 사람이 관리자를 만들 수 있다. 설치 직후 만들거나 `CHIRP_ADMIN_USER`/`CHIRP_ADMIN_PASSWORD`로 미리 만든다. 관리자가 없으면 서버가 시작할 때마다 로그에 경고한다.
 - **TLS 및 전송 계층.** TLS가 없으면 로그인 시 관리자 비밀번호, 세션 쿠키, API 키가 네트워크에 평문으로 흐른다.
   - **자체 TLS:** `CHIRP_TLS_CERT` 및 `CHIRP_TLS_KEY`(인증서 및 개인키 경로)를 지정하면 Fastify가 HTTPS로 직접 서비스하며 `CHIRP_COOKIE_SECURE=true`를 기본값으로 파생한다. chirp 서버 안에서 인증서를 자동 발급하거나 갱신하지 않는다.
   - **역프록시 / Tailscale:** 실제 운영 환경에서는 chirp를 TLS 역프록시(Caddy, nginx, Traefik)나 Tailscale 뒤에 두는 것을 권장한다. chirp가 HTTPS 요청임을 알 수 없으면 `CHIRP_COOKIE_SECURE=true`로 쿠키의 `Secure`를 강제한다.

@@ -132,7 +132,7 @@ if [[ -n "${SETUP_TOKEN:-}" ]]; then
   echo "Next: open http://${IP_ADDR}/ right away and create the admin account with the setup token above"
 else
   echo "Next: open http://${IP_ADDR}/ right away and create the admin account"
-  echo "      (until an admin exists, anyone who can reach this address can create it)."
+  echo "      (if a setup token is required, retrieve it from /etc/chirp/chirp.env)."
 fi
 echo "Then: Settings -> API key -> Copy, and paste it into Home Assistant (hass-chirp)."
 echo "Forgot the admin password? node /opt/chirp/current/apps/server/dist/cli.js admin reset-password"

@@ -96,20 +96,25 @@ export function cliEnvironment(
   return { env: merged, args: rest, file };
 }
 
+export interface RemoveEnvVarResult {
+  removed: boolean;
+  error?: Error;
+}
+
 /**
  * Remove an environment variable line from an env file atomically (mode 0600),
- * best-effort. Returns true if modified, false otherwise.
+ * best-effort. Returns { removed: true } if modified, or { removed: false, error } on failure.
  */
-export function removeEnvVar(file: string, varName: string): boolean {
+export function removeEnvVar(file: string, varName: string): RemoveEnvVarResult {
   try {
-    if (!existsSync(file)) return false;
+    if (!existsSync(file)) return { removed: false };
     const text = readFileSync(file, "utf8");
     const re = new RegExp(`^(?:export\\s+)?${varName}\\s*=.*(?:\\r?\\n)?`, "gm");
-    if (!re.test(text)) return false;
+    if (!re.test(text)) return { removed: false };
     const updated = text.replace(new RegExp(`^(?:export\\s+)?${varName}\\s*=.*(?:\\r?\\n)?`, "gm"), "");
     writeFileAtomic(file, updated);
-    return true;
-  } catch {
-    return false;
+    return { removed: true };
+  } catch (err) {
+    return { removed: false, error: err as Error };
   }
 }
