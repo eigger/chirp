@@ -508,6 +508,7 @@ export const HostSnapshotRaplZone = z.object({
 export type HostSnapshotRaplZone = z.infer<typeof HostSnapshotRaplZone>;
 
 export const HostSnapshotHwmonSensor = z.object({
+  id: z.string().regex(/^[a-z0-9_]+$/).optional(),
   chip: z.string(),
   label: z.string(),
   temp,

@@ -235,6 +235,12 @@ def hwmon_id(chip_name: str, chip_key: str, prefix: str, idx: int, display: str)
     return f"{base}_{h}"
 
 
+def hwmon_temp_id(chip_name: str, chip_key: str, idx: int | str) -> str:
+    """Stable temperature sensor ID matching server hwmon.ts."""
+    h = hashlib.sha256(f"{chip_key}/{chip_name}/temp{idx}".encode("utf-8")).hexdigest()[:16]
+    return f"temp_{h}"
+
+
 def is_gpu(chip_path: str, chip_name: str) -> bool:
     if chip_name in ("coretemp", "k10temp", "zenpower", "cpu_thermal"):
         return False
@@ -300,7 +306,8 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                 entry = {"label": label, "temp": t, "max": t_max, "crit": t_crit, "index": idx}
                 chip_temps.append(entry)
                 if name not in cpu_chips:
-                    sensors_list.append({"chip": name, "label": label, "temp": t})
+                    sensor_id = hwmon_temp_id(name, key, idx)
+                    sensors_list.append({"id": sensor_id, "chip": name, "label": label, "temp": t})
 
             if name in cpu_chips:
                 # Find package socket number

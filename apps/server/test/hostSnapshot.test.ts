@@ -56,7 +56,7 @@ const sampleSnapshot: HostSnapshot = {
       cores: [{ label: "Core 0", temp: 42.0 }],
       source: "k10temp",
     },
-    sensors: [{ chip: "nvme", label: "Composite", temp: 38.0 }],
+    sensors: [{ id: "temp_abc1234567890def", chip: "nvme", label: "Composite", temp: 38.0 }],
     rapl: [
       {
         zone: "intel-rapl:0",
@@ -147,6 +147,7 @@ describe("HostSnapshotReader", () => {
 
       const sensorReadout = HostSnapshotReader.toSensorReadout(res.snapshot?.hwmon);
       expect(sensorReadout?.cpu.packageTemp).toBe(45.5);
+      expect(sensorReadout?.sensors[0].id).toBe("temp_abc1234567890def");
       expect(sensorReadout?.sensors[0].chip).toBe("nvme");
 
       const extras = HostSnapshotReader.toHwmonExtras(res.snapshot?.hwmon);

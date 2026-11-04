@@ -164,6 +164,7 @@ export class HostSnapshotReader {
         source: cpu.source,
       },
       sensors: (hwmon.sensors ?? []).map((s) => ({
+        id: s.id,
         chip: s.chip,
         label: s.label,
         temp: s.temp,
