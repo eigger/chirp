@@ -133,7 +133,7 @@ function isGpu(path: string, name: string): boolean {
   }
 }
 
-function hwmonChips(sysRoot: string): ChipDir[] {
+export function hwmonChips(sysRoot: string): ChipDir[] {
   const base = join(sysRoot, "class", "hwmon");
   const chips: ChipDir[] = [];
   let rootPath: string;
