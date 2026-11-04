@@ -69,8 +69,8 @@ Node.js 24와 `smartmontools`가 필요합니다. `.sha256` 자산은 다운로�
 
 ## 처음 실행
 
-1. `http://<chirp 주소>/`를 엽니다. 관리자 계정이 없으면 대시보드가 **관리자 계정 만들기** 화면을 보여 줍니다. 사용자명을 정하고 비밀번호를 두 번(10자 이상) 입력하면 바로 로그인됩니다.
-   **설치 직후 바로 하세요:** 관리자가 생기기 전까지는 *대시보드를 먼저 연 사람*이 관리자가 됩니다. (Docker/자동화: 대신 `CHIRP_ADMIN_USER`와 `CHIRP_ADMIN_PASSWORD`를 설정)
+1. `http://<chirp 주소>/`를 엽니다. 관리자 계정이 없으면 대시보드가 **관리자 계정 만들기** 화면을 보여 줍니다. 사용자명을 정하고 비밀번호를 두 번(10자 이상) 입력하며, Proxmox 설치 시 출력된 일회용 설치 토큰을 입력하면 바로 로그인됩니다.
+   **설치 직후 바로 하세요:** 설치 토큰이 설정되지 않은 경우 관리자가 생기기 전까지는 *대시보드를 먼저 연 사람*이 관리자가 됩니다. (Docker/자동화: 대신 `CHIRP_ADMIN_USER`와 `CHIRP_ADMIN_PASSWORD`를 설정)
 2. **설정 -> API 키**에서 **복사**를 눌러 Home Assistant에 붙여 넣습니다(아래 참고).
 3. 비밀번호를 잊었다면 Proxmox(호스트에서): `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password`, Docker: `docker exec chirp node apps/server/dist/cli.js admin reset-password`. 새 무작위 비밀번호를 출력하고 모든 세션을 로그아웃합니다. (CLI는 `/etc/chirp/chirp.env`가 있으면 읽습니다. 설정이 다른 파일에 있으면 `--env-file <경로>`를 붙이세요.)
 

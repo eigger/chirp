@@ -37,7 +37,7 @@ export function trustProxyNotice(config: Pick<Config, "trustProxy" | "host">): N
 }
 
 export async function bootstrapAuth(
-  config: Pick<Config, "adminUser" | "adminPassword"> & Partial<Pick<Config, "trustProxy" | "host">>,
+  config: Pick<Config, "adminUser" | "adminPassword"> & Partial<Pick<Config, "trustProxy" | "host" | "setupToken">>,
   auth: Auth,
 ): Promise<Notice[]> {
   const out: Notice[] = [];
@@ -63,12 +63,20 @@ export async function bootstrapAuth(
     }
   }
   if (!auth.admin.exists()) {
-    out.push({
-      level: "warn",
-      msg:
-        "No admin account yet: open the dashboard now and create it. Until then anyone who can reach " +
-        "this server can create the admin account (or set CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD).",
-    });
+    if (config.setupToken) {
+      out.push({
+        level: "warn",
+        msg:
+          "No admin account yet: open the dashboard now and create it using the setup token from installation.",
+      });
+    } else {
+      out.push({
+        level: "warn",
+        msg:
+          "No admin account yet: open the dashboard now and create it. Until then anyone who can reach " +
+          "this server can create the admin account (or set CHIRP_ADMIN_USER/CHIRP_ADMIN_PASSWORD).",
+      });
+    }
   }
   return out;
 }

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import {
   BootstrapAdminRequest,
@@ -12,6 +13,7 @@ import type { ZodError } from "zod";
 import { AdminExistsError, AdminStore, WeakPasswordError } from "./admin.js";
 import { ApiKeyStore, EnvKeyError } from "./apiKey.js";
 import type { Config } from "./config.js";
+import { DEFAULT_ENV_FILE, removeEnvVar } from "./envFile.js";
 import { BusyError, DEFAULT_SCRYPT, passwordProblem, type ScryptParams } from "./password.js";
 import { DEFAULT_DAILY_BUDGET, DEFAULT_CAPS, LoginLimiter, type Attempt } from "./rateLimit.js";
 import { SESSION_MAX_MS, SessionStore } from "./session.js";
@@ -170,8 +172,22 @@ function clearSessionCookie(config: Pick<Config, "cookieSecure">, request: Fasti
   reply.header("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
 }
 
+function constantTimeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
+
 /** `/api/v1/bootstrap/*`, `/api/v1/auth/*` and `/api/v1/admin/*`. Registered inside the api plugin (after authHook). */
-export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pick<Config, "cookieSecure">): void {
+export function registerAuthRoutes(
+  api: FastifyInstance,
+  auth: Auth,
+  config: Pick<Config, "cookieSecure" | "setupToken" | "envFile">,
+): void {
   const pub = { config: { auth: "public" as const } };
   const sess = { config: { auth: "session" as const } };
 
@@ -208,7 +224,13 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
     if (name) auth.limiter.resetUser(name);
   };
 
-  api.get("/bootstrap/status", pub, async () => ({ needsBootstrap: !auth.admin.exists() }));
+  api.get("/bootstrap/status", pub, async () => {
+    const needsBootstrap = !auth.admin.exists();
+    return {
+      needsBootstrap,
+      ...(needsBootstrap && config.setupToken ? { setupTokenRequired: true } : {}),
+    };
+  });
 
   // First-run registration: while no admin exists, the first visitor creates it
   // (like kibble). Requests are serialized here, and the admin file is created
@@ -216,8 +238,20 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
   api.post("/bootstrap/admin", pub, async (request, reply) => {
     const body = BootstrapAdminRequest.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, bodyError(body.error));
+    if (auth.admin.exists()) return sendError(reply, 409, "conflict");
     const problem = passwordProblem(body.data.password, body.data.username);
     if (problem) return weakPassword(reply, problem);
+    if (config.setupToken) {
+      const decision = auth.limiter.check(request.ip, null);
+      if (!decision.ok) return rateLimited(reply, decision.waitMs);
+      const attempt = auth.limiter.begin(request.ip, null);
+      const token = body.data.setupToken;
+      const valid = token !== undefined && constantTimeEqual(token, config.setupToken);
+      if (!valid) {
+        return sendError(reply, 403, "unauthorized");
+      }
+      auth.limiter.succeed(attempt);
+    }
     const created = await bootstrapLock(async () => {
       if (auth.admin.exists()) return false;
       try {
@@ -229,6 +263,11 @@ export function registerAuthRoutes(api: FastifyInstance, auth: Auth, config: Pic
       }
     });
     if (!created) return sendError(reply, 409, "conflict");
+    if (config.setupToken) {
+      config.setupToken = null;
+      const file = config.envFile ?? DEFAULT_ENV_FILE;
+      removeEnvVar(file, "CHIRP_SETUP_TOKEN");
+    }
     request.log.info(`Admin account "${body.data.username}" created from the dashboard (${request.ip})`);
     return reply.code(201).send(startSession(request, reply));
   });

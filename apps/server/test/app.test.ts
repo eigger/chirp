@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ApiKeyStore, generateApiKey } from "../src/apiKey.js";
 import { buildApp } from "../src/app.js";
 import { createAuth } from "../src/auth.js";
-import { loadConfig } from "../src/config.js";
+import { ConfigError, loadConfig } from "../src/config.js";
 import { Collector, type CollectorDeps } from "../src/scheduler.js";
 import { parseSmartctl } from "../src/smartctl.js";
 import { FAST_SCRYPT, fixture } from "./helpers.js";
@@ -188,5 +188,21 @@ describe("static dashboard", () => {
     expect(NotFoundResponse.parse(root.json())).toEqual({ error: "not_found" });
     expect(NotFoundResponse.parse((await bare.inject("/api/v1/nope")).json())).toEqual({ error: "not_found" });
     await bare.close();
+  });
+
+  it("buildApp throws ConfigError when TLS certificate or key file cannot be read", async () => {
+    await expect(
+      buildApp({
+        config: {
+          ...loadConfig({
+            CHIRP_TLS_CERT: join(tmp, "nonexistent-cert.pem"),
+            CHIRP_TLS_KEY: join(tmp, "nonexistent-key.pem"),
+          }),
+          webDir: join(tmp, "missing"),
+        },
+        collector,
+        auth: createAuth({ dataDir: join(tmp, "data") }, new ApiKeyStore(KEY, null), { scrypt: FAST_SCRYPT }),
+      }),
+    ).rejects.toThrowError(ConfigError);
   });
 });

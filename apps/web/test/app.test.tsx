@@ -19,13 +19,14 @@ const sample = JSON.parse(
  * A tiny in-memory chirp server: one admin, a session flag standing in for the
  * HttpOnly cookie, and the API key. Non-GET requests must carry the CSRF header.
  */
-function fakeServer(opts: { admin?: boolean; signedIn?: boolean; envKey?: boolean } = {}) {
+function fakeServer(opts: { admin?: boolean; signedIn?: boolean; envKey?: boolean; setupToken?: string | null } = {}) {
   const state = {
     admin: opts.admin === false ? null : { username: "admin", password: "correct horse" },
     session: opts.signedIn ?? false,
     key: "chp_firstkey" + "a".repeat(32),
     source: (opts.envKey ? "env" : "file") as "env" | "file",
     regenerated: 0,
+    setupToken: opts.setupToken ?? null,
   };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
@@ -33,9 +34,17 @@ function fakeServer(opts: { admin?: boolean; signedIn?: boolean; envKey?: boolea
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     if (method !== "GET" && headers["X-Chirp-Csrf"] !== "1") return json({ error: "forbidden" }, 403);
-    if (url === "/api/v1/bootstrap/status") return json({ needsBootstrap: !state.admin });
+    if (url === "/api/v1/bootstrap/status") {
+      return json({
+        needsBootstrap: !state.admin,
+        ...(!state.admin && state.setupToken ? { setupTokenRequired: true } : {}),
+      });
+    }
     if (url === "/api/v1/bootstrap/admin") {
       if (state.admin) return json({ error: "conflict" }, 409);
+      if (state.setupToken && body?.setupToken !== state.setupToken) {
+        return json({ error: "unauthorized" }, 403);
+      }
       if (body.password !== body.passwordConfirm) return json({ error: "password_mismatch" }, 400);
       state.admin = { username: body.username, password: body.password };
       state.session = true;
@@ -241,6 +250,32 @@ describe("first-run registration", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
     expect(await screen.findByText(/already exists/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("requires a setup token when the server requests it", async () => {
+    const { state } = fakeServer({ admin: false, setupToken: "secret123" });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Create the admin account" })).toBeInTheDocument();
+    const tokenInput = screen.getByLabelText("Setup token");
+    expect(tokenInput).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/^Password \(at least/), "a long password");
+    await userEvent.type(screen.getByLabelText("Repeat password"), "a long password");
+    // Button is disabled until token is entered
+    expect(screen.getByRole("button", { name: "Create admin account" })).toBeDisabled();
+
+    // Enter wrong token
+    await userEvent.type(tokenInput, "wrongtoken");
+    expect(screen.getByRole("button", { name: "Create admin account" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("setup token is invalid or missing");
+
+    // Enter correct token
+    await userEvent.clear(tokenInput);
+    await userEvent.type(tokenInput, "secret123");
+    await userEvent.click(screen.getByRole("button", { name: "Create admin account" }));
+    expect(await screen.findByText("pve")).toBeInTheDocument();
+    expect(state.admin).toEqual({ username: "admin", password: "a long password" });
   });
 });
 

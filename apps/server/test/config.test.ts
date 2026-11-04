@@ -112,9 +112,30 @@ describe("CHIRP_ADMIN_* / CHIRP_COOKIE_SECURE", () => {
     expect(loadConfig({ CHIRP_COOKIE_SECURE: "off" }).cookieSecure).toBe(false);
     expect(() => loadConfig({ CHIRP_COOKIE_SECURE: "maybe" })).toThrowError(/CHIRP_COOKIE_SECURE/);
   });
+  it("CHIRP_SETUP_TOKEN is loaded and trimmed", () => {
+    expect(loadConfig({}).setupToken).toBeNull();
+    expect(loadConfig({ CHIRP_SETUP_TOKEN: "  secret-token  " }).setupToken).toBe("secret-token");
+    expect(loadConfig({ CHIRP_SETUP_TOKEN: "" }).setupToken).toBeNull();
+  });
+  it("CHIRP_TLS_CERT and CHIRP_TLS_KEY must be set together", () => {
+    expect(loadConfig({}).tlsCert).toBeNull();
+    expect(loadConfig({}).tlsKey).toBeNull();
+    expect(() => loadConfig({ CHIRP_TLS_CERT: "/path/cert.pem" })).toThrowError(/CHIRP_TLS_CERT and CHIRP_TLS_KEY must be set together/);
+    expect(() => loadConfig({ CHIRP_TLS_KEY: "/path/key.pem" })).toThrowError(/CHIRP_TLS_CERT and CHIRP_TLS_KEY must be set together/);
+    const tls = loadConfig({ CHIRP_TLS_CERT: "/path/cert.pem", CHIRP_TLS_KEY: "/path/key.pem" });
+    expect(tls.tlsCert).toBe("/path/cert.pem");
+    expect(tls.tlsKey).toBe("/path/key.pem");
+    expect(tls.cookieSecure).toBe(true); // derived from TLS
+    const overridden = loadConfig({
+      CHIRP_TLS_CERT: "/path/cert.pem",
+      CHIRP_TLS_KEY: "/path/key.pem",
+      CHIRP_COOKIE_SECURE: "off",
+    });
+    expect(overridden.cookieSecure).toBe(false);
+  });
 });
 
-describe("health probe URL follows CHIRP_HOST", () => {
+describe("health probe URL follows CHIRP_HOST and TLS", () => {
   it.each([
     ["0.0.0.0", "http://127.0.0.1:80/health"],
     ["::", "http://127.0.0.1:80/health"],
@@ -124,6 +145,11 @@ describe("health probe URL follows CHIRP_HOST", () => {
     ["localhost", "http://localhost:80/health"],
   ])("%s -> %s", (host, url) => {
     expect(healthUrl({ host, port: 80 })).toBe(url);
+  });
+  it("uses https when TLS cert and key are configured", () => {
+    expect(healthUrl({ host: "0.0.0.0", port: 443, tlsCert: "/c.pem", tlsKey: "/k.pem" })).toBe(
+      "https://127.0.0.1:443/health",
+    );
   });
 });
 

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { writeFileAtomic } from "./secureFile.js";
 
 /** The service env file of the Proxmox install (systemd EnvironmentFile). */
 export const DEFAULT_ENV_FILE = "/etc/chirp/chirp.env";
@@ -93,4 +94,22 @@ export function cliEnvironment(
   const merged: Env = { ...fromFile };
   for (const [k, v] of Object.entries(env)) if (v !== undefined) merged[k] = v;
   return { env: merged, args: rest, file };
+}
+
+/**
+ * Remove an environment variable line from an env file atomically (mode 0600),
+ * best-effort. Returns true if modified, false otherwise.
+ */
+export function removeEnvVar(file: string, varName: string): boolean {
+  try {
+    if (!existsSync(file)) return false;
+    const text = readFileSync(file, "utf8");
+    const re = new RegExp(`^(?:export\\s+)?${varName}\\s*=.*(?:\\r?\\n)?`, "gm");
+    if (!re.test(text)) return false;
+    const updated = text.replace(new RegExp(`^(?:export\\s+)?${varName}\\s*=.*(?:\\r?\\n)?`, "gm"), "");
+    writeFileAtomic(file, updated);
+    return true;
+  } catch {
+    return false;
+  }
 }

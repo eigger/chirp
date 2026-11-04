@@ -14,7 +14,7 @@ const POLL_MS = 30_000;
 /** checking -> bootstrap (no admin yet) | login | signed in. */
 type AuthState =
   | { kind: "checking" }
-  | { kind: "bootstrap" }
+  | { kind: "bootstrap"; setupTokenRequired?: boolean }
   | { kind: "login"; notice?: "expired" | "taken" }
   | { kind: "in"; username: string };
 
@@ -107,7 +107,11 @@ export function App() {
     }
     try {
       const s = await fetchBootstrapStatus();
-      setAuth(s.needsBootstrap ? { kind: "bootstrap" } : { kind: "login", notice: expired ? "expired" : undefined });
+      setAuth(
+        s.needsBootstrap
+          ? { kind: "bootstrap", setupTokenRequired: Boolean(s.setupTokenRequired) }
+          : { kind: "login", notice: expired ? "expired" : undefined },
+      );
     } catch {
       setAuth({ kind: "login", notice: expired ? "expired" : undefined });
     }
@@ -186,7 +190,11 @@ export function App() {
         {auth.kind === "in" && logoutFailed && <p role="alert" className="error">{t("logout.failed")}</p>}
         {auth.kind === "checking" && <p className="muted">{t("common.loading")}</p>}
         {auth.kind === "bootstrap" && (
-          <BootstrapForm onDone={signedIn} onTaken={() => setAuth({ kind: "login", notice: "taken" })} />
+          <BootstrapForm
+            setupTokenRequired={auth.setupTokenRequired}
+            onDone={signedIn}
+            onTaken={() => setAuth({ kind: "login", notice: "taken" })}
+          />
         )}
         {auth.kind === "login" && <LoginForm notice={auth.notice} onLoggedIn={signedIn} />}
         {auth.kind === "in" &&

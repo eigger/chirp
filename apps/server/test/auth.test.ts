@@ -598,6 +598,101 @@ describe("first-run registration (bootstrap)", () => {
   });
 });
 
+describe("setup token for first-run registration", () => {
+  const TOKEN = "test-setup-token-42";
+  const good = { username: USER, password: PASS, passwordConfirm: PASS };
+
+  it("status indicates setupTokenRequired when configured", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const status = (await app.inject("/api/v1/bootstrap/status")).json();
+    expect(BootstrapStatusResponse.parse(status)).toEqual({ needsBootstrap: true, setupTokenRequired: true });
+  });
+
+  it("rejects bootstrap without setup token or with wrong token (403 unauthorized)", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: good,
+    });
+    expect(missing.statusCode).toBe(403);
+    expect(UnauthorizedResponse.parse(missing.json())).toEqual({ error: "unauthorized" });
+
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: "wrong-token" },
+    });
+    expect(wrong.statusCode).toBe(403);
+    expect(UnauthorizedResponse.parse(wrong.json())).toEqual({ error: "unauthorized" });
+    expect(auth.admin.exists()).toBe(false);
+  });
+
+  it("accepts correct setup token, creates admin, and cleans up chirp.env", async () => {
+    const envFile = join(dir, "chirp.env");
+    writeFileSync(envFile, `CHIRP_PORT=80\nCHIRP_SETUP_TOKEN=${TOKEN}\n`, { mode: 0o600 });
+    await start({ CHIRP_SETUP_TOKEN: TOKEN, CHIRP_ENV_FILE: envFile }, { admin: false });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: TOKEN },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(auth.admin.exists()).toBe(true);
+    expect(auth.admin.username()).toBe(USER);
+    expect(config.setupToken).toBeNull();
+    const envAfter = readFileSync(envFile, "utf8");
+    expect(envAfter).not.toContain("CHIRP_SETUP_TOKEN");
+    expect(envAfter).toContain("CHIRP_PORT=80");
+
+    // Once admin exists, bootstrap returns 409 conflict
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: TOKEN },
+    });
+    expect(again.statusCode).toBe(409);
+  });
+
+  it("rate limits repeated failed setup token attempts", async () => {
+    await start({ CHIRP_SETUP_TOKEN: TOKEN }, { admin: false });
+    // 5 free failures before rate-limiting applies
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/bootstrap/admin",
+        headers: CSRF,
+        payload: { ...good, setupToken: "bad" },
+        remoteAddress: "192.0.2.1",
+      });
+      expect(res.statusCode).toBe(403);
+    }
+    const limited = await app.inject({
+      method: "POST",
+      url: "/api/v1/bootstrap/admin",
+      headers: CSRF,
+      payload: { ...good, setupToken: "bad" },
+      remoteAddress: "192.0.2.1",
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(RateLimitedResponse.parse(limited.json())).toEqual({ error: "rate_limited", retryAfter: 1 });
+  });
+
+  it("bootstrap warning message adapts to setup token presence", async () => {
+    const withoutToken = await bootstrapAuth({ adminUser: null, adminPassword: null }, auth);
+    expect(withoutToken.some((n) => n.msg.includes("anyone who can reach this server"))).toBe(true);
+
+    const withToken = await bootstrapAuth({ adminUser: null, adminPassword: null, setupToken: TOKEN }, auth);
+    expect(withToken.some((n) => n.msg.includes("using the setup token from installation"))).toBe(true);
+    expect(withToken.some((n) => n.msg.includes(TOKEN))).toBe(false); // never logged
+  });
+});
+
 describe("common passwords", () => {
   it.each([
     "password123", "Password123!", "P@ssw0rd!!", "p4ssw0rd2026", "qwertyuiop", "QWERTYUIOP1", "1q2w3e4r5t", "1qaz2wsx3edc",
