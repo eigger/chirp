@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -78,30 +79,62 @@ class TestCollectorMath(unittest.TestCase):
 
 
 class TestCollectorStatvfs(unittest.TestCase):
-    def test_isolated_statvfs_real_dir(self):
-        stats = collector.isolated_statvfs(os.getcwd())
-        self.assertIsNotNone(stats)
-        self.assertEqual(len(stats), 4)
-        bsize, blocks, bfree, bavail = stats
-        self.assertGreater(bsize, 0)
-        self.assertGreater(blocks, 0)
-        self.assertGreaterEqual(bfree, 0)
-        self.assertGreaterEqual(bavail, 0)
+    def setUp(self):
+        collector._PENDING_STATVFS.clear()
 
-    def test_isolated_statvfs_missing_dir(self):
-        stats = collector.isolated_statvfs("/path/that/does/not/exist/999999")
-        self.assertIsNone(stats)
+    def tearDown(self):
+        collector._PENDING_STATVFS.clear()
 
     @patch("subprocess.Popen")
-    def test_isolated_statvfs_timeout_handled(self, mock_popen_cls):
+    def test_collect_filesystems_hung_child_times_out_without_wait(self, mock_popen_cls):
         mock_proc = MagicMock()
-        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["python3"], timeout=5.0)
+        mock_proc.poll.return_value = None  # never exits (D-state)
         mock_popen_cls.return_value = mock_proc
-        stats = collector.isolated_statvfs("/stalled/nfs/mount")
-        self.assertIsNone(stats)
-        # CRITICAL: kill() was called, but wait() MUST NOT be called (prevents D-state hang)
-        mock_proc.kill.assert_called_once()
+        start = time.monotonic()
+        res = collector.collect_filesystems(["/stalled/a", "/stalled/b"], timeout=0.2)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0)
+        self.assertGreaterEqual(elapsed, 0.15)
+        self.assertEqual([r["path"] for r in res], ["/stalled/a", "/stalled/b"])
+        for r in res:
+            self.assertTrue(r["id"].startswith("fs_"))
+            self.assertIsNone(r["totalBytes"])
+            self.assertIsNone(r["usedBytes"])
+            self.assertIsNone(r["availableBytes"])
+            self.assertIsNone(r["usedPercent"])
+        self.assertEqual(mock_proc.kill.call_count, 2)
         mock_proc.wait.assert_not_called()
+        mock_proc.communicate.assert_not_called()
+        self.assertEqual(set(collector._PENDING_STATVFS), {"/stalled/a", "/stalled/b"})
+
+    @patch("subprocess.Popen")
+    def test_collect_filesystems_does_not_respawn_while_previous_child_alive(self, mock_popen_cls):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_popen_cls.return_value = mock_proc
+        collector.collect_filesystems(["/stalled/nfs"], timeout=0.1)
+        self.assertEqual(mock_popen_cls.call_count, 1)
+        res = collector.collect_filesystems(["/stalled/nfs"], timeout=0.1)
+        self.assertEqual(mock_popen_cls.call_count, 1)  # no new child
+        self.assertIsNone(res[0]["totalBytes"])
+        mock_proc.wait.assert_not_called()
+
+    @patch("subprocess.Popen")
+    def test_collect_filesystems_reaps_exited_child_then_respawns(self, mock_popen_cls):
+        stuck = MagicMock()
+        stuck.poll.return_value = None
+        mock_popen_cls.return_value = stuck
+        collector.collect_filesystems(["/mnt/x"], timeout=0.1)
+        stuck.poll.return_value = -9  # finally died
+        fresh = MagicMock()
+        fresh.poll.return_value = 0
+        fresh.communicate.return_value = ("[4096, 100, 40, 30]", "")
+        mock_popen_cls.return_value = fresh
+        res = collector.collect_filesystems(["/mnt/x"], timeout=1.0)
+        self.assertEqual(mock_popen_cls.call_count, 2)
+        self.assertEqual(res[0]["totalBytes"], 4096 * 100)
+        self.assertEqual(collector._PENDING_STATVFS, {})
+        stuck.wait.assert_not_called()
 
     def test_collect_filesystems_concurrent_with_timeout(self):
         # Even with hung paths (sleeping), collect_filesystems finishes within timeout and returns null stats for hung path
@@ -232,6 +265,19 @@ class TestCollectorConfigPrecedence(unittest.TestCase):
                     collector.read_config_var(initial_file, "CHIRP_DEVICE_TYPES", initial_env_file=initial_file),
                     "nvme",
                 )
+
+    def test_read_config_var_key_removed_at_runtime_returns_default(self):
+        initial_file = {"CHIRP_FILESYSTEM_PATHS": "/data"}
+        with patch.dict(os.environ, {"CHIRP_FILESYSTEM_PATHS": "/data"}):
+            # Key removed from the live file
+            self.assertEqual(
+                collector.read_config_var({}, "CHIRP_FILESYSTEM_PATHS", "", initial_env_file=initial_file), ""
+            )
+            # Live file deleted entirely
+            self.assertEqual(
+                collector.read_config_var(None, "CHIRP_FILESYSTEM_PATHS", "none", initial_env_file=initial_file),
+                "none",
+            )
 
     def test_read_config_var_falls_back_when_file_absent(self):
         with patch.dict(os.environ, {"CHIRP_DEVICES": "/dev/sdb"}):

@@ -64,6 +64,7 @@ def read_config_var(
     - If key in os.environ is an explicit override (set via CLI or systemd drop-in Environment=),
       it takes highest precedence.
     - Otherwise, if cur_env_file is provided and has the key, the live file value is used.
+    - If the key came from the env file at start but is gone from the live file, default is used.
     - Otherwise, falls back to os.environ or default.
     """
     init_file = initial_env_file or {}
@@ -74,6 +75,10 @@ def read_config_var(
 
     if cur_env_file is not None and key in cur_env_file:
         return cur_env_file[key]
+
+    if key in init_file:
+        # Loaded from the env file at start but removed from the live file: do not resurrect it.
+        return default
 
     return os.environ.get(key, default)
 
@@ -672,14 +677,33 @@ except Exception:
 """
 
 
-def isolated_statvfs(path: str, timeout: float = 5.0) -> Optional[Tuple[int, int, int, int]]:
+# statvfs children abandoned at a deadline that may still be alive (for example stuck in
+# kernel D-state on a hung hard NFS mount, where SIGKILL stays pending). Keyed by path so
+# at most one child per path exists at any time, mirroring pendingFs in storage.ts.
+_PENDING_STATVFS: Dict[str, "subprocess.Popen[str]"] = {}
+
+
+def _abandon_child(proc: "subprocess.Popen[str]") -> None:
     """
-    Run statvfs in an isolated child process with -I flag and timeout.
-    Uses Popen directly and NEVER calls synchronous wait() on timeout,
-    preventing hangs on processes blocked in uninterruptible sleep (D-state).
+    Kill a child and close its pipes WITHOUT waiting.
+    CRITICAL: never call wait()/communicate() without a timeout here. A child blocked in
+    uninterruptible sleep ignores SIGKILL until the syscall returns, so wait() would hang.
     """
     try:
-        proc = subprocess.Popen(
+        proc.kill()
+    except OSError:
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe:
+                pipe.close()
+        except OSError:
+            pass
+
+
+def _spawn_statvfs(path: str) -> Optional["subprocess.Popen[str]"]:
+    try:
+        return subprocess.Popen(
             [sys.executable, "-I", "-c", STATVFS_SCRIPT, path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -688,73 +712,55 @@ def isolated_statvfs(path: str, timeout: float = 5.0) -> Optional[Tuple[int, int
     except (subprocess.SubprocessError, OSError, ValueError):
         return None
 
-    try:
-        stdout, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        # CRITICAL: Do NOT call proc.wait() on POSIX when a timeout occurs!
-        # If statvfs is blocked in kernel D-state (e.g. hung hard NFS mount),
-        # SIGKILL remains pending until the syscall returns, and wait() hangs forever.
-        try:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
-        except OSError:
-            pass
-        return None
-    except Exception:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        return None
 
-    if proc.returncode != 0 or not stdout:
+def _parse_statvfs(stdout: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
+    """Validate the child's JSON output: [bsize, blocks, bfree, bavail] with sane ordering."""
+    if not stdout:
         return None
-
     try:
         data = json.loads(stdout)
-        if isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data):
-            return tuple(data)  # (bsize, blocks, bfree, bavail)
     except (json.JSONDecodeError, ValueError):
         return None
+    if not (isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data)):
+        return None
+    bsize, blocks, bfree, bavail = data
+    if bsize > 0 and bfree <= blocks and bavail <= bfree:
+        return (bsize, blocks, bfree, bavail)
     return None
 
 
 def collect_filesystems(paths: List[str], timeout: float = 5.0) -> List[Dict[str, Any]]:
     """
     Collect filesystem stats for all paths concurrently with an overall timeout.
-    Even if multiple remote mounts are hung in D-state, the entire batch finishes
-    within timeout seconds and never blocks the collector loop or starves other metrics.
+    Each path is probed by an isolated child process. Children that miss the deadline
+    are killed and abandoned (never waited on) and remembered in _PENDING_STATVFS; while
+    such a child is still alive, no new child is spawned for that path and the path is
+    reported with null values. Even if several remote mounts are hung in D-state, the
+    batch finishes within timeout seconds and never starves other metrics.
     """
     if not paths:
         return []
 
-    # Spawn statvfs child processes concurrently for all paths
-    procs: List[Tuple[str, Optional[subprocess.Popen]]] = []
-    for p in paths:
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, "-I", "-c", STATVFS_SCRIPT, p],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            procs.append((p, proc))
-        except (subprocess.SubprocessError, OSError, ValueError):
-            procs.append((p, None))
+    # Reap children from previous rounds that have exited; skip paths whose child is still alive.
+    for p in list(_PENDING_STATVFS):
+        if _PENDING_STATVFS[p].poll() is not None:
+            del _PENDING_STATVFS[p]
 
-    t_deadline = time.time() + timeout
+    procs: List[Tuple[str, "subprocess.Popen[str]"]] = []
+    for p in paths:
+        if p in _PENDING_STATVFS:
+            continue
+        proc = _spawn_statvfs(p)
+        if proc is not None:
+            procs.append((p, proc))
+
+    t_deadline = time.monotonic() + timeout
     raw_outputs: Dict[str, Optional[str]] = {}
 
-    while time.time() < t_deadline:
+    while time.monotonic() < t_deadline:
         all_finished = True
         for p, proc in procs:
-            if proc is None or p in raw_outputs:
+            if p in raw_outputs:
                 continue
             ret = proc.poll()
             if ret is not None:
@@ -769,23 +775,13 @@ def collect_filesystems(paths: List[str], timeout: float = 5.0) -> List[Dict[str
             break
         time.sleep(0.02)
 
-    # For any proc that did not finish before the deadline, abandon without blocking wait()
+    # Abandon unfinished children without blocking wait() and remember them.
     for p, proc in procs:
-        if proc is not None and p not in raw_outputs:
+        if p not in raw_outputs:
             raw_outputs[p] = None
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.stderr:
-                    proc.stderr.close()
-            except OSError:
-                pass
+            _abandon_child(proc)
+            _PENDING_STATVFS[p] = proc
 
-    # Build filesystem metrics from outputs
     results: List[Dict[str, Any]] = []
     for p in paths:
         fs_id = f"fs_{hashlib.sha256(p.encode('utf-8')).hexdigest()[:16]}"
@@ -797,32 +793,24 @@ def collect_filesystems(paths: List[str], timeout: float = 5.0) -> List[Dict[str
             "availableBytes": None,
             "usedPercent": None,
         }
-        stdout = raw_outputs.get(p)
-        if stdout:
-            try:
-                data = json.loads(stdout)
-                if isinstance(data, list) and len(data) == 4 and all(isinstance(x, int) for x in data):
-                    bsize, blocks, bfree, bavail = data
-                    if bsize > 0 and bfree <= blocks and bavail <= bfree:
-                        total = blocks * bsize
-                        used = (blocks - bfree) * bsize
-                        available = bavail * bsize
-                        used_pct = calc_percent(used, used + available)
-                        entry.update({
-                            "totalBytes": total,
-                            "usedBytes": used,
-                            "availableBytes": available,
-                            "usedPercent": used_pct,
-                        })
-            except (json.JSONDecodeError, ValueError):
-                pass
+        parsed = _parse_statvfs(raw_outputs.get(p))
+        if parsed is not None:
+            bsize, blocks, bfree, bavail = parsed
+            used = (blocks - bfree) * bsize
+            available = bavail * bsize
+            entry.update({
+                "totalBytes": blocks * bsize,
+                "usedBytes": used,
+                "availableBytes": available,
+                "usedPercent": calc_percent(used, used + available),
+            })
         results.append(entry)
 
     return results
 
 
 def collect_filesystem(path: str, timeout: float = 5.0) -> Dict[str, Any]:
-    """Collect filesystem statistics via isolated_statvfs matching chirp storage.ts."""
+    """Collect statistics for a single path; thin wrapper over collect_filesystems."""
     return collect_filesystems([path], timeout=timeout)[0]
 
 
@@ -899,7 +887,7 @@ def collect_storage(
         return None
 
     now_ms = int(time.time() * 1000)
-    filesystems = collect_filesystems(filesystem_paths, timeout=5.0) if has_fs and filesystem_paths else None
+    filesystems = collect_filesystems(filesystem_paths, timeout=5.0) if has_fs else None
     zfs_pools = collect_zfs_pools(zpool_bin) if zfs_enabled else None
 
     return {
