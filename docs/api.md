@@ -161,3 +161,18 @@ Requests an immediate re-collection (does not wait for it), including a re-disco
 ## Dashboard
 
 `GET /` and `/assets/*` are public static files (SPA fallback); the data behind them needs a session. Nothing is served if `CHIRP_WEB_DIR` has no `index.html`. `/api` and `/health` paths never fall back to the dashboard.
+
+## Additional host and storage metrics
+
+These are additive fields in API version 1. Older snapshots remain valid.
+
+- `sensors[].id`: stable device-path/channel hash for non-CPU hwmon temperature sensors. It survives label changes, peer removal and hwmon renumbering; older servers omit it. Runtime-suspended GPUs retain their ID with a null temperature without waking the GPU.
+- `load.ioWaitPercent`: percentage of CPU time waiting for I/O between two `/proc/stat` samples, with the same scope as `load`. Null on the first sample, a scope change, a missing I/O counter or a counter reset. Linux I/O wait is a diagnostic CPU-time measure, not disk utilization.
+- `filesystems`: optional/null array of `{id, path, scope, totalBytes, usedBytes, availableBytes, usedPercent}`. Enable with `CHIRP_FILESYSTEM_PATHS=/,/data` (at most 32 absolute paths). `usedBytes` excludes free blocks; `availableBytes` excludes reserved blocks. Usage is `used / (used + available)`, like `df`. An unreadable path retains its ID and null values.
+- `zfsPools`: optional/null array of `{id, name, health, totalBytes, usedBytes, freeBytes, usedPercent}`. Enable with `CHIRP_ZFS_ENABLED=true`; the GUID is the stable ID even if the pool is renamed. Reads `zpool list -Hp -o guid,name,health,size,allocated,free`, without a shell, with a five-second timeout and 1 MiB output limit. Unknown sizes remain null. Pool free bytes are raw pool space, not dataset available space.
+
+Storage is cached asynchronously, at most once every 60 seconds. GET never triggers collection. Disabled/failed ZFS collection is null; a successful query with no pools is `[]`. Filesystem failures do not affect ZFS, CPU, network or SMART data. Filesystem statistics run in separate Node processes (at most two live workers), protecting the server's libuv pool from stalled mounts. Both collectors have a five-second response deadline and send SIGKILL on timeout. Pending work is reused until the actual process exits, so an unkillable worker cannot accumulate replacements.
+
+In a container, filesystem paths refer to that container and report `scope: container`. To read host paths, explicitly bind the host root read-only at `/host/root` and set `CHIRP_HOST_ROOT=/host/root`; configured paths are then resolved under it with `scope: host`, with no fallback to the container. Symlinks resolving outside the mounted host root are rejected and reported as null values. No mounts or privileges are added automatically. ZFS requires `zpool` and access to the relevant host devices; opt in only on deployments where these already exist. No pool modification commands are run.
+
+The ZFS columns and flags follow the [OpenZFS zpool-list manual](https://openzfs.github.io/openzfs-docs/man/v2.2/8/zpool-list.8.html).

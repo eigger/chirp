@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Cpu } from "@chirp/shared";
+import { createHash } from "node:crypto";
+import { hwmonChips } from "./power.js";
 
 export interface SensorEntry {
+  id?: string;
   chip: string;
   label: string;
   temp: number | null;
@@ -17,7 +20,7 @@ export interface HwmonChip {
 
 export interface SensorReadout {
   cpu: Omit<Cpu, "model" | "updatedAt">;
-  sensors: { chip: string; label: string; temp: number | null }[];
+  sensors: { id?: string; chip: string; label: string; temp: number | null }[];
 }
 
 type CpuSource = NonNullable<Cpu["source"]>;
@@ -47,23 +50,20 @@ function listDir(path: string): string[] {
 }
 
 export function readHwmonChips(sysfsRoot: string): HwmonChip[] {
-  const base = join(sysfsRoot, "class", "hwmon");
   const chips: HwmonChip[] = [];
-  for (const dir of listDir(base).sort()) {
-    const path = join(base, dir);
-    const name = readText(join(path, "name"));
-    if (!name) continue;
+  for (const { path, name, key, suspended } of hwmonChips(sysfsRoot)) {
     const entries: SensorEntry[] = [];
     for (const file of listDir(path).sort()) {
       const m = /^temp(\d+)_input$/.exec(file);
       if (!m) continue;
       const idx = m[1];
       entries.push({
+        id: `temp_${createHash("sha256").update(`${key}/${name}/temp${idx}`).digest("hex").slice(0, 16)}`,
         chip: name,
         label: readText(join(path, `temp${idx}_label`)) || `temp${idx}`,
-        temp: readMilli(join(path, file)),
-        max: readMilli(join(path, `temp${idx}_max`)),
-        crit: readMilli(join(path, `temp${idx}_crit`)),
+        temp: suspended ? null : readMilli(join(path, file)),
+        max: suspended ? null : readMilli(join(path, `temp${idx}_max`)),
+        crit: suspended ? null : readMilli(join(path, `temp${idx}_crit`)),
       });
     }
     chips.push({ name, entries });
@@ -148,7 +148,7 @@ export function readSensors(sysfsRoot: string): SensorReadout {
   const sensors: SensorReadout["sensors"] = [];
   for (const chip of chips) {
     if (cpuChips.includes(chip)) continue;
-    for (const e of chip.entries) sensors.push({ chip: chip.name, label: e.label, temp: round1(e.temp) });
+    for (const e of chip.entries) sensors.push({ id: e.id, chip: chip.name, label: e.label, temp: round1(e.temp) });
   }
 
   if (!cpuName) {

@@ -111,5 +111,7 @@
   "network": null,
   "power": null,
   "fans": [],
-  "voltages": []
+  "voltages": [],
+  "filesystems": null,
+  "zfsPools": null
 }

@@ -186,3 +186,9 @@ Proxmox LXC: keep the defaults (the installer mounts `/host/proc` and `/host/sys
 - **The CLI reads the service settings.** `cli.js` loads `/etc/chirp/chirp.env` when it exists (or `--env-file <path>` / `CHIRP_ENV_FILE`), so `pct exec <CTID> -- node /opt/chirp/current/apps/server/dist/cli.js admin reset-password` uses the same data directory as the service.
 - Sessions: HttpOnly + SameSite=Strict cookie, 12 h idle / 7 days max, kept in memory (a restart signs everyone out), all ended by a password change. Passwords must be 10-256 characters and not a common/guessable one.
 - A privileged container is assumed; its root is effectively host root (see above).
+
+## Optional filesystem and ZFS monitoring
+
+Set `CHIRP_FILESYSTEM_PATHS=/,/data` to monitor selected filesystem paths (maximum 32), and optionally `CHIRP_ZFS_ENABLED=true` for read-only ZFS pool health/capacity. Both are off by default and sampled asynchronously once a minute. ZFS needs `zpool` and existing device access; Chirp does not install tools, add privileges or modify pools.
+
+In a container these paths describe its own mounts. For host filesystems explicitly mount the host root read-only at `/host/root` and set `CHIRP_HOST_ROOT=/host/root`; `/data` then means `/host/root/data`, with no fallback if it cannot be read. See [API semantics](api.md#additional-host-and-storage-metrics).

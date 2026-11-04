@@ -388,7 +388,7 @@ describe("HostMetrics end to end", () => {
       swapUsedBytes: 0,
       swapUsedPercent: null,
     });
-    expect(Load.parse(a.load)).toEqual({ scope: "host", load1: 1.5, load5: 1, load15: 0.5, cpuCount: 4, cpuUsagePercent: null });
+    expect(Load.parse(a.load)).toEqual({ scope: "host", load1: 1.5, load5: 1, load15: 0.5, cpuCount: 4, cpuUsagePercent: null, ioWaitPercent: null });
     const net = Network.parse(a.network);
     expect(net.scope).toBe("host");
     expect(net.interfaces.map((i) => i.id)).toEqual(["bond0_100", "eno1", "vmbr0"]);

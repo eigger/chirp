@@ -7,6 +7,7 @@ import { History } from "./history.js";
 import { detectContainer } from "./hostPaths.js";
 import { HostMetrics, type HostSample } from "./hostMetrics.js";
 import { readCpuModel, readSensors, type SensorReadout } from "./hwmon.js";
+import { StorageCollector, type StorageSample } from "./storage.js";
 import {
   discoverDevices,
   readDisk,
@@ -29,6 +30,7 @@ export interface CollectorDeps {
    * Without it the snapshot carries none of these (optional) sections.
    */
   sampleHost?: (monotonicMs: number) => HostSample;
+  sampleStorage?: () => Promise<StorageSample>;
   /** Monotonic clock for host metric rates (default `performance.now()`); wall-clock steps must not distort rates. */
   monotonicMs?: () => number;
 }
@@ -48,6 +50,8 @@ export interface CollectorOptions {
 }
 
 export function defaultDeps(config: Config, warn: (msg: string) => void = () => {}): CollectorDeps {
+  const storage = new StorageCollector({ paths: config.filesystemPaths, hostRoot: config.hostRoot,
+    inContainer: detectContainer(), zfs: config.zfsEnabled });
   const host = new HostMetrics({
     roots: { hostProc: config.hostProc, hostSys: config.hostSys, proc: "/proc", sys: "/sys", inContainer: detectContainer() },
     sysfsRoot: config.sysfsRoot,
@@ -56,6 +60,7 @@ export function defaultDeps(config: Config, warn: (msg: string) => void = () => 
   });
   return {
     sampleHost: (monotonicMs) => host.sample(monotonicMs),
+    sampleStorage: () => storage.sample(),
     readSensors: () => readSensors(config.sysfsRoot),
     readCpuModel: () => readCpuModel(),
     discoverDevices: () => discoverDevices(config),
@@ -97,6 +102,9 @@ export class Collector {
   };
   private sensorsAt: string | null = null;
   private host: HostSample | null = null;
+  private storage: StorageSample | null = null;
+  private storageRunning: Promise<void> | null = null;
+  private storageAt: number | null = null;
   private timers: NodeJS.Timeout[] = [];
   private smartRunning: Promise<void> | null = null;
   private devices: DiscoveredDevice[] | null = null;
@@ -142,6 +150,20 @@ export class Collector {
       /* keep the previous readings */
     }
     this.collectHost();
+    void this.collectStorage();
+  }
+
+  /** At most once a minute, coalesced and independent of CPU/SMART collection. */
+  async collectStorage(): Promise<void> {
+    if (!this.deps.sampleStorage) return;
+    if (this.storageRunning) return this.storageRunning;
+    const now = (this.deps.monotonicMs ?? (() => performance.now()))();
+    if (this.storageAt !== null && now >= this.storageAt && now - this.storageAt < 60_000) return;
+    this.storageAt = now;
+    this.storageRunning = Promise.resolve().then(() => this.deps.sampleStorage!()).then((next) => {
+      this.storage = next;
+    }).catch(() => { this.storage = { filesystems: null, zfsPools: null }; }).finally(() => { this.storageRunning = null; });
+    return this.storageRunning;
   }
 
   /** Host metrics; isolated from the CPU sensors and SMART (HostMetrics already isolates each section). */
@@ -265,6 +287,7 @@ export class Collector {
       sensors: this.sensors.sensors,
       disks: [...this.disks.values()].map((r) => r.disk).sort((a, b) => a.name.localeCompare(b.name)),
       ...(this.host ?? {}),
+      ...(this.storage ?? {}),
     };
   }
 

@@ -106,6 +106,8 @@ export const Cpu = z.object({
 export type Cpu = z.infer<typeof Cpu>;
 
 export const SensorReading = z.object({
+  /** Device-path/channel identity; absent on older servers. */
+  id: z.string().regex(/^[a-z0-9_]+$/).optional(),
   chip: z.string(),
   label: z.string(),
   temp,
@@ -159,6 +161,8 @@ export const Load = z.object({
   cpuCount: num,
   /** Busy share of all CPUs between the last two samples (0-100, one decimal); null until two samples exist. */
   cpuUsagePercent: num,
+  /** CPU time waiting for I/O between samples; null initially or after a reset. */
+  ioWaitPercent: num.optional(),
 });
 export type Load = z.infer<typeof Load>;
 
@@ -247,6 +251,29 @@ export const Voltage = z.object({
 });
 export type Voltage = z.infer<typeof Voltage>;
 
+export const Filesystem = z.object({
+  id: z.string(),
+  path: z.string(),
+  scope: MetricScope,
+  totalBytes: num,
+  usedBytes: num,
+  availableBytes: num,
+  usedPercent: num,
+});
+export type Filesystem = z.infer<typeof Filesystem>;
+
+export const ZfsPool = z.object({
+  /** Pool GUID, preserved across pool renames. */
+  id: z.string(),
+  name: z.string(),
+  health: z.string(),
+  totalBytes: num,
+  usedBytes: num,
+  freeBytes: num,
+  usedPercent: num,
+});
+export type ZfsPool = z.infer<typeof ZfsPool>;
+
 export const StatusSnapshot = z.object({
   apiVersion: z.literal(API_VERSION),
   instance: Instance,
@@ -267,6 +294,9 @@ export const StatusSnapshot = z.object({
   fans: z.array(Fan).optional(),
   /** hwmon in*_input (mV -> V); empty when the host exposes none. */
   voltages: z.array(Voltage).optional(),
+  /** Opt-in storage collection; null when disabled or collection fails. */
+  filesystems: z.array(Filesystem).nullable().optional(),
+  zfsPools: z.array(ZfsPool).nullable().optional(),
 });
 export type StatusSnapshot = z.infer<typeof StatusSnapshot>;
 
