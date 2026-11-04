@@ -2,6 +2,7 @@
 Description=chirp Host Collector (Hardware & Metrics Snapshot)
 Documentation=https://github.com/eigger/chirp
 After=local-fs.target
+Before=pve-guests.service
 
 [Service]
 Type=simple

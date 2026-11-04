@@ -17,7 +17,9 @@
 # Notes (also in docs/deploy.md):
 #  - root in a privileged LXC is effectively host root. Use it on trusted hosts only.
 #  - Do not use it for CTs managed by cluster HA (by-id disks exist on one node only).
-#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
+#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES:
+#    * Unprivileged CT: configure in /etc/chirp/chirp.env on the Proxmox host (where chirp-collector runs).
+#    * Privileged CT: configure in the container's /etc/chirp/chirp.env.
 #  - Host metric mounts, CHIRP_HOST_MOUNTS=all|proc|0 (default all):
 #    * proc: the host's /proc/meminfo, /proc/stat, /proc/loadavg -> /host/proc (read-only
 #      files). Inside the container these may be lxcfs views of the container's limits.
@@ -868,22 +870,27 @@ chirp_setup_unprivileged_snapshot() {
   if [[ -n "$ct_device_types" || -n "$ct_devices" ]]; then
     if install -d -m 0755 /etc/chirp 2>/dev/null; then
       local host_env="/etc/chirp/chirp.env"
-      touch "$host_env" 2>/dev/null || true
+      local tmp_env
+      tmp_env="$(mktemp /etc/chirp/chirp.env.tmp.XXXXXX 2>/dev/null || mktemp)"
+      chmod 0600 "$tmp_env" 2>/dev/null || true
       if [[ -f "$host_env" ]]; then
-        if [[ -n "$ct_device_types" ]]; then
-          _cp_msg "Syncing CHIRP_DEVICE_TYPES from CT ${ctid} to ${host_env}..."
-          grep -v "^CHIRP_DEVICE_TYPES=" "$host_env" >"${host_env}.new" 2>/dev/null || true
-          printf "CHIRP_DEVICE_TYPES=%s\n" "$ct_device_types" >>"${host_env}.new" 2>/dev/null || true
-          cat "${host_env}.new" >"$host_env" 2>/dev/null; rm -f "${host_env}.new"
-        fi
-        if [[ -n "$ct_devices" ]]; then
-          _cp_msg "Syncing CHIRP_DEVICES from CT ${ctid} to ${host_env}..."
-          grep -v "^CHIRP_DEVICES=" "$host_env" >"${host_env}.new" 2>/dev/null || true
-          printf "CHIRP_DEVICES=%s\n" "$ct_devices" >>"${host_env}.new" 2>/dev/null || true
-          cat "${host_env}.new" >"$host_env" 2>/dev/null; rm -f "${host_env}.new"
-        fi
-        chmod 0600 "$host_env" 2>/dev/null || true
+        cat "$host_env" >"$tmp_env" 2>/dev/null || true
       fi
+      if [[ -n "$ct_device_types" ]]; then
+        _cp_msg "Syncing CHIRP_DEVICE_TYPES from CT ${ctid} to ${host_env}..."
+        grep -v "^CHIRP_DEVICE_TYPES=" "$tmp_env" >"${tmp_env}.new" 2>/dev/null || true
+        printf "CHIRP_DEVICE_TYPES=%s\n" "$ct_device_types" >>"${tmp_env}.new" 2>/dev/null || true
+        mv -f "${tmp_env}.new" "$tmp_env" 2>/dev/null || true
+      fi
+      if [[ -n "$ct_devices" ]]; then
+        _cp_msg "Syncing CHIRP_DEVICES from CT ${ctid} to ${host_env}..."
+        grep -v "^CHIRP_DEVICES=" "$tmp_env" >"${tmp_env}.new" 2>/dev/null || true
+        printf "CHIRP_DEVICES=%s\n" "$ct_devices" >>"${tmp_env}.new" 2>/dev/null || true
+        mv -f "${tmp_env}.new" "$tmp_env" 2>/dev/null || true
+      fi
+      chmod 0600 "$tmp_env" 2>/dev/null || true
+      mv -f "$tmp_env" "$host_env" 2>/dev/null || true
+      rm -f "$tmp_env" "${tmp_env}.new" 2>/dev/null || true
     fi
   fi
 
@@ -895,36 +902,55 @@ chirp_setup_unprivileged_snapshot() {
   local collector_bin="/usr/local/bin/chirp-collector"
   local collector_svc="/etc/systemd/system/chirp-collector.service"
   local repo="${CHIRP_REPO:-eigger/chirp}"
-  local ref="${CHIRP_REF:-}"
-
-  if [[ -z "$ref" && -z "${CHIRP_RAW_BASE:-}" ]]; then
-    # Try container's installed version first
-    local ct_ver
-    ct_ver="$(pct exec "$ctid" -- grep -o '"version": *"[^"]*"' /opt/chirp/package.json 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    if [[ -n "$ct_ver" ]]; then
-      ref="v${ct_ver#v}"
-    else
-      # Try GitHub releases/latest tag
-      ref="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
-    fi
-  fi
-  ref="${ref:-master}"
-
-  local raw_base="${CHIRP_RAW_BASE:-https://raw.githubusercontent.com/${repo}/${ref}}"
-
-  _cp_msg "Downloading chirp-collector from ${raw_base}..."
-  local tmp_bin tmp_svc
+  local tmp_bin tmp_svc downloaded=0
   tmp_bin="$(mktemp)"
   tmp_svc="$(mktemp)"
 
-  if ! curl -fsSL "${raw_base}/proxmox/host/chirp-collector.py" -o "$tmp_bin" || [[ ! -s "$tmp_bin" ]]; then
-    _cp_err "Failed to download chirp-collector.py from ${raw_base}"
-    rm -f "$tmp_bin" "$tmp_svc"
-    return 1
+  if [[ -n "${CHIRP_RAW_BASE:-}" ]]; then
+    _cp_msg "Downloading chirp-collector from ${CHIRP_RAW_BASE}..."
+    if curl -fsSL "${CHIRP_RAW_BASE}/proxmox/host/chirp-collector.py" -o "$tmp_bin" && [[ -s "$tmp_bin" ]] \
+       && curl -fsSL "${CHIRP_RAW_BASE}/proxmox/host/chirp-collector.service" -o "$tmp_svc" && [[ -s "$tmp_svc" ]]; then
+      downloaded=1
+    fi
+  else
+    local candidate_refs=()
+    if [[ -n "${CHIRP_REF:-}" ]]; then
+      candidate_refs+=("${CHIRP_REF}")
+    else
+      local ct_ver
+      ct_ver="$(pct exec "$ctid" -- grep -o '"version": *"[^"]*"' /opt/chirp/current/package.json 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+      if [[ -z "$ct_ver" ]]; then
+        ct_ver="$(pct exec "$ctid" -- grep -o '"version": *"[^"]*"' /opt/chirp/package.json 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+      fi
+      if [[ -n "$ct_ver" ]]; then
+        candidate_refs+=("v${ct_ver#v}")
+      else
+        local latest_tag
+        latest_tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+        if [[ -n "$latest_tag" ]]; then
+          candidate_refs+=("${latest_tag}")
+        fi
+      fi
+      # Always fall back to master if candidate tag does not contain proxmox/host/ (e.g. releases <= v0.2.0)
+      if [[ "${candidate_refs[*]:-}" != *"master"* ]]; then
+        candidate_refs+=("master")
+      fi
+    fi
+
+    for ref in "${candidate_refs[@]}"; do
+      local raw_base="https://raw.githubusercontent.com/${repo}/${ref}"
+      _cp_msg "Trying download of chirp-collector from ${raw_base}..."
+      if curl -fsSL "${raw_base}/proxmox/host/chirp-collector.py" -o "$tmp_bin" 2>/dev/null && [[ -s "$tmp_bin" ]] \
+         && curl -fsSL "${raw_base}/proxmox/host/chirp-collector.service" -o "$tmp_svc" 2>/dev/null && [[ -s "$tmp_svc" ]]; then
+        downloaded=1
+        _cp_msg "Downloaded chirp-collector using ref ${ref}."
+        break
+      fi
+    done
   fi
 
-  if ! curl -fsSL "${raw_base}/proxmox/host/chirp-collector.service" -o "$tmp_svc" || [[ ! -s "$tmp_svc" ]]; then
-    _cp_err "Failed to download chirp-collector.service from ${raw_base}"
+  if [[ "$downloaded" -ne 1 ]]; then
+    _cp_err "Failed to download chirp-collector.py and service from repository (${repo})"
     rm -f "$tmp_bin" "$tmp_svc"
     return 1
   fi
@@ -940,6 +966,7 @@ chirp_setup_unprivileged_snapshot() {
   fi
 
   _cp_msg "Unprivileged CT ${ctid} configured successfully with /run/chirp snapshot mount."
+  _cp_msg "Note: For unprivileged CTs, configure CHIRP_DEVICE_TYPES in /etc/chirp/chirp.env on this host."
   return 0
 }
 

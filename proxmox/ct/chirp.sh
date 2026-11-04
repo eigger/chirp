@@ -29,7 +29,9 @@ unset _chirp_build_func
 #    reads hardware & SMART snapshots via the host collector (/run/chirp).
 #  - For legacy privileged direct passthrough, set var_unprivileged=0.
 #  - Do not use it for CTs managed by cluster HA (the disks are tied to one node).
-#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES in the container's /etc/chirp/chirp.env.
+#  - Disks behind USB bridges/HBAs need CHIRP_DEVICE_TYPES:
+#    * Unprivileged CT (default): configure in /etc/chirp/chirp.env on the Proxmox host (where chirp-collector runs).
+#    * Privileged CT (var_unprivileged=0): configure in the container's /etc/chirp/chirp.env.
 #
 # Copyright (c) 2021-2026 community-scripts ORG
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE

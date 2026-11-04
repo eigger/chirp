@@ -49,7 +49,7 @@ export interface Config {
   hostProc: string;
   /** Host /sys for network interfaces (CHIRP_HOST_SYS; default /host/sys if it exists, else /sys). */
   hostSys: string;
-  /** Host snapshot path for unprivileged containers (CHIRP_HOST_SNAPSHOT; default /run/chirp/host.json if present). */
+  /** Host snapshot path for unprivileged containers (CHIRP_HOST_SNAPSHOT; default /run/chirp/host.json; set to none/0/false to disable). */
   hostSnapshot: string | null;
   /** Max acceptable age of a host snapshot before it is flagged stale (CHIRP_SNAPSHOT_MAX_AGE_SEC, default 60). */
   snapshotMaxAgeSec: number;

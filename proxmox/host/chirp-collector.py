@@ -222,6 +222,12 @@ def hwmon_key(sysfs_root: str, chip_path: str) -> str:
     return rel_path
 
 
+def hwmon_label(chip_path: str, prefix: str, idx: Any) -> str:
+    """Read sensor label matching server readText(path)?.trim() || `${prefix}${i}`."""
+    txt = read_text(os.path.join(chip_path, f"{prefix}{idx}_label"))
+    return (txt.strip() if txt else "") or f"{prefix}{idx}"
+
+
 def hwmon_id(chip_name: str, chip_key: str, prefix: str, idx: int, display: str) -> str:
     """Construct deterministic sensor ID matching server power.ts."""
     base = slug(f"{chip_name}_{display}") or prefix
@@ -290,7 +296,7 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                 t = read_milli(os.path.join(path, f"temp{idx}_input")) if not suspended else None
                 t_max = read_milli(os.path.join(path, f"temp{idx}_max"))
                 t_crit = read_milli(os.path.join(path, f"temp{idx}_crit"))
-                label = (read_text(os.path.join(path, f"temp{idx}_label")) or f"temp{idx}").strip()
+                label = hwmon_label(path, "temp", idx)
                 entry = {"label": label, "temp": t, "max": t_max, "crit": t_crit, "index": idx}
                 chip_temps.append(entry)
                 if name not in cpu_chips:
@@ -313,7 +319,7 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                 if not suspended:
                     raw_rpm = read_int(os.path.join(path, f"fan{idx}_input"))
                     rpm = round(raw_rpm) if raw_rpm is not None else None
-                label = (read_text(os.path.join(path, f"fan{idx}_label")) or f"fan{idx}").strip()
+                label = hwmon_label(path, "fan", idx)
                 sensor_id = hwmon_id(name, key, "fan", idx, label)
                 fans_list.append({"id": sensor_id, "chip": name, "label": label, "rpm": rpm})
 
@@ -324,7 +330,7 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                 if not suspended:
                     raw_v = read_float(os.path.join(path, f"in{idx}_input"))
                     volts = round(raw_v / 1000.0, 3) if raw_v is not None else None
-                label = (read_text(os.path.join(path, f"in{idx}_label")) or f"in{idx}").strip()
+                label = hwmon_label(path, "in", idx)
                 sensor_id = hwmon_id(name, key, "in", idx, label)
                 voltages_list.append({"id": sensor_id, "chip": name, "label": label, "volts": volts})
 
@@ -337,7 +343,7 @@ def collect_hwmon(sysfs_root: str, proc_root: str) -> Dict[str, Any]:
                     if raw_p is None:
                         raw_p = read_float(os.path.join(path, f"power{idx}_average"))
                     watts = round(raw_p / 1000000.0, 1) if raw_p is not None else None
-                label = (read_text(os.path.join(path, f"power{idx}_label")) or f"power{idx}").strip()
+                label = hwmon_label(path, "power", idx)
                 sensor_id = hwmon_id(name, key, "power", idx, label)
                 power_list.append({"id": sensor_id, "chip": name, "label": label, "watts": watts})
 
