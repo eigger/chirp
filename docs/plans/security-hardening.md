@@ -143,21 +143,56 @@ The snapshot is treated as untrusted input by the container. Defined in shared s
 
 ### 2.6 Implementation Tasks & PR Breakdown
 
-1. **PR 2.1 - Shared Schema & Host Snapshot Reader:**
-   - Define `HostSnapshot` zod schema in `packages/shared/src/schema.ts` (or snapshot schema module).
-   - Implement `apps/server/src/hostSnapshot.ts` with size bound, staleness check, error isolation.
+1. **PR 2.1 - Shared Schema & Host Snapshot Reader (Completed in PR #8):**
+   - Define `HostSnapshot` zod schema in `packages/shared/src/schema.ts`.
+   - Implement `apps/server/src/hostSnapshot.ts` with size bound (10 MB limit), staleness check, error isolation.
    - Wire `CHIRP_HOST_SNAPSHOT` config in `apps/server/src/config.ts`.
    - Comprehensive tests for valid, malformed, oversize, and stale snapshots.
-2. **PR 2.2 - Server Collector Integration:**
+2. **PR 2.2 - Server Collector Integration (Completed in PR #8):**
    - Adapt `scheduler.ts`, `smartctl.ts`, `hostMetrics.ts`, and `hwmon.ts` to source data from `hostSnapshot` when available.
-   - Maintain 100% backward compatibility with direct read mode (Docker / bare metal).
-3. **PR 2.3 - Host Collector Script & Systemd Unit:**
+   - Maintain 100% backward compatibility with direct read mode (Docker / bare metal / privileged LXC).
+3. **PR 2.3 - Host Collector Script & Systemd Unit (Completed in PR #8):**
    - Implement `proxmox/host/chirp-collector.py` (Python 3 stdlib, atomic write, safe smartctl execution).
    - Unit/integration tests for the collector script against mock sysfs/procfs and mock smartctl.
    - Add `chirp-collector.service`.
-4. **PR 2.4 - Proxmox Scripts & Unprivileged CT Support:**
+4. **PR 2.4 - Proxmox Scripts & Unprivileged CT Support (Completed in PR #8):**
    - Update `proxmox/ct/chirp.sh` and `proxmox/install/chirp-passthrough.sh` to support unprivileged mode with `/run/chirp` mount.
    - Update documentation (`docs/deploy.md`, `docs/ko/deploy.md`, `docs/PROJECT.md`).
+
+### 2.7 Review Iterations & Hardening Fixes (PR #8)
+
+During peer review cycles for PR #8, several critical edge cases and failure modes were uncovered and hardened prior to merge:
+
+1. **Schema Nullability & Resilience:**
+   - `hwmon.cpu` made nullable/optional: prevents total snapshot rejection on hosts without standard CPU hwmon chips.
+   - `HostSnapshotSmartDevice.smartctl` made nullable/optional: if `smartctl` fails on an individual drive, valid disks are preserved and the server handles open failures gracefully rather than rejecting the entire snapshot.
+2. **SMART Failing Disks (Never Discard Diagnostics):**
+   - `smartctl` exit codes with bit 3 (DISK FAILING) or bit 6 (device error log) contain valid JSON diagnostics. The collector parses JSON across all non-zero exit codes whenever valid output is returned, ensuring chirp detects and alerts on failing disks instead of falling back to empty open failures.
+3. **Staleness & Clock Skew Guard:**
+   - Ingestion tracks `stale` state; if the host collector stops or dies, stale metrics are served with degradation warnings without advancing SMART collection timestamps using container clock.
+   - Network rate and RAPL power calculations use snapshot sample timestamps (`sampleAt`) rather than mixing container wall-clock time, avoiding false 0 W readings or rate spikes.
+4. **Boot Ordering & Host Inode Preservation:**
+   - `chirp-collector.service` configured with `RuntimeDirectory=chirp`, `RuntimeDirectoryPreserve=yes` to ensure `/run/chirp` is recreated on boot without destroying the directory inode across daemon restarts (which would detach LXC bind mounts).
+   - Added `Before=pve-guests.service` so onboot containers never start before `/run/chirp` exists.
+5. **Collector Download & Release Fallback:**
+   - Installer queries `/opt/chirp/current/package.json` for installed version; if release tags 404 (e.g. v0.2.0 lacks `proxmox/host/`), it gracefully falls back to `master`.
+6. **hwmon Parity with Direct Read:**
+   - Stable sensor IDs: `chirp-collector.py` generates `temp_${sha256(key/name/tempN)[:16]}` IDs identical to `hwmon.ts` (#7).
+   - Sysfs label whitespace trimming: `hwmon_label` trims whitespace matching TypeScript `readText()?.trim() || fallback`.
+   - CPU package priority: selects `Package id N` > `Tdie` > `Tctl` > `Package` to prevent AMD Ryzen +10~20°C Tctl offsets.
+   - Dual-socket AMD socket fallback: falls back to `Package {chip_order}` when multiple sockets lack sysfs package IDs.
+   - Idle GPU protection: checks runtime PM status and skips `temp_max`/`temp_crit` reads on suspended GPUs (PCI D3) to prevent waking them up.
+7. **Atomic Host Environment:**
+   - `/etc/chirp/chirp.env` is written using `mktemp` with `chmod 0600` before atomic `mv -f` to prevent permission race conditions.
+
+### 2.8 Current Status & Next Steps
+
+- **PR #8 Status:** Merged into `master` via commit `3561970`. All CI suites (`lint`, `build`, `test`, `proxmox`) passing.
+- **Default Container Mode:** `var_unprivileged=0` (privileged) remains the default in `proxmox/ct/chirp.sh` until release `v0.3.0` is tagged, ensuring one-liner installs do not fail against older release tarballs (v0.2.0). Unprivileged mode is opt-in via `var_unprivileged=1`.
+- **v0.3.0 Release Roadmap:**
+  1. Cut `v0.3.0` release tag containing Phase 2 collector assets and server snapshot ingestion.
+  2. Flip `var_unprivileged=1` as the default in `proxmox/ct/chirp.sh` and update deploy documentation.
+  3. Extend `chirp-collector.py` to collect host filesystem / ZFS pool metrics for unprivileged containers.
 
 ## Verification
 
