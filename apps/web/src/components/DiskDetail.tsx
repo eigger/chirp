@@ -57,7 +57,7 @@ export function DiskDetail({ disk, lang }: { disk: Disk; lang: Lang }) {
           {counters.map(([k, v]) => (
             <div key={k} className="kv-row">
               <dt>{t(`counter.${k}` as MessageKey)}</dt>
-              <dd>{k === "bytesWritten" ? formatBytes(v) : (v ?? "—")}</dd>
+              <dd>{k === "bytesWritten" || k === "bytesRead" ? formatBytes(v) : (v ?? "—")}</dd>
             </div>
           ))}
         </dl>

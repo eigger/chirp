@@ -193,7 +193,8 @@ export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
     // Device Statistics "Percentage Used Endurance Indicator" first (page 7, offset 0x08),
     // else a normalised "life left" attribute -> percent used (best effort, SSDs only).
     let wear: number | null = null;
-    if (disk.kind !== "hdd") wear = num(j.endurance_used?.current_percent) ?? devstat(j, 7, 0x08);
+    // Not smartctl's `endurance_used`: without devstat it is guessed from drivedb attribute names.
+    if (disk.kind !== "hdd") wear = devstat(j, 7, 0x08);
     if (disk.kind !== "hdd" && wear === null) {
       for (const id of [177, 231, 233]) {
         const v = num(ataAttr(table, id)?.value);

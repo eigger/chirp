@@ -20,6 +20,7 @@
   },
   "power_on_time": { "hours": 20787 },
   "power_cycle_count": 32,
+  "endurance_used": { "current_percent": 4 },
   "temperature": {
     "current": 70,
     "power_cycle_min": 70,

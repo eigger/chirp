@@ -63,6 +63,8 @@ describe("parseSmartctl", () => {
         ...fixture("sata-ssd-devstat.json"),
         temperature: { current: 40 },
         ata_sct_status: { temperature: { current: 40, lifetime_max: 61, lifetime_min: -128 } },
+        // smartctl's attribute-derived guess must not override chirp's own attribute rule.
+        endurance_used: { current_percent: 55 },
         ata_device_statistics: { pages: [{ number: 7, table: [{ offset: 8, flags: { valid: false } }] }] },
       },
       { devicePath: "/dev/sda" },
