@@ -49,6 +49,40 @@ function rawValue(attr: Json | undefined): number | null {
   return attr ? num(attr.raw?.value) : null;
 }
 
+/** A plausible disk temperature in °C; drops smartctl's -128 "unknown" and other garbage. */
+function tempValue(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n > -60 && n < 150 ? n : null;
+}
+
+/** `ata_device_statistics` entry value for page/offset, only when smartctl marked it valid. */
+function devstat(json: Json, page: number, offset: number): number | null {
+  const pages: Json[] = Array.isArray(json.ata_device_statistics?.pages) ? json.ata_device_statistics.pages : [];
+  const entries: unknown = pages.find((p) => p?.number === page)?.table;
+  const entry = Array.isArray(entries) ? (entries as Json[]).find((e) => e?.offset === offset) : undefined;
+  if (!entry || entry.flags?.valid === false) return null;
+  return num(entry.value);
+}
+
+/**
+ * Temperatures the disk records about itself. smartctl merges SCT Status
+ * (`-l scttempsts`), Device Statistics page 5 and the NVMe warning threshold
+ * into the top-level `temperature` object; `ata_sct_status` is a fallback.
+ */
+function temperatureStats(json: Json): Disk["temperatureStats"] {
+  const top: Json = json.temperature ?? {};
+  const sct: Json = json.ata_sct_status?.temperature ?? {};
+  const pick = (key: string) => tempValue(top[key]) ?? tempValue(sct[key]);
+  const stats = {
+    powerCycleMin: pick("power_cycle_min"),
+    powerCycleMax: pick("power_cycle_max"),
+    lifetimeMin: pick("lifetime_min"),
+    lifetimeMax: pick("lifetime_max"),
+    operatingMax: pick("op_limit_max") ?? tempValue(json.nvme_composite_temperature_threshold?.warning),
+  };
+  return Object.values(stats).some((v) => v !== null) ? stats : null;
+}
+
 /** Messages that mean "the disk is asleep and -n standby skipped it". */
 function isStandby(json: Json): boolean {
   const exit = num(json.smartctl?.exit_status) ?? 0;
@@ -73,6 +107,7 @@ function baseDisk(devicePath: string, json: Json | null, now: Date): Disk {
     rotationRate: null,
     standby: false,
     temperature: null,
+    temperatureStats: null,
     powerOnHours: null,
     powerCycleCount: null,
     smartPassed: null,
@@ -93,7 +128,7 @@ export function unreadDisk(devicePath: string, error: Disk["error"], now = new D
 }
 
 /**
- * Parse `smartctl -j -a -n standby` output. Throws on non-object input.
+ * Parse `smartctl -j -a -l devstat -l scttempsts -n standby` output. Throws on non-object input.
  * `standby: true` results carry no usable measurements.
  */
 export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
@@ -131,6 +166,7 @@ export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
   disk.powerOnHours = num(j.power_on_time?.hours);
   disk.powerCycleCount = num(j.power_cycle_count);
   disk.temperature = num(j.temperature?.current);
+  disk.temperatureStats = temperatureStats(j);
 
   if (disk.protocol === "nvme") {
     disk.kind = "nvme";
@@ -154,9 +190,11 @@ export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
     const rr = num(j.rotation_rate);
     disk.rotationRate = rr;
     disk.kind = rr === null ? "unknown" : rr > 0 ? "hdd" : "ssd";
-    // Normalised "life left" attributes -> percent used (best effort, SSDs only).
+    // Device Statistics "Percentage Used Endurance Indicator" first (page 7, offset 0x08),
+    // else a normalised "life left" attribute -> percent used (best effort, SSDs only).
     let wear: number | null = null;
-    if (disk.kind !== "hdd") {
+    if (disk.kind !== "hdd") wear = num(j.endurance_used?.current_percent) ?? devstat(j, 7, 0x08);
+    if (disk.kind !== "hdd" && wear === null) {
       for (const id of [177, 231, 233]) {
         const v = num(ataAttr(table, id)?.value);
         if (v !== null && v >= 0 && v <= 100) {
@@ -165,12 +203,18 @@ export function parseSmartctl(json: unknown, opts: ParseOptions): DiskReading {
         }
       }
     }
+    // Device Statistics page 1: Logical Sectors Written (0x18) / Read (0x28).
+    const sectorSize = num(j.logical_block_size) ?? 512;
+    const written = devstat(j, 1, 0x18);
+    const read = devstat(j, 1, 0x28);
     disk.ata = {
       reallocatedSectors: rawValue(ataAttr(table, 5)),
       pendingSectors: rawValue(ataAttr(table, 197)),
       offlineUncorrectable: rawValue(ataAttr(table, 198)),
       udmaCrcErrors: rawValue(ataAttr(table, 199)),
       wearLevelPercentUsed: wear,
+      bytesWritten: written === null ? null : written * sectorSize,
+      bytesRead: read === null ? null : read * sectorSize,
     };
     if (disk.temperature === null) {
       const t = rawValue(ataAttr(table, 194)) ?? rawValue(ataAttr(table, 190));
@@ -257,7 +301,10 @@ export async function readDisk(
   }
 
   const attempt = async (deviceType: string | undefined): Promise<DiskReading> => {
-    const args = ["-j", "-a", "-n", "standby", ...(deviceType ? ["-d", deviceType] : []), devicePath];
+    // -l devstat / -l scttempsts add Device Statistics and SCT temperatures. -n standby is
+    // checked first, so they never wake a sleeping disk; non-ATA devices ignore them.
+    const logs = ["-l", "devstat", "-l", "scttempsts"];
+    const args = ["-j", "-a", ...logs, "-n", "standby", ...(deviceType ? ["-d", deviceType] : []), devicePath];
     // smartctl exits non-zero (a bit mask) for many benign reasons, so only stdout matters.
     const { stdout, timedOut, overflow, spawnFailed } = await run(config.smartctl, args, timeoutMs, maxBuffer);
     if (timedOut) throw new SmartctlError("timeout");

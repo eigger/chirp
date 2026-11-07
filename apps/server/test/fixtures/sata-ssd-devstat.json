@@ -1,0 +1,66 @@
+{
+  "smartctl": { "version": [7, 5], "exit_status": 0 },
+  "device": { "name": "/dev/sda", "type": "sat", "protocol": "ATA" },
+  "model_name": "HUGWORLD SSD 512GB",
+  "serial_number": "FAKEHUG0001",
+  "firmware_version": "W0714A0",
+  "user_capacity": { "bytes": 512110190592 },
+  "logical_block_size": 512,
+  "rotation_rate": 0,
+  "smart_status": { "passed": true },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5, "value": 100, "raw": { "value": 0 } },
+      { "id": 177, "name": "Wear_Leveling_Count", "value": 100, "raw": { "value": 0 } },
+      { "id": 194, "name": "Temperature_Celsius", "value": 100, "raw": { "value": 70 } },
+      { "id": 197, "value": 100, "raw": { "value": 0 } },
+      { "id": 198, "value": 100, "raw": { "value": 0 } },
+      { "id": 199, "value": 100, "raw": { "value": 0 } }
+    ]
+  },
+  "power_on_time": { "hours": 20787 },
+  "power_cycle_count": 32,
+  "temperature": {
+    "current": 70,
+    "power_cycle_min": 70,
+    "power_cycle_max": 70,
+    "lifetime_min": 23,
+    "lifetime_max": 75,
+    "op_limit_max": 100
+  },
+  "ata_sct_status": {
+    "temperature": {
+      "current": 70,
+      "power_cycle_min": 70,
+      "power_cycle_max": 70,
+      "lifetime_min": 23,
+      "lifetime_max": 75,
+      "op_limit_max": 100,
+      "under_limit_count": 0,
+      "over_limit_count": 0
+    }
+  },
+  "ata_device_statistics": {
+    "pages": [
+      {
+        "number": 1,
+        "name": "General Statistics",
+        "revision": 1,
+        "table": [
+          { "offset": 8, "name": "Lifetime Power-On Resets", "size": 4, "value": 32, "flags": { "valid": true } },
+          { "offset": 16, "name": "Power-on Hours", "size": 4, "value": 20787, "flags": { "valid": true } },
+          { "offset": 24, "name": "Logical Sectors Written", "size": 6, "value": 2919094965, "flags": { "valid": true } },
+          { "offset": 40, "name": "Logical Sectors Read", "size": 6, "value": 3274298506, "flags": { "valid": true } }
+        ]
+      },
+      {
+        "number": 7,
+        "name": "Solid State Device Statistics",
+        "revision": 1,
+        "table": [
+          { "offset": 8, "name": "Percentage Used Endurance Indicator", "size": 1, "value": 4, "flags": { "valid": true } }
+        ]
+      }
+    ]
+  }
+}

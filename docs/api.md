@@ -114,6 +114,8 @@ Usernames are 1-64 of `A-Z a-z 0-9 . _ @ -`; passwords 10-256 characters and not
 `StatusSnapshot`: `apiVersion`, `instance`, `cpu`, `sensors[]`, `disks[]`, and the optional host metric sections `memory`, `load`, `network`, `power`, `fans[]`, `voltages[]`. Example: [`packages/shared/fixtures/status.sample.json`](../packages/shared/fixtures/status.sample.json).
 
 - A disk with `standby: true` shows the values of its last read (the disk is never woken up).
+- `disks[].temperatureStats`: optional/null `{powerCycleMin, powerCycleMax, lifetimeMin, lifetimeMax, operatingMax}` in °C, as recorded by the disk (ATA SCT Status / Device Statistics; NVMe: `operatingMax` is the warning composite temperature threshold). Each value is null when the disk does not report it.
+- `disks[].ata.wearLevelPercentUsed` prefers the Device Statistics "Percentage Used Endurance Indicator" (can exceed 100) over the normalised attributes 177/231/233. `ata.bytesWritten` / `ata.bytesRead` (optional/null) are Device Statistics logical sectors × logical sector size.
 - `disk.health.status`: `ok | warning | failing | unknown`; `reasons[]` holds `{code, value?}`.
 - `disk.error`: `open_failed | timeout | parse_error | null`. On an error the previous values are kept and health becomes `unknown`. `timeout` means smartctl ran past its time limit; output that is too large to buffer is a `parse_error`.
 - `cpu`: on multi-socket hosts `packageTemp` is the hottest package, `maxTemp` the hottest package or core, `highTemp`/`critTemp` the lowest limit across packages, and core labels are prefixed with `Package <n> ` (see [`PROJECT.md`](PROJECT.md#cpu-temperature)).

@@ -49,6 +49,13 @@
       "rotationRate": 5980,
       "standby": false,
       "temperature": 34,
+      "temperatureStats": {
+        "powerCycleMin": 29,
+        "powerCycleMax": 38,
+        "lifetimeMin": 18,
+        "lifetimeMax": 52,
+        "operatingMax": 60
+      },
       "powerOnHours": 23456,
       "powerCycleCount": 120,
       "smartPassed": true,
@@ -66,7 +73,9 @@
         "pendingSectors": 0,
         "offlineUncorrectable": 0,
         "udmaCrcErrors": 0,
-        "wearLevelPercentUsed": null
+        "wearLevelPercentUsed": null,
+        "bytesWritten": null,
+        "bytesRead": null
       },
       "nvme": null,
       "lastReadAt": "2026-11-03T09:58:00Z",
@@ -85,6 +94,13 @@
       "rotationRate": 0,
       "standby": false,
       "temperature": 42,
+      "temperatureStats": {
+        "powerCycleMin": null,
+        "powerCycleMax": null,
+        "lifetimeMin": null,
+        "lifetimeMax": null,
+        "operatingMax": 84
+      },
       "powerOnHours": 5120,
       "powerCycleCount": 88,
       "smartPassed": true,

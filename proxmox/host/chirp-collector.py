@@ -593,7 +593,8 @@ def collect_smart(
     devices: List[Dict[str, Any]] = []
 
     for dev_path, dev_type in target_devices:
-        read_cmd = [smartctl_bin, "-a", "-j", "-n", "standby"]
+        # -l devstat / -l scttempsts: endurance, bytes written and SCT temperatures; -n standby still wins.
+        read_cmd = [smartctl_bin, "-a", "-l", "devstat", "-l", "scttempsts", "-j", "-n", "standby"]
         if dev_type:
             read_cmd.extend(["-d", dev_type])
         read_cmd.append(dev_path)
