@@ -22,7 +22,10 @@ describe("parseSmartctl", () => {
       offlineUncorrectable: 0,
       udmaCrcErrors: 2,
       wearLevelPercentUsed: null,
+      bytesWritten: null,
+      bytesRead: null,
     });
+    expect(disk.temperatureStats).toBeNull();
     expect(disk.health).toEqual({ status: "ok", reasons: [] });
     expect(disk.name).toBe("sda");
   });
@@ -35,6 +38,52 @@ describe("parseSmartctl", () => {
     expect(disk.ata?.wearLevelPercentUsed).toBe(3);
     expect(disk.temperature).toBe(30); // from attribute 190 raw
     expect(disk.health.status).toBe("ok");
+  });
+
+  it("SSD with Device Statistics + SCT Status: endurance, bytes, temperature stats", () => {
+    const { disk } = parse("sata-ssd-devstat.json");
+    expect(() => Disk.parse(disk)).not.toThrow();
+    // Attribute 177 says 100 (0 % used); Device Statistics wins.
+    expect(disk.ata?.wearLevelPercentUsed).toBe(4);
+    expect(disk.ata?.bytesWritten).toBe(2919094965 * 512);
+    expect(disk.ata?.bytesRead).toBe(3274298506 * 512);
+    expect(disk.temperature).toBe(70);
+    expect(disk.temperatureStats).toEqual({
+      powerCycleMin: 70,
+      powerCycleMax: 70,
+      lifetimeMin: 23,
+      lifetimeMax: 75,
+      operatingMax: 100,
+    });
+  });
+
+  it("temperature stats: SCT fallback, -128 dropped, NVMe warning threshold", () => {
+    const ata = parseSmartctl(
+      {
+        ...fixture("sata-ssd-devstat.json"),
+        temperature: { current: 40 },
+        ata_sct_status: { temperature: { current: 40, lifetime_max: 61, lifetime_min: -128 } },
+        // smartctl's attribute-derived guess must not override chirp's own attribute rule.
+        endurance_used: { current_percent: 55 },
+        ata_device_statistics: { pages: [{ number: 7, table: [{ offset: 8, flags: { valid: false } }] }] },
+      },
+      { devicePath: "/dev/sda" },
+    ).disk;
+    expect(ata.temperatureStats).toEqual({
+      powerCycleMin: null,
+      powerCycleMax: null,
+      lifetimeMin: null,
+      lifetimeMax: 61,
+      operatingMax: null,
+    });
+    expect(ata.ata?.wearLevelPercentUsed).toBe(0); // invalid devstat entry -> attribute 177
+    expect(ata.ata?.bytesWritten).toBeNull();
+
+    const nvme = parseSmartctl(
+      { ...fixture("nvme-ok.json"), nvme_composite_temperature_threshold: { warning: 84, critical: 85 } },
+      { devicePath: "/dev/nvme0" },
+    ).disk;
+    expect(nvme.temperatureStats?.operatingMax).toBe(84);
   });
 
   it("NVMe healthy", () => {

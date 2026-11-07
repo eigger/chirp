@@ -31,7 +31,7 @@ Collects the CPU temperature, disk SMART health and host metrics (memory, load, 
 | `netdev.ts` | `/sys/class/net` interfaces, kind classification, default filter + `CHIRP_NET_INCLUDE`/`EXCLUDE` |
 | `power.ts` | RAPL powercap zones (energy -> watts, wrap), hwmon power/fans/voltages |
 | `hostMetrics.ts` | `HostMetrics`: samples every section in isolation, keeps the previous sample for rates, logs a failure once |
-| `smartctl.ts` | Runs and parses `smartctl -j -a -n standby`, device discovery (`--scan`), the read-side ID rule |
+| `smartctl.ts` | Runs and parses `smartctl -j -a -l devstat -l scttempsts -n standby`, device discovery (`--scan`), the read-side ID rule |
 | `diskIdentity.ts` | Stable disk IDs without waking the disk; pinned in `disk-ids.json` |
 | `health.ts` | **The only** health logic |
 | `scheduler.ts` | `Collector`: sensors + host metrics 10 s / SMART 300 s, concurrency 2, keeps standby values, cached discovery |

@@ -42,7 +42,15 @@ export const AtaInfo = z.object({
   pendingSectors: z.number().nullable(),
   offlineUncorrectable: z.number().nullable(),
   udmaCrcErrors: z.number().nullable(),
+  /**
+   * Percent of rated endurance used. Prefers the Device Statistics
+   * "Percentage Used Endurance Indicator" (may exceed 100), else derived from
+   * a normalised life-left attribute (177/231/233).
+   */
   wearLevelPercentUsed: z.number().nullable(),
+  /** Device Statistics "Logical Sectors Written/Read" x logical sector size. Optional: absent on older servers. */
+  bytesWritten: z.number().nullable().optional(),
+  bytesRead: z.number().nullable().optional(),
 });
 
 export const NvmeInfo = z.object({
@@ -55,6 +63,21 @@ export const NvmeInfo = z.object({
   dataUnitsWritten: z.number().nullable(),
   bytesWritten: z.number().nullable(),
 });
+
+/**
+ * Temperatures the disk itself records, in °C (ATA SCT Status / Device
+ * Statistics page 5; NVMe warning threshold). Each value is null when the disk
+ * does not report it.
+ */
+export const DiskTemperatureStats = z.object({
+  powerCycleMin: temp,
+  powerCycleMax: temp,
+  lifetimeMin: temp,
+  lifetimeMax: temp,
+  /** Specified maximum operating temperature (NVMe: warning composite temperature threshold). */
+  operatingMax: temp,
+});
+export type DiskTemperatureStats = z.infer<typeof DiskTemperatureStats>;
 
 export const Disk = z.object({
   /**
@@ -78,6 +101,8 @@ export const Disk = z.object({
   rotationRate: z.number().nullable(),
   standby: z.boolean(),
   temperature: temp,
+  /** Optional: absent on older servers; null when the disk reports none of these values. */
+  temperatureStats: DiskTemperatureStats.nullable().optional(),
   powerOnHours: z.number().nullable(),
   powerCycleCount: z.number().nullable(),
   smartPassed: z.boolean().nullable(),

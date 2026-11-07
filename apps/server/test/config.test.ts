@@ -224,7 +224,7 @@ describe("smartctl argv", () => {
   it("always passes -n standby and the -d type as separate argv entries", async () => {
     const r = await readDisk(cfg(), "/dev/sda", "sat");
     expect(r.disk.standby).toBe(true);
-    expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual(["-j", "-a", "-n", "standby", "-d", "sat", "/dev/sda"]);
+    expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual(["-j", "-a", "-l", "devstat", "-l", "scttempsts", "-n", "standby", "-d", "sat", "/dev/sda"]);
   });
 
   it("refuses an option-like device or type without running smartctl", async () => {
